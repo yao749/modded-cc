@@ -12,10 +12,9 @@
 use std::collections::BTreeMap;
 
 use chrono::Utc;
-use serde::Deserialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::AppError;
 use crate::provider::model::{join_base_path, AuthType, ModelsEnvelopeKind};
@@ -148,6 +147,39 @@ fn worth_trying_next(e: &DiscoveryError) -> bool {
     )
 }
 
+/// 第二层候选 path —— 借鉴 DSH: 用户配的 path 跑不通时, 试一些常见的替代路径.
+/// 比如 DashScope 的 `/api/v1/models` 就不是 OpenAI 兼容的 `/v1/models`.
+/// 按常见度排序, 越靠前越可能命中.
+fn common_model_paths(auth_type: AuthType) -> Vec<&'static str> {
+    match auth_type {
+        AuthType::GeminiApiKey | AuthType::GeminiInteractionsApiKey => {
+            vec!["/v1beta/models"]
+        }
+        _ => vec![
+            "/v1/models",            // OpenAI 标准 (最常见)
+            "/models",               // 简化版 (某些网关)
+            "/api/v1/models",        // DashScope 原始端点
+            "/compatible-mode/v1/models", // DashScope 兼容模式
+            "/api/v1/deployments/models", // DashScope 部署列表
+            "/v1beta/models",        // 部分 Anthropic 兼容端点
+        ],
+    }
+}
+
+/// 把一个 base_url 和一组 path 组合成去重的候选 URL 列表.
+fn all_candidate_urls(base_url: &str, paths: &[&str]) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &path in paths {
+        for url in candidate_model_urls(base_url, path) {
+            if seen.insert(url.clone()) {
+                urls.push(url);
+            }
+        }
+    }
+    urls
+}
+
 async fn fetch_url(
     client: &reqwest::Client,
     url: &str,
@@ -169,23 +201,63 @@ async fn fetch_url(
     parse_by_kind(target.envelope, target.auth_type, &text)
 }
 
-/// 按 [`candidate_model_urls`] 逐个尝试, 返回第一个成功的。全部失败时返回**首选地址**的错误
-/// (它最可能是用户预期的那个, 后面的只是猜测)。
+/// 两层探测 (借鉴 DSH):
+///   第一层 — 只试用户配置的 path (默认 /v1/models), 多 base 候选
+///   第二层 — 第一层全败后, 试常见替代 path × 多 base 候选
+/// 全部失败时返回首选地址的错误 (它最可能是用户预期的那个).
 pub async fn probe(
     client: &reqwest::Client,
     target: &ProbeTarget,
 ) -> Result<Discovered, DiscoveryError> {
     let mut first_err: Option<DiscoveryError> = None;
-    for url in candidate_model_urls(&target.base_url, &target.path) {
-        match fetch_url(client, &url, target).await {
-            Ok(models) => return Ok(Discovered { models, url }),
-            Err(e) if worth_trying_next(&e) => {
-                warn!(%url, error = %e, "models 候选地址失败, 尝试下一个");
-                first_err.get_or_insert(e);
+
+    // ===== 第一层: 原始 path (和原来一样) =====
+    {
+        let mut got_recoverable = false;
+        for url in candidate_model_urls(&target.base_url, &target.path) {
+            match fetch_url(client, &url, target).await {
+                Ok(models) => return Ok(Discovered { models, url }),
+                Err(e) if worth_trying_next(&e) => {
+                    warn!(%url, error = %e, "models 候选地址失败, 尝试下一个");
+                    first_err.get_or_insert(e);
+                    got_recoverable = true;
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
+        }
+        // 第一层没报致命错但全败 → 进第二层
+        if !got_recoverable {
+            return Err(first_err.unwrap_or_else(|| DiscoveryError::InvalidResponse("没有可尝试的 models 地址".into())));
         }
     }
+
+    // ===== 第二层: DSH 风格多 path 候选 =====
+    // 用户配的 path 已经在第一层试过了, 这里跳过它避免重复请求.
+    let common_paths = common_model_paths(target.auth_type);
+    let unique_paths: Vec<&str> = common_paths
+        .into_iter()
+        .filter(|p| *p != target.path.as_str())
+        .collect();
+
+    // 把用户配置的 path 挪到最后 (它已经在第一层失败过, 但可能有极端场景)
+    let mut urls = all_candidate_urls(&target.base_url, &unique_paths);
+    // 用户原始 path 的 fallback 候选也加回来 (已去重)
+    urls.extend(candidate_model_urls(&target.base_url, &target.path));
+
+    info!(%target.base_url, ?unique_paths, "第一层失败, 进入第二层多 path 探测");
+    for url in urls {
+        match fetch_url(client, &url, target).await {
+            Ok(models) => {
+                info!(%url, "第二层探测命中模型列表");
+                return Ok(Discovered { models, url });
+            }
+            Err(e) if worth_trying_next(&e) => {
+                debug!(%url, error = %e, "第二层候选失败, 继续下一个");
+            }
+            Err(e) => return Err(e), // 致命错 (401/403/网络断开)
+        }
+    }
+
     Err(first_err.unwrap_or_else(|| DiscoveryError::InvalidResponse("没有可尝试的 models 地址".into())))
 }
 
