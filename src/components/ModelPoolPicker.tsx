@@ -9,7 +9,9 @@ import {
 } from "@/components/ui/select";
 import {
   CAPABILITY_LABEL,
+  defaultInputsForCapability,
   type CapabilityCategory,
+  type InputModality,
   type ModelInfo,
   type ModelPoolEntry,
 } from "@/types";
@@ -106,6 +108,7 @@ export function ModelPoolPicker({
       model_name: modelName ?? "",
       priority: maxPri + 1,
       enabled: true,
+      supported_inputs: defaultInputsForCapability(active),
     };
     onChange([...entries, newEntry]);
   }
@@ -127,6 +130,7 @@ export function ModelPoolPicker({
       model_name: m.id,
       priority: nextPri++,
       enabled: true,
+      supported_inputs: defaultInputsForCapability(active),
     }));
     onChange([...entries, ...newEntries]);
   }
@@ -273,6 +277,7 @@ export function ModelPoolPicker({
             models={models}
             disabled={disabled}
             onModelNameChange={(v) => updateCap(active, idx, { model_name: v })}
+            onInputsChange={(v) => updateCap(active, idx, { supported_inputs: v })}
             onEnabledToggle={() => updateCap(active, idx, { enabled: !entry.enabled })}
             onMoveUp={() => moveUp(active, idx)}
             onMoveDown={() => moveDown(active, idx)}
@@ -298,7 +303,7 @@ export function ModelPoolPicker({
   );
 }
 
-/** 单行: 模型输入 + 启用开关 + 上/下/删 */
+/** 单行: 模型输入 + 模态声明 + 启用开关 + 上/下/删 */
 function EntryRow({
   entry,
   idx,
@@ -306,6 +311,7 @@ function EntryRow({
   models,
   disabled,
   onModelNameChange,
+  onInputsChange,
   onEnabledToggle,
   onMoveUp,
   onMoveDown,
@@ -317,18 +323,17 @@ function EntryRow({
   models: ModelInfo[] | null;
   disabled?: boolean;
   onModelNameChange: (v: string) => void;
+  onInputsChange: (v: InputModality[]) => void;
   onEnabledToggle: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
   onRemove: () => void;
 }) {
-  // 从发现列表里匹配的候选 (只显示有至少一个匹配项的场景)
   const discoveryCandidates = useMemo(() => {
     if (!models) return [];
     return models.filter((m) => !m.id.startsWith("@cf/cloudflare/clef"));
   }, [models]);
 
-  // 当前模型在发现列表里的推断分类, 如果和当前行分类不一致就提示
   const inferredMismatch = useMemo(() => {
     if (!models) return null;
     const found = models.find((m) => m.id === entry.model_name);
@@ -337,6 +342,21 @@ function EntryRow({
     }
     return null;
   }, [models, entry.model_name, entry.capability]);
+
+  /** 切换某个模态的选中状态, 至少保留 text */
+  function toggleInput(mod: InputModality) {
+    const set = new Set(entry.supported_inputs);
+    if (set.has(mod)) {
+      set.delete(mod);
+      // 至少保留 text
+      if (!set.has("text") && mod !== "text") {
+        set.add("text");
+      }
+    } else {
+      set.add(mod);
+    }
+    onInputsChange(Array.from(set));
+  }
 
   return (
     <div
@@ -426,6 +446,43 @@ function EntryRow({
             模型名匹配到, 但自动推断分类是「{CAPABILITY_LABEL[inferredMismatch]}」
           </div>
         )}
+      </div>
+
+      {/* 模态声明 —— 借鉴 DSH 的 input: [text, image] */}
+      <div
+        style={{
+          display: "flex",
+          gap: 4,
+          flexShrink: 0,
+        }}
+        title="该模型支持的输入模态, 路由时会校验请求体是否兼容"
+      >
+        {(["text", "image", "audio"] as InputModality[]).map((mod) => {
+          const active = entry.supported_inputs.includes(mod);
+          return (
+            <button
+              key={mod}
+              type="button"
+              onClick={() => toggleInput(mod)}
+              disabled={disabled || (mod === "text" && entry.supported_inputs.length <= 1 && active)}
+              style={{
+                padding: "2px 7px",
+                fontSize: 11,
+                borderRadius: 10,
+                border: active
+                  ? "1.5px solid var(--accent, #3b82f6)"
+                  : "1.5px solid var(--border-2)",
+                background: active ? "var(--fill-butter, #fff5d6)" : "transparent",
+                color: active ? "var(--ink)" : "var(--ink-3)",
+                fontWeight: active ? 600 : 400,
+                cursor: disabled ? "not-allowed" : "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {mod === "text" ? "文本" : mod === "image" ? "图片" : "音频"}
+            </button>
+          );
+        })}
       </div>
 
       {/* 启用开关 */}

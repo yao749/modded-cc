@@ -297,6 +297,30 @@ export interface ModelPoolEntry {
   /** 同 capability 下的优先级, 0 = 最高. */
   priority: number;
   enabled: boolean;
+  /** 该模型支持的输入模态, 默认从 capability 推断:
+   *  - vision/multimodal → ["text", "image"]
+   *  - speech → ["text", "audio"]
+   *  - llm/embedding → ["text"]
+   * 借鉴 DSH 的 input: [text, image] 字段. */
+  supported_inputs: InputModality[];
+}
+
+/** 三种输入模态. */
+export type InputModality = "text" | "image" | "audio";
+
+/** 从 capability 推断默认的 supported_inputs. */
+export function defaultInputsForCapability(
+  cap: CapabilityCategory,
+): InputModality[] {
+  switch (cap) {
+    case "vision":
+    case "multimodal":
+      return ["text", "image"];
+    case "speech":
+      return ["text", "audio"];
+    default:
+      return ["text"];
+  }
 }
 
 export interface ModelDiscoveryDto {

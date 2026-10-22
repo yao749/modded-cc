@@ -618,6 +618,8 @@ pub async fn save_quota_usage_snapshot(
 
 // ============== 能力分类模型池 CRUD ==============
 
+use serde_json as sj;
+
 /// 模型池中的一条记录: 某订阅下, 某模型, 归属于某能力分类, 在该分类池内的优先级.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPoolEntry {
@@ -627,6 +629,18 @@ pub struct ModelPoolEntry {
     pub model_name: String,
     pub priority: i64,
     pub enabled: bool,
+    /// 该模型支持的输入模态, 如 ["text"] / ["text","image"] / ["text","image","audio"].
+    /// 借鉴 DSH 的 input 字段. None 表示未声明, 路由时兜底当作 ["text"].
+    pub supported_inputs: Option<Vec<String>>,
+}
+
+/// 从 capability 推断默认的 supported_inputs (新建条目时用).
+pub fn default_inputs_for_capability(cap: &str) -> Vec<String> {
+    match cap {
+        "vision" | "multimodal" => vec!["text".into(), "image".into()],
+        "speech" => vec!["text".into(), "audio".into()],
+        _ => vec!["text".into()],
+    }
 }
 
 /// 读某个订阅的全部模型池内容, 按 capability + priority 排序.
@@ -635,7 +649,7 @@ pub async fn load_model_pool(
     sub_id: Uuid,
 ) -> AppResult<Vec<ModelPoolEntry>> {
     let rows = sqlx::query(
-        "SELECT id, subscription_id, capability, model_name, priority, enabled
+        "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
          FROM subscription_model_pool
          WHERE subscription_id = ?
          ORDER BY capability ASC, priority ASC",
@@ -649,6 +663,9 @@ pub async fn load_model_pool(
         let sub_id_str: String = row.try_get("subscription_id")?;
         let sub = Uuid::parse_str(&sub_id_str)
             .map_err(|e| AppError::internal(format!("invalid uuid: {e}")))?;
+        let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
+        let supported_inputs: Option<Vec<String>> = inputs_raw
+            .and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
         out.push(ModelPoolEntry {
             id: row.try_get("id")?,
             subscription_id: sub,
@@ -656,6 +673,7 @@ pub async fn load_model_pool(
             model_name: row.try_get("model_name")?,
             priority: row.try_get("priority")?,
             enabled: row.try_get::<i64, _>("enabled")? != 0,
+            supported_inputs,
         });
     }
     Ok(out)
@@ -675,10 +693,15 @@ pub async fn save_model_pool(
 
     let now = Utc::now().timestamp_millis();
     for e in entries {
+        let inputs_json = e
+            .supported_inputs
+            .as_ref()
+            .map(|v| sj::to_string(v).unwrap_or_else(|_| "[]".into()))
+            .unwrap_or_else(|| "[]".into());
         sqlx::query(
             "INSERT INTO subscription_model_pool
-             (id, subscription_id, capability, model_name, priority, enabled, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, subscription_id, capability, model_name, priority, enabled, supported_inputs, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&e.id)
         .bind(sub_id.to_string())
@@ -686,6 +709,7 @@ pub async fn save_model_pool(
         .bind(&e.model_name)
         .bind(e.priority)
         .bind(e.enabled as i64)
+        .bind(&inputs_json)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -695,22 +719,30 @@ pub async fn save_model_pool(
     Ok(())
 }
 
-/// 路由时用: 给定订阅 + 能力分类, 取 enabled=1 且优先级最高 (priority 最小) 的模型名.
+/// 路由时用: 给定订阅 + 能力分类, 取 enabled=1 且优先级最高 (priority 最小) 的首选条目.
+/// 返回 (model_name, supported_inputs). supported_inputs 为 None 时路由兜底当作 ["text"].
 pub async fn pick_pool_model(
     pool: &SqlitePool,
     sub_id: Uuid,
     capability: &str,
-) -> AppResult<Option<String>> {
-    let model: Option<String> = sqlx::query_scalar(
-        "SELECT model_name FROM subscription_model_pool
+) -> AppResult<Option<(String, Option<Vec<String>>)>> {
+    let rows = sqlx::query(
+        "SELECT model_name, supported_inputs FROM subscription_model_pool
          WHERE subscription_id = ? AND capability = ? AND enabled = 1
          ORDER BY priority ASC LIMIT 1",
     )
     .bind(sub_id.to_string())
     .bind(capability)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(model)
+    if let Some(row) = rows.into_iter().next() {
+        let name: String = row.try_get("model_name")?;
+        let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
+        let inputs: Option<Vec<String>> = inputs_raw.and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
+        Ok(Some((name, inputs)))
+    } else {
+        Ok(None)
+    }
 }
 
 /// 同上, 但一次返回该订阅某能力分类池内全部启用的模型 (按 priority).

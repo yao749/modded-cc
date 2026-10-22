@@ -1339,6 +1339,8 @@ pub struct ModelPoolEntryDto {
     pub model_name: String,
     pub priority: i64,
     pub enabled: bool,
+    #[serde(default)]
+    pub supported_inputs: Option<Vec<String>>,
 }
 
 impl From<crate::subscription::store::ModelPoolEntry> for ModelPoolEntryDto {
@@ -1350,6 +1352,7 @@ impl From<crate::subscription::store::ModelPoolEntry> for ModelPoolEntryDto {
             model_name: e.model_name,
             priority: e.priority,
             enabled: e.enabled,
+            supported_inputs: e.supported_inputs,
         }
     }
 }
@@ -1397,6 +1400,7 @@ pub async fn save_model_pool(
                 model_name: e.model_name,
                 priority: e.priority,
                 enabled: e.enabled,
+                supported_inputs: e.supported_inputs,
             }
         })
         .collect();

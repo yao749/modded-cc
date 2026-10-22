@@ -86,6 +86,52 @@ fn slot_forced_effort(slot_efforts: &SlotEfforts, vm_name: VirtualModelName) -> 
     slot_efforts.get(vm_name.slot()).map(str::to_string)
 }
 
+/// 分析请求体里实际用到哪些输入模态.
+/// 遍历 messages 数组, 逐个检查 content blocks 的 type 字段:
+///   - OpenAI chat_completions: { type: "image_url" } → image
+///   - OpenAI responses: input 里含 image_url / input_image → image
+///   - 同时检查 audio 相关 type
+/// 返回 body 里实际出现过的模态集合 (可能为空).
+fn detect_request_inputs(body: &serde_json::Value) -> Vec<&'static str> {
+    use serde_json::Value;
+    let mut out = Vec::new();
+
+    // chat.completions 格式: messages[].content 可能是 string 或 [{type: ...}]
+    if let Some(msgs) = body.pointer("/messages").and_then(Value::as_array) {
+        for msg in msgs {
+            let Some(content) = msg.get("content") else { continue };
+            // content 为 string: 纯文本, 跳过
+            if content.is_string() { continue; }
+            // content 为 array: 遍历 blocks
+            if let Some(blocks) = content.as_array() {
+                for block in blocks {
+                    let Some(block_type) = block.get("type").and_then(Value::as_str) else { continue };
+                    match block_type {
+                        "image_url" | "image" => if !out.contains(&"image") { out.push("image"); },
+                        "input_image" => if !out.contains(&"image") { out.push("image"); },
+                        "audio" | "audio_url" | "input_audio" => if !out.contains(&"audio") { out.push("audio"); },
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    // OpenAI Responses 格式: input 字段含 blocks
+    if let Some(inputs) = body.get("input").and_then(Value::as_array) {
+        for inp in inputs {
+            if let Some(block_type) = inp.get("type").and_then(Value::as_str) {
+                match block_type {
+                    "image_url" | "input_image" | "image" => if !out.contains(&"image") { out.push("image"); },
+                    "audio_url" | "input_audio" | "audio" => if !out.contains(&"audio") { out.push("audio"); },
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// 按 char_indices 找 UTF-8 边界, 避免切坏多字节字符
 pub(crate) fn truncate_body(text: &str, limit: usize) -> String {
     if text.len() <= limit {
@@ -237,6 +283,13 @@ pub async fn dispatch(
     let mut skipped_wrong_protocol: Vec<String> = Vec::new();
     // 能力分类池下订阅未配置该能力模型时跳过
     let mut skipped_no_pool_model: Vec<String> = Vec::new();
+    // 能力分类池下模型声明的输入模态与请求体不兼容时跳过
+    let mut skipped_input_mismatch: Vec<String> = Vec::new();
+
+    // 预分析请求体里实际用到的模态: 遍历 messages content blocks 看有没有 image_url / audio
+    let body_inputs = detect_request_inputs(&request_body);
+    let body_has_image = body_inputs.contains(&"image");
+    let body_has_audio = body_inputs.contains(&"audio");
 
     for sub_id in order.candidate_ids {
         let attempt_id = Uuid::new_v4();
@@ -297,7 +350,33 @@ pub async fn dispatch(
                 )
                 .await
                 {
-                    Ok(Some(m)) => m,
+                    Ok(Some((m, supported_inputs))) => {
+                        // 模态校验: 请求体带 image 但模型不支持, 跳过这个候选
+                        let supports_image = supported_inputs
+                            .as_deref()
+                            .map(|v| v.iter().any(|s| s == "image"))
+                            .unwrap_or(false);
+                        let supports_audio = supported_inputs
+                            .as_deref()
+                            .map(|v| v.iter().any(|s| s == "audio"))
+                            .unwrap_or(false);
+                        if (body_has_image && !supports_image)
+                            || (body_has_audio && !supports_audio)
+                        {
+                            warn!(
+                                %sub_id,
+                                display_name = %guard.row.display_name,
+                                model = %m,
+                                body_has_image,
+                                body_has_audio,
+                                model_inputs = ?supported_inputs,
+                                "model pool entry input mismatch, skipping"
+                            );
+                            skipped_input_mismatch.push(guard.row.display_name.clone());
+                            continue;
+                        }
+                        m
+                    }
                     Ok(None) => {
                         warn!(
                             %sub_id,
@@ -1711,6 +1790,19 @@ pub async fn dispatch(
                 summary.push(format!(
                     "- {}: 未配置兜底模型, fallback 下已跳过",
                     g.row.display_name
+                ));
+            } else if skipped_input_mismatch.contains(&g.row.display_name) {
+                let wants: Vec<&str> = {
+                    let mut v = Vec::new();
+                    if body_has_image { v.push("图片"); }
+                    if body_has_audio { v.push("音频"); }
+                    if v.is_empty() { v.push("未知模态"); }
+                    v
+                };
+                summary.push(format!(
+                    "- {}: 请求包含 {} 模态, 所选模型未声明支持, 已跳过",
+                    g.row.display_name,
+                    wants.join("/")
                 ));
             } else if skipped_no_pool_model.contains(&g.row.display_name) {
                 summary.push(format!(
