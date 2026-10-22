@@ -1,0 +1,161 @@
+import { useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/api/tauri";
+import { runtime } from "@/runtime";
+import type { SettingsPatch, TuiInstallOutcome } from "@/types";
+import { RELEASE_NOTES_KEY } from "@/hooks/useReleaseNotes";
+
+export const SETTINGS_KEY = ["settings"] as const;
+export const PROXY_STATUS_KEY = ["proxy-status"] as const;
+export const TUI_LAUNCH_INFO_KEY = ["tui-launch-info"] as const;
+
+export const ENV_SNIPPET_KEY = ["env-snippet"] as const;
+
+export function useSettings() {
+  return useQuery({
+    queryKey: SETTINGS_KEY,
+    queryFn: () => api.getSettings(),
+  });
+}
+
+export function useUpdateSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: SettingsPatch) => api.updateSettings(patch),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: SETTINGS_KEY });
+      // 让「有未生效改动」立即出现, 不等 5 秒轮询
+      queryClient.invalidateQueries({ queryKey: PROXY_STATUS_KEY });
+    },
+  });
+}
+
+export function useGenerateNewToken() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.generateNewToken(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: SETTINGS_KEY });
+    },
+  });
+}
+
+/** 进程内重启代理监听. 无论成败都刷新状态与环境变量片段 (端口可能顺延 / 回滚). */
+export function useRestartProxy() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.restartProxy(),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: PROXY_STATUS_KEY });
+      queryClient.invalidateQueries({ queryKey: ENV_SNIPPET_KEY });
+    },
+  });
+}
+
+export function useProxyStatus() {
+  return useQuery({
+    queryKey: PROXY_STATUS_KEY,
+    queryFn: () => api.proxyStatus(),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useLanAddresses(enabled: boolean) {
+  return useQuery({
+    queryKey: ["lan-addresses"],
+    queryFn: () => api.listLanAddresses(),
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+/** sidecar 的路径在进程生命周期内不变, 但 `in_path` / `install_blocked` / `local_bin_off_path`
+ * 会在 app 外面发生变化 (用户在终端里手动装了 / 卸了, 或者手动解决了「已被占用」的冲突) ——
+ * 这三个字段不能跟 path 一样按「永不过期」处理, 否则用户在终端修好冲突之后回到设置页, 按钮还是
+ * 灰的。`refetchOnMount: "always"` + `refetchOnWindowFocus: true` 保证挂载 / 切回来都重新读;
+ * `staleTime` 给 3 秒而不是 0——alt-tab 在这个页面上来回切几次 (每次都触发 focus) 不该每次都
+ * 真去拉起一次 PowerShell / 重新读两个几 MB 的二进制比字节, 3 秒内的重复聚焦直接用缓存 (fix-3 B5)。 */
+export function useTuiLaunchInfo() {
+  return useQuery({
+    queryKey: TUI_LAUNCH_INFO_KEY,
+    queryFn: () => api.tuiLaunchInfo(),
+    staleTime: 3_000,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** 添加到 PATH / 移除. 两个 command 都返回 TuiInstallOutcome, 成功时把其中的 info 立即写回缓存
+ * (界面不用等下一次 refetch 就能翻转); cancelled 标志留给调用方从 mutation 的 `.data` 里自己读
+ * (展示「已取消」提示用)。`onSettled` 无论成败都强制重新拉一次最新状态——installed_at 的具体值、
+ * blocked 的具体原因这些只有后端知道, 成功时的 info 只是"这次操作完之后"的快照, 不代表期间没有
+ * 别的因素 (比如用户几乎同时在终端里也动了一下) 让它又变了 (fix-2 F2)。 */
+export function useTuiPathInstall() {
+  const queryClient = useQueryClient();
+  const onSuccess = (outcome: TuiInstallOutcome) => queryClient.setQueryData(TUI_LAUNCH_INFO_KEY, outcome.info);
+  const onSettled = () => queryClient.invalidateQueries({ queryKey: TUI_LAUNCH_INFO_KEY });
+  return {
+    install: useMutation({ mutationFn: () => api.installTuiCommand(), onSuccess, onSettled }),
+    uninstall: useMutation({ mutationFn: () => api.uninstallTuiCommand(), onSuccess, onSettled }),
+  };
+}
+
+/** 在 App 顶层挂一次: 后端发 settings_changed (托盘改开机自启 / 标记更新内容已读) 时让相关缓存失效; proxy_restarted 时刷新代理状态。 */
+export function useSettingsEventBridge() {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    const promise = runtime.listen("settings_changed", () => {
+      queryClient.invalidateQueries({ queryKey: SETTINGS_KEY });
+      // 桌面与网页界面同时开着时, 一端标记「更新内容」已读, 另一端的未读星号跟着消失
+      queryClient.invalidateQueries({ queryKey: RELEASE_NOTES_KEY });
+    });
+    // 代理重启 / 停止后 (含另一端触发的), 状态与环境变量片段随之刷新
+    const proxyPromise = runtime.listen("proxy_restarted", () => {
+      queryClient.invalidateQueries({ queryKey: PROXY_STATUS_KEY });
+      queryClient.invalidateQueries({ queryKey: ENV_SNIPPET_KEY });
+    });
+    return () => {
+      promise.then((unlisten) => unlisten()).catch(() => {});
+      proxyPromise.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, [queryClient]);
+}
+
+export function useEnvSnippet() {
+  return useQuery({
+    queryKey: ENV_SNIPPET_KEY,
+    queryFn: () => api.envSnippet(),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useProxyEndpoint() {
+  const proxy = useProxyStatus();
+  const settings = useSettings();
+  return {
+    port: proxy.data?.port ?? 23456,
+    /** 后端给定的真实 base URL (含 scheme + 真实端口); 未加载完成时为 undefined. */
+    baseUrl: proxy.data?.base_url,
+    token: settings.data?.auth_token ?? "",
+    running: proxy.data?.running ?? false,
+  };
+}
+
+/**
+ * 首次启动写入默认更新源,只在 update_source 为 null 时触发一次。
+ * 默认 "china" — 主要用户群是国内, GitHub 直连不稳定,中国大陆 OSS 镜像可达性更好;
+ * 国际用户在 Settings 里一键切回 "international" 即可,后续不再被覆盖.
+ */
+export function useUpdateSourceAutoInit() {
+  const { data } = useSettings();
+  const updateMut = useUpdateSettings();
+  const sentRef = useRef(false);
+
+  useEffect(() => {
+    if (!data || sentRef.current) return;
+    if (data.update_source != null) return; // 已经设置过
+
+    sentRef.current = true;
+    void updateMut.mutateAsync({ update_source: "china" });
+  }, [data, updateMut]);
+}

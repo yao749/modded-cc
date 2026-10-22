@@ -1,0 +1,55 @@
+id: google_gemini_interactions
+display_name: "Google Gemini (Interactions API)"
+icon: google
+category: first_party
+description:
+  zh: "Google Gemini 新 Interactions API (/v1beta/interactions), 通过协议翻译适配 Anthropic Messages 接口"
+  en: "Google Gemini's new Interactions API (/v1beta/interactions), adapted to the Anthropic Messages API via protocol translation"
+  ja: "Google Gemini の新しい Interactions API（/v1beta/interactions）。プロトコル変換で Anthropic Messages API に対応"
+homepage: "https://aistudio.google.com"
+docs_url: "https://ai.google.dev/gemini-api/docs/interactions"
+api_key_url: "https://aistudio.google.com/app/apikey"
+
+compatibility: partial
+compatibility_notes:
+  zh: "Interactions API 较新 (部分模型仍 preview)。cc-router 内部做 Anthropic Messages ↔ Interactions step_list 翻译, 强制走 stream + alt=sse, 客户端非流式时由 cc-router 收齐再吐 JSON。model 在请求 body 里 (不嵌 URL), 与旧 generateContent 的 Google AI Studio provider 各走独立翻译路径。工具结果回传 (function_result) 的精确形态以实测为准。"
+  en: "The Interactions API is fairly new (some models are still in preview). cc-router translates Anthropic Messages ↔ Interactions step_list internally and always uses stream + alt=sse; for non-streaming clients, cc-router collects the stream and returns JSON. The model goes in the request body (not the URL), and this provider uses a translation path separate from the older generateContent-based Google AI Studio provider. The exact shape of returned tool results (function_result) follows observed behavior."
+  ja: "Interactions API は比較的新しく、一部のモデルはまだ preview です。cc-router が内部で Anthropic Messages ↔ Interactions step_list を変換し、常に stream + alt=sse を使います。クライアントが非ストリーミングの場合は cc-router がまとめて JSON で返します。model はリクエスト body に入り（URL には入りません）、旧 generateContent 版の Google AI Studio プロバイダとは別の変換経路を使います。ツール結果（function_result）の返却形式は実測に基づいています。"
+
+endpoints:
+  - id: ai_studio
+    label: "Google AI Studio · Interactions"
+    description:
+      zh: "generativelanguage.googleapis.com /v1beta/interactions, 使用 AI Studio 控制台生成的 API Key. model 在 body 里, 由 cc-router 翻译层填入订阅 slot 的真实模型名。"
+      en: "generativelanguage.googleapis.com /v1beta/interactions, using an API key created in the AI Studio console. The model goes in the body; cc-router's translation layer fills in the subscription slot's actual model name."
+      ja: "generativelanguage.googleapis.com /v1beta/interactions。AI Studio コンソールで発行した API Key を使用します。model は body に入り、cc-router の変換層がサブスクリプションのスロットの実際のモデル名を設定します。"
+    base_url: "https://generativelanguage.googleapis.com"
+    messages_path: "/v1beta/interactions"
+    region: global
+    billing: pay_as_you_go
+
+default_endpoint: ai_studio
+
+auth:
+  type: gemini_interactions_api_key
+  header_name: "x-goog-api-key"
+  header_format: raw
+
+required_headers: {}
+
+forward_headers: []
+
+model_discovery:
+  enabled: true
+  path: "/v1beta/models"
+  cache_ttl_hours: 168
+  example_models:
+    - "gemini-3.5-flash"
+    - "gemini-3.1-flash-lite"
+    - "gemini-2.5-flash"
+    - "gemini-2.5-pro"
+
+# Interactions 翻译层: 客户端 thinking.{effort, budget_tokens} → generation_config.thinking_level (low/medium/high);
+# 上游 thought step 的 signature → Anthropic thinking content_block (signature 字段携带, provider 标签 gemini_interactions)。
+expose_reasoning: true
+default_reasoning_effort: "medium"

@@ -1,0 +1,86 @@
+id: ollama
+display_name: "Ollama"
+icon: ollama
+category: aggregator
+description:
+  zh: "Ollama 本地推理服务（Anthropic 兼容端点 + System One 决策端点）"
+  en: "Ollama local inference service (Anthropic-compatible endpoint + System One decision endpoint)"
+  ja: "Ollama ローカル推論サービス（Anthropic 互換エンドポイント + System One 意思決定エンドポイント）"
+homepage: "https://ollama.com"
+docs_url: "https://docs.ollama.com/api/anthropic-compatibility"
+api_key_url: "https://ollama.com/settings/keys"
+
+compatibility: untested
+compatibility_notes:
+  zh: |
+    1. Ollama 仅监听 localhost:11434, 没有公网端点; 云端模型 (如 glm-4.7:cloud)
+       也是通过本地 Ollama 客户端转发, 使用前必须本机已安装 Ollama 并 pull/login
+       对应模型.
+    2. Token默认填写"ollama".
+    3. 模型需手动输入 tag (如 "qwen3-coder", "glm-4.7:cloud"). 本地模型用 `ollama list` 查看.
+    4. 「System One」端点 (/v1/systemone) 只服务决策类模型 (如 clef-flash), 需 Ollama 0.35
+       及以上; 这类订阅只能绑定到 model-jev.
+  en: |
+    1. Ollama only listens on localhost:11434 and has no public endpoint; cloud models (e.g. glm-4.7:cloud)
+       are also forwarded through the local Ollama client, so Ollama must be installed locally and the
+       model pulled / logged in first.
+    2. The token defaults to "ollama".
+    3. Enter the model tag manually (e.g. "qwen3-coder", "glm-4.7:cloud"). Use `ollama list` to see local models.
+    4. The "System One" endpoint (/v1/systemone) only serves decision models (e.g. clef-flash) and needs
+       Ollama 0.35 or later; such subscriptions can only be bound to model-jev.
+  ja: |
+    1. Ollama は localhost:11434 のみで待ち受け、公開エンドポイントはありません。クラウドモデル（例: glm-4.7:cloud）
+       もローカルの Ollama クライアント経由で転送されるため、事前に Ollama をインストールし、
+       対象モデルを pull / login しておく必要があります。
+    2. トークンの既定値は "ollama" です。
+    3. モデル tag は手動で入力してください（例: "qwen3-coder"、"glm-4.7:cloud"）。ローカルモデルは `ollama list` で確認できます。
+    4. 「System One」エンドポイント（/v1/systemone）は意思決定モデル（例: clef-flash）専用で、Ollama 0.35
+       以降が必要です。このサブスクリプションは model-jev にのみ割り当てられます。
+
+endpoints:
+  - id: localhost
+    label:
+      zh: "本地 · 默认端口"
+      en: "Local · Default port"
+      ja: "ローカル · 既定ポート"
+    description:
+      zh: "本机已运行 Ollama (默认 11434 端口)"
+      en: "Ollama running on this machine (default port 11434)"
+      ja: "このマシンで Ollama が起動済み（既定ポート 11434）"
+    base_url: "http://localhost:11434"
+    messages_path: "/v1/messages"
+    region: local
+    billing: free
+  - id: localhost_systemone
+    label:
+      zh: "本地 · System One（决策模型）"
+      en: "Local · System One (decision models)"
+      ja: "ローカル · System One（意思決定モデル）"
+    description:
+      zh: "Ollama 0.35+ 的 /v1/systemone, 只用于 model-jev"
+      en: "Ollama 0.35+ /v1/systemone, for model-jev only"
+      ja: "Ollama 0.35+ の /v1/systemone。model-jev 専用"
+    base_url: "http://localhost:11434"
+    messages_path: "/v1/systemone"
+    protocol: systemone
+    example_models: ["clef-flash"]
+    region: local
+    billing: free
+
+default_endpoint: localhost
+
+auth:
+  type: api_key
+  header_name: "x-api-key"
+  header_format: raw
+
+required_headers:
+  anthropic-version: "2023-06-01"
+
+forward_headers: []
+
+model_discovery:
+  enabled: false
+  path: "/v1/models"
+  cache_ttl_hours: 24
+  example_models: []

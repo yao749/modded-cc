@@ -1,0 +1,1029 @@
+import { useState, type ReactNode } from "react";
+import { Link } from "react-router";
+// Boxes 图标随「其他 AI Agent」tab 一起暂时下线, 恢复时加回 import
+import { Bot, Plug } from "lucide-react";
+import ClaudeCode from "@lobehub/icons/es/ClaudeCode";
+import Cline from "@lobehub/icons/es/Cline";
+import Codex from "@lobehub/icons/es/Codex";
+import HermesAgent from "@lobehub/icons/es/HermesAgent";
+import KiloCode from "@lobehub/icons/es/KiloCode";
+import OpenClaw from "@lobehub/icons/es/OpenClaw";
+import OpenCode from "@lobehub/icons/es/OpenCode";
+import Qwen from "@lobehub/icons/es/Qwen";
+import RooCode from "@lobehub/icons/es/RooCode";
+import { ClaudeCodeSettingsEditor } from "@/components/ClaudeCodeSettingsEditor";
+import { CopyableBlock } from "@/components/CopyableBlock";
+import { useEnvSnippet, useProxyEndpoint, useSettings } from "@/hooks/useSettings";
+import { buildRecommendedCodexAuth, buildRecommendedCodexConfig } from "@/lib/recommendedCodexConfig";
+import { buildRecommendedEnv } from "@/lib/recommendedClaudeCodeEnv";
+import { useT } from "@/i18n";
+import { cn } from "@/lib/utils";
+
+type Tab =
+  | "claude-code"
+  | "codex"
+  | "cc-switch"
+  | "openclaw"
+  | "hermes"
+  | "opencode"
+  | "generic"
+  | "others";
+
+const ICON_SIZE = 14;
+const COMING_SOON_SIZE = 28;
+
+const COMING_SOON: { name: string; icon: ReactNode }[] = [
+  { name: "Kilo Code", icon: <KiloCode.Avatar size={COMING_SOON_SIZE} /> },
+  { name: "Cline", icon: <Cline.Avatar size={COMING_SOON_SIZE} /> },
+  { name: "Qwen Code", icon: <Qwen.Avatar size={COMING_SOON_SIZE} /> },
+  { name: "Roo Code", icon: <RooCode.Avatar size={COMING_SOON_SIZE} /> },
+];
+
+export function GuidePage() {
+  const { t } = useT();
+  const [tab, setTab] = useState<Tab>("generic");
+
+  const TABS: { id: Tab; label: string; icon: ReactNode; disabled?: boolean }[] = [
+    { id: "generic", label: t("guide.tab.generic"), icon: <Plug size={ICON_SIZE} /> },
+    { id: "claude-code", label: "Claude Code", icon: <ClaudeCode.Color size={ICON_SIZE} /> },
+    { id: "codex", label: "Codex", icon: <Codex size={ICON_SIZE} /> },
+    { id: "cc-switch", label: "cc-switch", icon: <Bot size={ICON_SIZE} /> },
+    { id: "openclaw", label: "OpenClaw", icon: <OpenClaw.Color size={ICON_SIZE} /> },
+    { id: "hermes", label: "Hermes Agent", icon: <HermesAgent size={ICON_SIZE} /> },
+    { id: "opencode", label: "OpenCode", icon: <OpenCode size={ICON_SIZE} /> },
+    // 「其他 AI Agent」暂时隐藏 (2026-09-06): 内容只有 coming-soon 网格, 等有实质接入说明再放回.
+    // OthersTab / COMING_SOON / Boxes 图标都保留, 恢复时把这一行加回来即可.
+    // { id: "others", label: t("guide.tab.others"), icon: <Boxes size={ICON_SIZE} /> },
+  ];
+
+  return (
+    <>
+      <div className="page-header">
+        <h1>{t("guide.title")}</h1>
+        <div className="subtitle">{t("guide.subtitle")}</div>
+      </div>
+
+      <div className="tabs">
+        {TABS.map(({ id, label, icon, disabled }) => (
+          <button
+            key={id}
+            className={cn("tab", tab === id && "active")}
+            onClick={() => setTab(id)}
+            disabled={disabled}
+            type="button"
+          >
+            {icon}
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "claude-code" && <ClaudeCodeTab />}
+      {tab === "codex" && <CodexTab />}
+      {tab === "cc-switch" && <CcSwitchTab />}
+      {tab === "openclaw" && <OpenClawTab />}
+      {tab === "hermes" && <HermesAgentTab />}
+      {tab === "opencode" && <OpenCodeTab />}
+      {tab === "generic" && <GenericTab />}
+      {tab === "others" && <OthersTab />}
+    </>
+  );
+}
+
+/* ============================================================
+ * 通用接入方式: 三个对话入口各一张卡 + 模型列表 + Jev (System One), 内容对应 README「入口」章节.
+ * Base URL 用真实端口拼, 不写死 23456.
+ * ============================================================ */
+
+type GenericEntry = {
+  id: "messages" | "responses" | "chat";
+  path: string;
+  /** 相对 origin 的 base URL 后缀: messages 不带 /v1, 另外两个带 */
+  suffix: "" | "/v1";
+  noteCount: number;
+};
+
+const GENERIC_ENTRIES: GenericEntry[] = [
+  { id: "messages", path: "/v1/messages", suffix: "", noteCount: 4 },
+  { id: "responses", path: "/v1/responses", suffix: "/v1", noteCount: 5 },
+  { id: "chat", path: "/v1/chat/completions", suffix: "/v1", noteCount: 7 },
+];
+
+/**
+ * 虚拟模型名与别名, 照抄 src-tauri/src/virtual_model/model.rs::parse —— 唯一事实来源.
+ * fuzzy: 模糊模式 + 一个示例 (claude-* 前缀匹配, gpt-*-<tier> 按 '-' 分段匹配档位).
+ */
+const VM_ALIASES: { vm: string; fuzzy: { pattern: string; example: string }[] }[] = [
+  {
+    vm: "model-fable",
+    fuzzy: [
+      { pattern: "claude-fable*", example: "claude-fable-5-5" },
+      { pattern: "gpt-*-astra", example: "gpt-6-astra" },
+    ],
+  },
+  {
+    vm: "model-opus",
+    fuzzy: [
+      { pattern: "claude-opus*", example: "claude-opus-5-5" },
+      { pattern: "gpt-*-sol", example: "gpt-6-sol" },
+    ],
+  },
+  {
+    vm: "model-sonnet",
+    fuzzy: [
+      { pattern: "claude-sonnet*", example: "claude-sonnet-5-5" },
+      { pattern: "gpt-*-terra", example: "gpt-6-terra" },
+    ],
+  },
+  {
+    vm: "model-haiku",
+    fuzzy: [
+      { pattern: "claude-haiku*", example: "claude-haiku-5-5" },
+      { pattern: "gpt-*-luna", example: "gpt-6-luna" },
+    ],
+  },
+];
+
+function VirtualModelNames() {
+  const { t } = useT();
+  return (
+    <div>
+      {VM_ALIASES.map((a) => (
+        <div className="vm-alias" key={a.vm}>
+          <span className="mono strong">{a.vm}</span>
+          <span className="vm-alias-list">
+            {a.fuzzy.map((f) => (
+              <span key={f.pattern}>
+                <span className="mono">{f.pattern}</span>
+                <span className="vm-alias-eg">{t("guide.generic.vm.eg", { example: f.example })}</span>
+              </span>
+            ))}
+          </span>
+        </div>
+      ))}
+      <div className="field-hint" style={{ marginTop: 6 }}>{t("guide.generic.vm.prefixNote")}</div>
+    </div>
+  );
+}
+
+/** 目录项 → 卡片锚点 id。顺序即页面上卡片的顺序。 */
+const GENERIC_TOC: { id: string; titleKey: string; path: string }[] = [
+  ...GENERIC_ENTRIES.map((e) => ({ id: `generic-${e.id}`, titleKey: `guide.generic.${e.id}.title`, path: e.path })),
+  { id: "generic-models", titleKey: "guide.generic.models.title", path: "GET /v1/models" },
+  { id: "generic-systemone", titleKey: "guide.generic.systemone.title", path: "POST /v1/systemone" },
+];
+
+/** 平滑滚到卡片; 系统开了「减少动态效果」时直接跳。用按钮而非 #锚点: 网页界面是 HashRouter, # 被路由占用。 */
+function scrollToCard(id: string) {
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  document.getElementById(id)?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+}
+
+function GenericToc() {
+  const { t } = useT();
+  return (
+    <nav className="guide-toc" aria-label={t("guide.generic.toc")}>
+      <div className="guide-toc-title">{t("guide.generic.toc")}</div>
+      <ol>
+        {GENERIC_TOC.map((item) => (
+          <li key={item.id}>
+            <button type="button" onClick={() => scrollToCard(item.id)}>
+              <span>{t(item.titleKey)}</span>
+              <span className="mono guide-toc-path">{item.path}</span>
+            </button>
+          </li>
+        ))}
+      </ol>
+    </nav>
+  );
+}
+
+function GenericTab() {
+  const { t } = useT();
+  const { baseUrl, port, token } = useProxyEndpoint();
+  const settings = useSettings();
+  const authEnabled = settings.data?.auth_enabled ?? true;
+  const origin = baseUrl ?? `http://127.0.0.1:${port}`;
+  // 与 Codex 标签里的片段同源 (含真实 token), 复制即用.
+  const codexSnap = { baseUrl: origin, token };
+  const codexToml = buildRecommendedCodexConfig(codexSnap, t("guide.codex.configComment")).trimEnd();
+  const codexAuth = buildRecommendedCodexAuth(codexSnap).trimEnd();
+
+  return (
+    <>
+      <div className="field-hint" style={{ marginBottom: 16 }}>
+        {t("guide.generic.intro")}
+      </div>
+      <GenericToc />
+      {GENERIC_ENTRIES.map((e) => (
+        <div className="card section" key={e.id} id={`generic-${e.id}`}>
+          <div className="card-head">
+            <div className="card-title" style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              {t(`guide.generic.${e.id}.title`)}
+              <span className="mono" style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 400 }}>
+                {e.path}
+              </span>
+            </div>
+            <span className="card-sub">{t(`guide.generic.${e.id}.clients`)}</span>
+          </div>
+          <div className="card-body">
+            <table className="table" style={{ fontSize: 12, tableLayout: "fixed", marginBottom: 14 }}>
+              <tbody>
+                <tr>
+                  <td style={{ width: 104, color: "var(--ink-3)" }}>{t("guide.generic.row.baseUrl")}</td>
+                  <td>
+                    <CopyableBlock text={`${origin}${e.suffix}`} variant="inline" />
+                    <div className="field-hint" style={{ marginTop: 6 }}>
+                      {t(`guide.generic.${e.id}.baseUrlHint`)}
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ color: "var(--ink-3)" }}>{t("guide.generic.row.token")}</td>
+                  <td>
+                    {authEnabled ? (
+                      <CopyableBlock text={token} variant="inline" />
+                    ) : (
+                      <span style={{ color: "var(--ink-3)" }}>{t("guide.generic.tokenOff")}</span>
+                    )}
+                    <div className="field-hint" style={{ marginTop: 6 }}>
+                      {t(`guide.generic.${e.id}.auth`)}
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style={{ color: "var(--ink-3)", verticalAlign: "top", paddingTop: 12 }}>
+                    {t("guide.generic.row.model")}
+                  </td>
+                  <td>
+                    <VirtualModelNames />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            {e.id === "responses" && (
+              <>
+                <div className="field-hint" style={{ marginBottom: 8 }}>
+                  {t("guide.generic.responses.snippetHint")}
+                </div>
+                <CopyableBlock text={codexToml} className="mb-3" />
+                <div className="field-hint" style={{ marginBottom: 8 }}>
+                  {t("guide.generic.responses.authSnippetHint")}
+                </div>
+                <CopyableBlock text={codexAuth} className="mb-3" />
+              </>
+            )}
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+              {t("guide.generic.notesTitle")}
+            </div>
+            <ul className="guide-notes">
+              {Array.from({ length: e.noteCount }, (_, i) => (
+                <li key={i}>{t(`guide.generic.${e.id}.note${i + 1}`)}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ))}
+
+      {/* GET /v1/models: 免鉴权, 同时兼容 OpenAI / Anthropic 两种列表格式 (handler.rs::models) */}
+      <div className="card section" id="generic-models">
+        <div className="card-head">
+          <div className="card-title" style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+            {t("guide.generic.models.title")}
+            <span className="mono" style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 400 }}>
+              GET /v1/models
+            </span>
+          </div>
+          <span className="card-sub">{t("guide.generic.models.clients")}</span>
+        </div>
+        <div className="card-body">
+          <table className="table" style={{ fontSize: 12, tableLayout: "fixed", marginBottom: 14 }}>
+            <tbody>
+              <tr>
+                <td style={{ width: 104, color: "var(--ink-3)" }}>{t("guide.generic.models.row.url")}</td>
+                <td>
+                  <CopyableBlock text={`${origin}/v1/models`} variant="inline" />
+                </td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>{t("guide.generic.row.token")}</td>
+                <td>{t("guide.generic.models.authNone")}</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>{t("guide.generic.models.row.format")}</td>
+                <td>{t("guide.generic.models.format")}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="field-hint" style={{ marginBottom: 8 }}>{t("guide.generic.models.curlHint")}</div>
+          <CopyableBlock text={`curl ${origin}/v1/models`} className="mb-3" />
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{t("guide.generic.notesTitle")}</div>
+          <ul className="guide-notes">
+            <li>{t("guide.generic.models.note1")}</li>
+            <li>{t("guide.generic.models.note2")}</li>
+          </ul>
+        </div>
+      </div>
+
+      <SystemOneCard origin={origin} token={token} authEnabled={authEnabled} />
+    </>
+  );
+}
+
+/**
+ * POST /v1/systemone: Jev 决策协议原样透传, 只走 model-jev (proxy/systemone.rs)。
+ * 调用方是用户自己的代码, 所以给一段用真实端口 / 令牌拼好的 curl, 复制即可验证。
+ */
+function SystemOneCard({ origin, token, authEnabled }: { origin: string; token: string; authEnabled: boolean }) {
+  const { t } = useT();
+  const body = {
+    model: "model-jev",
+    state: "Hello World",
+    questions: {
+      says_hello: { type: "noul", instructions: "Does the state text contain a greeting?" },
+    },
+  };
+  const curl = [
+    `curl ${origin}/v1/systemone \\`,
+    `  -H "Content-Type: application/json" \\`,
+    ...(authEnabled ? [`  -H "Authorization: Bearer ${token}" \\`] : []),
+    // 多行缩进的 JSON 放在单引号里, 粘到 shell 照样能跑, 也不用横向滚动才能读全
+    `  -d '${JSON.stringify(body, null, 2)}'`,
+  ].join("\n");
+  return (
+    <div className="card section" id="generic-systemone">
+      <div className="card-head">
+        <div className="card-title" style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          {t("guide.generic.systemone.title")}
+          <span className="mono" style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 400 }}>
+            POST /v1/systemone
+          </span>
+        </div>
+        <span className="card-sub">{t("guide.generic.systemone.clients")}</span>
+      </div>
+      <div className="card-body">
+        <table className="table" style={{ fontSize: 12, tableLayout: "fixed", marginBottom: 14 }}>
+          <tbody>
+            <tr>
+              <td style={{ width: 104, color: "var(--ink-3)" }}>{t("guide.generic.systemone.row.url")}</td>
+              <td>
+                <CopyableBlock text={`${origin}/v1/systemone`} variant="inline" />
+                <div className="field-hint" style={{ marginTop: 6 }}>{t("guide.generic.systemone.urlHint")}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style={{ color: "var(--ink-3)" }}>{t("guide.generic.row.token")}</td>
+              <td>
+                {authEnabled ? (
+                  <CopyableBlock text={token} variant="inline" />
+                ) : (
+                  <span style={{ color: "var(--ink-3)" }}>{t("guide.generic.tokenOff")}</span>
+                )}
+                <div className="field-hint" style={{ marginTop: 6 }}>{t("guide.generic.systemone.auth")}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style={{ color: "var(--ink-3)" }}>{t("guide.generic.row.model")}</td>
+              <td>
+                <span className="mono strong">model-jev</span>
+                <div className="field-hint" style={{ marginTop: 6 }}>{t("guide.generic.systemone.modelHint")}</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="field-hint" style={{ marginBottom: 8 }}>{t("guide.generic.systemone.curlHint")}</div>
+        <CopyableBlock text={curl} className="mb-3" />
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{t("guide.generic.notesTitle")}</div>
+        <ul className="guide-notes">
+          {Array.from({ length: 5 }, (_, i) => (
+            <li key={i}>{t(`guide.generic.systemone.note${i + 1}`)}</li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function OthersTab() {
+  const { t } = useT();
+  return (
+    <div className="card section">
+      <div className="card-head">
+        <div className="card-title">{t("guide.others.title")}</div>
+      </div>
+      <div className="card-body">
+        <div className="brand-grid">
+          {COMING_SOON.map(({ name, icon }) => (
+            <div key={name} className="brand-card">
+              {icon}
+              <span>{name}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClaudeCodeTab() {
+  const { t } = useT();
+  const { port, baseUrl, token, running } = useProxyEndpoint();
+  const env = useEnvSnippet();
+
+  // snippet 展示用. baseUrl 未到达时(首屏) 用 settings.proxy_port 兜底, 与 Rust local_base_url 同语义.
+  const effectiveBaseUrl = baseUrl ?? `http://127.0.0.1:${port}`;
+  const claudeJson = JSON.stringify(
+    { env: buildRecommendedEnv({ baseUrl: effectiveBaseUrl, token }) },
+    null,
+    2,
+  );
+
+  return (
+    <>
+      {/* 代理监听地址 */}
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.proxy.title")}</div>
+          <span className="card-sub mono">
+            127.0.0.1:{port} ·{" "}
+            {running ? t("settings.proxy.statusRunning") : t("guide.proxy.statusNotStarted")}
+          </span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint">
+            {t("guide.proxy.intro1")}
+            <Link
+              to="/settings?tab=proxy"
+              style={{
+                color: "var(--accent-ink)",
+                textDecoration: "none",
+                margin: "0 4px",
+              }}
+            >
+              {t("guide.proxy.settingsLink")}
+            </Link>
+            {t("guide.proxy.intro2")}
+          </div>
+        </div>
+      </div>
+
+      {/* 内嵌编辑器: 实时查看与一键写入 ~/.claude/settings.json */}
+      <ClaudeCodeSettingsEditor />
+
+      {/* 方式 1: settings.json (推荐) */}
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.method1.title")}</div>
+          <span className="card-sub">{t("guide.method1.sub")}</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.method1.desc")}
+          </div>
+          <table
+            className="table"
+            style={{
+              marginBottom: 14,
+              fontSize: 12,
+              tableLayout: "fixed",
+            }}
+          >
+            <tbody>
+              <tr>
+                <td style={{ width: 90, color: "var(--ink-3)" }}>macOS</td>
+                <td className="mono">~/.claude/settings.json</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>Linux</td>
+                <td className="mono">~/.claude/settings.json</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>Windows</td>
+                <td className="mono">%USERPROFILE%\.claude\settings.json</td>
+              </tr>
+            </tbody>
+          </table>
+          <CopyableBlock text={claudeJson} />
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            <span className="mono">ANTHROPIC_AUTH_TOKEN</span>
+            {t("guide.method1.note1")}
+            <Link
+              to="/settings?tab=access"
+              style={{
+                color: "var(--accent-ink)",
+                textDecoration: "none",
+                margin: "0 4px",
+              }}
+            >
+              {t("guide.proxy.settingsLink")}
+            </Link>
+            {t("guide.method1.note2")}
+          </div>
+        </div>
+      </div>
+
+      {/* 方式 2: env */}
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.method2.title")}</div>
+          <span className="card-sub">{t("guide.method2.sub")}</span>
+        </div>
+        <div className="card-body">
+          {env.data ? (
+            <CopyableBlock text={env.data} highlight />
+          ) : (
+            <div className="field-hint">{t("common.loading")}</div>
+          )}
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.method2.note1")}
+            <span className="mono">~/.zshrc</span>
+            {t("guide.method2.note2")}
+            <span className="mono">~/.bashrc</span>
+            {t("guide.method2.note3")}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function CcSwitchTab() {
+  const { t } = useT();
+  const { port, token } = useProxyEndpoint();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const ccSwitchJson = JSON.stringify(
+    {
+      env: {
+        ANTHROPIC_BASE_URL: baseUrl,
+        ANTHROPIC_AUTH_TOKEN: token,
+        API_TIMEOUT_MS: "3000000",
+        ANTHROPIC_MODEL: "model-opus",
+        ANTHROPIC_DEFAULT_FABLE_MODEL: "model-fable",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "model-opus",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "model-sonnet",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "model-haiku",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        CLAUDE_CODE_ATTRIBUTION_HEADER: "0",
+      },
+    },
+    null,
+    2,
+  );
+
+  return (
+    <>
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.ccswitch.entry.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint">{t("guide.ccswitch.entry.body")}</div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.ccswitch.method1.title")}</div>
+          <span className="card-sub">{t("guide.ccswitch.method1.sub")}</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.ccswitch.method1.desc")}
+          </div>
+          <table
+            className="table"
+            style={{ marginBottom: 14, fontSize: 12, tableLayout: "fixed" }}
+          >
+            <tbody>
+              <tr>
+                <td style={{ width: 130, color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.fieldUrl")}
+                </td>
+                <td className="mono">{baseUrl}</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.fieldKey")}
+                </td>
+                <td className="mono">{token}</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.fieldFormat")}
+                </td>
+                <td>Anthropic Messages</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.fieldAuthField")}
+                </td>
+                <td className="mono">ANTHROPIC_AUTH_TOKEN</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="field-hint" style={{ marginBottom: 8 }}>
+            {t("guide.ccswitch.method1.modelMapTitle")}
+          </div>
+          <table
+            className="table"
+            style={{ fontSize: 12, tableLayout: "fixed" }}
+          >
+            <tbody>
+              <tr>
+                <td style={{ width: 200, color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.modelFable")}
+                </td>
+                <td className="mono">model-fable</td>
+              </tr>
+              <tr>
+                <td style={{ width: 200, color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.modelOpus")}
+                </td>
+                <td className="mono">model-opus</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.modelSonnet")}
+                </td>
+                <td className="mono">model-sonnet</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>
+                  {t("guide.ccswitch.method1.modelHaiku")}
+                </td>
+                <td className="mono">model-haiku</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.ccswitch.method1.note")}
+          </div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.ccswitch.method2.title")}</div>
+          <span className="card-sub">{t("guide.ccswitch.method2.sub")}</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.ccswitch.method2.desc")}
+          </div>
+          <CopyableBlock text={ccSwitchJson} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function OpenClawTab() {
+  const { t } = useT();
+  const { port, token } = useProxyEndpoint();
+
+  const configJson = JSON.stringify(
+    {
+      env: {
+        ANTHROPIC_API_KEY: token,
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+      },
+      agents: {
+        defaults: {
+          model: { primary: "anthropic/model-opus" },
+          models: {
+            "anthropic/model-opus": {
+              params: {
+                cacheRetention: "long",
+                thinking: "adaptive",
+              },
+            },
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  return (
+    <>
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.openclaw.path.title")}</div>
+          <span className="card-sub mono">~/.openclaw/config.json</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint">{t("guide.openclaw.path.note")}</div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.openclaw.config.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.openclaw.config.desc")}
+          </div>
+          <CopyableBlock text={configJson} />
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.openclaw.note.modelRef")}
+          </div>
+          <div className="field-hint">
+            {t("guide.openclaw.note.tokenHint")}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function HermesAgentTab() {
+  const { t } = useT();
+  const { port, token } = useProxyEndpoint();
+
+  const configYaml = `model:
+  provider: anthropic
+  base_url: http://127.0.0.1:${port}
+  api_mode: anthropic_messages
+  default: model-sonnet
+  context_length: 200000`;
+
+  const authCmd = `hermes auth add anthropic --type api-key --api-key ${token || "<your-cc-router-token>"}`;
+
+  return (
+    <>
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.hermes.path.title")}</div>
+          <span className="card-sub mono">~/.hermes/config.yaml</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint">{t("guide.hermes.path.note")}</div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.hermes.config.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.hermes.config.desc")}
+          </div>
+          <CopyableBlock text={configYaml} />
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.hermes.note.apiMode")}
+          </div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.hermes.auth.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.hermes.auth.desc")}
+          </div>
+          <CopyableBlock text={authCmd} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * Codex CLI / Desktop: 纯文字教程, 用户自己改 ~/.codex 下两个文件.
+ * 片段由 recommendedCodexConfig 用真实端口 / token 生成, 与「通用接入方式」里 /v1/responses 卡片同源.
+ */
+const CODEX_SLOTS = ["model-fable", "model-opus", "model-sonnet", "model-haiku"] as const;
+
+function CodexTab() {
+  const { t } = useT();
+  const { port, baseUrl, token, running } = useProxyEndpoint();
+  const origin = baseUrl ?? `http://127.0.0.1:${port}`;
+  const snap = { baseUrl: origin, token };
+  const configToml = buildRecommendedCodexConfig(snap, t("guide.codex.configComment")).trimEnd();
+  const authJson = buildRecommendedCodexAuth(snap).trimEnd();
+  const usageCmd = `codex -p cc-router "hello"`;
+
+  return (
+    <>
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.codex.path.title")}</div>
+          <span className="card-sub mono">
+            {origin} ·{" "}
+            {running ? t("settings.proxy.statusRunning") : t("guide.proxy.statusNotStarted")}
+          </span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.codex.path.intro")}
+          </div>
+          <table
+            className="table"
+            style={{ marginBottom: 0, fontSize: 12, tableLayout: "fixed" }}
+          >
+            <tbody>
+              <tr>
+                <td style={{ width: 90, color: "var(--ink-3)" }}>macOS</td>
+                <td className="mono">~/.codex/config.toml · ~/.codex/auth.json</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>Linux</td>
+                <td className="mono">~/.codex/config.toml · ~/.codex/auth.json</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>Windows</td>
+                <td className="mono">
+                  %USERPROFILE%\.codex\config.toml · %USERPROFILE%\.codex\auth.json
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.codex.config.title")}</div>
+          <span className="card-sub mono">~/.codex/config.toml</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.codex.config.desc")}
+          </div>
+          <CopyableBlock text={configToml} />
+          <ul className="guide-notes" style={{ marginTop: 10 }}>
+            <li>{t("guide.codex.config.note1")}</li>
+            <li>{t("guide.codex.config.note2")}</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.codex.auth.title")}</div>
+          <span className="card-sub mono">~/.codex/auth.json</span>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.codex.auth.desc")}
+          </div>
+          <CopyableBlock text={authJson} />
+          <ul className="guide-notes" style={{ marginTop: 10 }}>
+            <li>{t("guide.codex.auth.note1")}</li>
+            <li>{t("guide.codex.auth.note2")}</li>
+            <li>{t("guide.codex.auth.note3")}</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.codex.usage.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.codex.usage.desc")}
+          </div>
+          <CopyableBlock text={usageCmd} />
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.codex.usage.desktop")}
+          </div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.codex.slots.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.codex.slots.desc")}
+          </div>
+          <table className="table" style={{ fontSize: 12, tableLayout: "fixed", marginBottom: 10 }}>
+            <tbody>
+              {CODEX_SLOTS.map((m) => (
+                <tr key={m}>
+                  <td className="mono" style={{ width: 140 }}>{m}</td>
+                  <td style={{ color: "var(--ink-3)" }}>{t(`guide.codex.slots.${m}`)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="field-hint">{t("guide.codex.slots.note")}</div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.codex.verify.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.codex.verify.desc1")}
+            <Link
+              to="/request-logs"
+              style={{ color: "var(--accent-ink)", textDecoration: "none", margin: "0 4px" }}
+            >
+              {t("guide.codex.verify.logsLink")}
+            </Link>
+            {t("guide.codex.verify.desc2")}
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+            {t("guide.codex.trouble.title")}
+          </div>
+          <ul className="guide-notes">
+            {Array.from({ length: 5 }, (_, i) => (
+              <li key={i}>{t(`guide.codex.trouble.item${i + 1}`)}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function OpenCodeTab() {
+  const { t } = useT();
+  const { port, token } = useProxyEndpoint();
+
+  const configJson = JSON.stringify(
+    {
+      $schema: "https://opencode.ai/config.json",
+      provider: {
+        "cc-router": {
+          npm: "@ai-sdk/anthropic",
+          options: {
+            baseURL: `http://127.0.0.1:${port}`,
+            apiKey: token,
+          },
+          models: {
+            "model-fable": { name: "model-fable" },
+            "model-opus": { name: "model-opus" },
+            "model-sonnet": { name: "model-sonnet" },
+            "model-haiku": { name: "model-haiku" },
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  return (
+    <>
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.opencode.path.title")}</div>
+        </div>
+        <div className="card-body">
+          <table
+            className="table"
+            style={{ fontSize: 12, tableLayout: "fixed" }}
+          >
+            <tbody>
+              <tr>
+                <td style={{ width: 90, color: "var(--ink-3)" }}>
+                  {t("guide.opencode.path.project")}
+                </td>
+                <td className="mono">opencode.json</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--ink-3)" }}>
+                  {t("guide.opencode.path.global")}
+                </td>
+                <td className="mono">~/.config/opencode/opencode.json</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.opencode.path.note")}
+          </div>
+        </div>
+      </div>
+
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("guide.opencode.config.title")}</div>
+        </div>
+        <div className="card-body">
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            {t("guide.opencode.config.desc")}
+          </div>
+          <CopyableBlock text={configJson} />
+          <div className="field-hint" style={{ marginTop: 10 }}>
+            {t("guide.opencode.note.baseUrlTrap")}
+          </div>
+          <div className="field-hint">
+            {t("guide.opencode.note.usage")}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}

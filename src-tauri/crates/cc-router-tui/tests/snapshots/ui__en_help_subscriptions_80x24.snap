@@ -1,0 +1,28 @@
+---
+source: crates/cc-router-tui/tests/ui.rs
+expression: "render(&mut a, 80, 24)"
+---
+"╭ cc-router ─╭ Keys ───────────────────────────────────────────────╮d · v9.9.9 ╮"
+"│ 1 Overview │                                                     │ 5 Logs    │"
+"╰────────────│  1-5                 Jump to a page                 │───────────╯"
+"╭ Subscriptio│  Tab / Shift+Tab     Next / previous page           │───────────╮"
+"│      Name  │  r                   Refresh this page              │           │"
+"│ ▌ ●  智谱主│  ?                   Show / hide this help          │6          │" Hidden by multi-width symbols: [(8, " "), (10, " "), (12, " ")]
+"│   ◐  Kimi  │  Esc                 Close popup                    │ng)        │"
+"│   ✕  示例中│  q / Ctrl+C          Quit                           │-sonnet-4… │" Hidden by multi-width symbols: [(8, " "), (10, " "), (12, " ")]
+"│            │                                                     │           │"
+"│            │  ↑↓ / j k            Previous / next                │           │"
+"│            │  g / G               First / last                   │           │"
+"│            │  PgUp / PgDn         Page up / down                 │           │"
+"│            │  ⏎ / → / l           Open details                   │           │"
+"│            │  Esc / ← / h         Close details                  │           │"
+"│            │  ⏎ / o (in details)  Edit model / reasoning effort  │           │"
+"│            │  s                   Save slot changes              │           │"
+"│            │  e                   Enable / disable               │           │"
+"│            │  t                   Test connection                │           │"
+"│            │  m                   Refresh model list             │           │"
+"│            │  b                   Refresh balance                │           │"
+"│            │  n                   Add subscription               │           │"
+"│            │  d                   Delete subscription            │           │"
+"╰────────────│                                                     │────── 1/3 ╯"
+" 1-5 Tabs   ↑╰────────────────────────────────────────── Esc Close ╯lp   q Quit "

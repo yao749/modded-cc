@@ -1,0 +1,53 @@
+# cargo-deny 配置: 许可证白名单 + RustSec 安全公告 + 依赖来源。
+# 用法 (在 src-tauri/ 下): cargo deny check
+# 没有 PR CI, 发版前本地跑一遍; 安装: cargo install --locked cargo-deny
+
+[graph]
+# 三平台的依赖图都要查: 不列 targets 时只看当前机器, Mac 上会漏掉 gtk / windows-* 这类平台专属依赖。
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+
+[licenses]
+confidence-threshold = 0.9
+# 只放宽松许可证。MPL-2.0 是文件级弱 copyleft, 原样使用不影响本项目 MIT (来自 tauri 的 cssparser / selectors)。
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+
+[licenses.private]
+# publish = false 的自家 crate (cc-router / cc-router-tui) 不参与许可证检查
+ignore = true
+
+[advisories]
+ignore = [
+    # proc-macro-error 停止维护: 只经 gtk 0.18 → glib-macros 进入 Linux 构建, 要等 tauri 换掉 gtk-rs 0.18。
+    { id = "RUSTSEC-2024-0370", reason = "transitive via gtk 0.18 (Linux only), blocked on tauri upstream" },
+]
+
+[bans]
+# tauri 生态里 windows-* / bitflags 等多版本并存是常态, 不当成问题
+multiple-versions = "allow"
+wildcards = "deny"
+# workspace 内的 path 依赖 (cc-router-tui) 不算通配版本; 只对 publish = false 的 crate 生效
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

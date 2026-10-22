@@ -1,0 +1,415 @@
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router";
+import { Download, RefreshCw, ScrollText, X } from "lucide-react";
+import { api } from "@/api/tauri";
+import { runtime } from "@/runtime";
+import { ClientToolBadge } from "@/components/ClientToolBadge";
+import { EmptyState } from "@/components/EmptyState";
+import { Pagination } from "@/components/Pagination";
+import { ProviderLogo } from "@/components/ProviderLogo";
+import { RequestDetailDialog } from "@/components/RequestDetailDialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useRequests } from "@/hooks/useRequests";
+import { useProviders } from "@/hooks/useProviders";
+import { useSubscriptions } from "@/hooks/useSubscriptions";
+import { useT } from "@/i18n";
+import { fmtNum, fmtTime } from "@/lib/format";
+import { VM_META } from "@/lib/virtualModels";
+import { customProviderLabel, providerIconId } from "@/lib/providerLabels";
+import { CLIENT_TOOLS } from "@/lib/clientTools";
+import {
+  CLIENT_TOOL_UNKNOWN_SENTINEL,
+  type RequestLogDto,
+  type RequestLogFilters,
+  type RequestStatus,
+  type VirtualModelName,
+} from "@/types";
+
+const PAGE_SIZE = 10;
+const ALL = "__all__";
+const EMPTY_ITEMS: RequestLogDto[] = [];
+
+const STATUS_TONE: Record<RequestStatus, { tone: "ok" | "warn" | "err"; labelKey: string }> = {
+  success: { tone: "ok",   labelKey: "requestLogs.status.success" },
+  timeout: { tone: "warn", labelKey: "requestLogs.status.timeout" },
+  error:   { tone: "err",  labelKey: "requestLogs.status.error" },
+};
+
+export function RequestLogsPage() {
+  const { t } = useT();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [page, setPage] = useState(1);
+  const [vmFilter, setVmFilter] = useState<VirtualModelName | undefined>();
+  const [providerFilter, setProviderFilter] = useState<string | undefined>();
+  const [statusFilter, setStatusFilter] = useState<RequestStatus | undefined>();
+  const [clientFilter, setClientFilter] = useState<string | undefined>();
+  const subscriptionFilter = searchParams.get("subscription_id") ?? undefined;
+  const [activeRequest, setActiveRequest] = useState<RequestLogDto | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const subs = useSubscriptions();
+  const subFilterLabel = subscriptionFilter
+    ? subs.data?.find((s) => s.id === subscriptionFilter)?.display_name ?? subscriptionFilter
+    : undefined;
+
+  const filters = useMemo<RequestLogFilters | undefined>(() => {
+    if (!vmFilter && !providerFilter && !statusFilter && !clientFilter && !subscriptionFilter)
+      return undefined;
+    return {
+      virtual_model_name: vmFilter,
+      provider_id: providerFilter,
+      status: statusFilter,
+      client_tool: clientFilter,
+      subscription_id: subscriptionFilter,
+    };
+  }, [vmFilter, providerFilter, statusFilter, clientFilter, subscriptionFilter]);
+
+  const query = useRequests(page, PAGE_SIZE, filters);
+  const providers = useProviders();
+  const providerOf = (id: string) => providers.data?.find((p) => p.id === id);
+
+  const total = query.data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const items = query.data?.items ?? EMPTY_ITEMS;
+  const hasActiveFilter = !!filters;
+
+  useEffect(() => {
+    if (query.data && total > 0 && page > totalPages) setPage(totalPages);
+  }, [query.data, total, totalPages, page]);
+
+  function clearFilters() {
+    setVmFilter(undefined);
+    setProviderFilter(undefined);
+    setStatusFilter(undefined);
+    setClientFilter(undefined);
+    setSearchParams({});
+    setPage(1);
+  }
+
+  function clearSubFilter() {
+    const next = new URLSearchParams(searchParams);
+    next.delete("subscription_id");
+    setSearchParams(next);
+    setPage(1);
+  }
+
+  async function exportCsv() {
+    try {
+      const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const filename = `cc-router-requests-${date}.csv`;
+      setExporting(true);
+      if (runtime.kind === "web") {
+        const text = await api.exportRequestsCsvText(filters);
+        runtime.downloadText(filename, text, "text/csv;charset=utf-8");
+        // 行数 = 换行数 - 1 (表头); 文本以 BOM 开头不影响计数
+        const count = Math.max(0, text.split("\n").filter(Boolean).length - 1);
+        setExportMsg(t("requestLogs.export.success", { count }));
+      } else {
+        const path = await runtime.pickSavePath({
+          defaultName: filename,
+          filters: [{ name: "CSV", extensions: ["csv"] }],
+        });
+        if (!path) return; // 用户取消
+        const count = await api.exportRequestsCsv(path, filters);
+        setExportMsg(t("requestLogs.export.success", { count }));
+      }
+    } catch (err) {
+      console.warn("export csv failed", err);
+      setExportMsg(t("requestLogs.export.failed"));
+    } finally {
+      setExporting(false);
+      window.setTimeout(() => setExportMsg(null), 4500);
+    }
+  }
+
+  return (
+    <>
+      <div className="page-actions">
+        <div className="page-header" style={{ margin: 0 }}>
+          <h1>{t("requestLogs.title")}</h1>
+          <div className="subtitle">{t("requestLogs.subtitle")}</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {exportMsg && (
+            <span className="field-hint" style={{ fontSize: 11 }}>
+              {exportMsg}
+            </span>
+          )}
+          <button
+            className="btn"
+            onClick={() => void exportCsv()}
+            disabled={exporting}
+            type="button"
+          >
+            <Download size={12} />
+            {exporting
+              ? t("requestLogs.export.exporting")
+              : t("requestLogs.export.button")}
+          </button>
+          <button
+            className="btn"
+            onClick={() => query.refetch()}
+            disabled={query.isFetching}
+            type="button"
+          >
+            <RefreshCw size={12} className={query.isFetching ? "spin" : undefined} />
+            {t("requestLogs.refresh")}
+          </button>
+        </div>
+      </div>
+
+      <div className="log-filters">
+        <Select
+          value={vmFilter ?? ALL}
+          onValueChange={(v) => {
+            setVmFilter(v === ALL ? undefined : (v as VirtualModelName));
+            setPage(1);
+          }}
+        >
+          <SelectTrigger className="w-auto min-w-[140px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>{t("requestLogs.filter.allVm")}</SelectItem>
+            {(Object.keys(VM_META) as VirtualModelName[]).map((name) => (
+              <SelectItem key={name} value={name}>
+                {name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select
+          value={providerFilter ?? ALL}
+          onValueChange={(v) => {
+            setProviderFilter(v === ALL ? undefined : v);
+            setPage(1);
+          }}
+        >
+          <SelectTrigger className="w-auto min-w-[140px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>{t("requestLogs.filter.allProvider")}</SelectItem>
+            {providers.data?.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {p.display_name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select
+          value={statusFilter ?? ALL}
+          onValueChange={(v) => {
+            setStatusFilter(v === ALL ? undefined : (v as RequestStatus));
+            setPage(1);
+          }}
+        >
+          <SelectTrigger className="w-auto min-w-[140px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>{t("requestLogs.filter.allStatus")}</SelectItem>
+            {(Object.keys(STATUS_TONE) as RequestStatus[]).map((s) => (
+              <SelectItem key={s} value={s}>
+                {t(STATUS_TONE[s].labelKey)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select
+          value={clientFilter ?? ALL}
+          onValueChange={(v) => {
+            setClientFilter(v === ALL ? undefined : v);
+            setPage(1);
+          }}
+        >
+          <SelectTrigger className="w-auto min-w-[140px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>{t("requestLogs.filter.allClient")}</SelectItem>
+            {CLIENT_TOOLS.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {t(c.i18nKey)}
+              </SelectItem>
+            ))}
+            <SelectItem value={CLIENT_TOOL_UNKNOWN_SENTINEL}>
+              {t("requestLogs.filter.clientUnknown")}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+
+        {subscriptionFilter && (
+          <span className="pill accent" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <span className="dot" />
+            {subFilterLabel}
+            <button
+              type="button"
+              onClick={clearSubFilter}
+              style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0, marginLeft: 2, display: "inline-flex" }}
+              aria-label="clear subscription filter"
+            >
+              <X size={12} />
+            </button>
+          </span>
+        )}
+
+        <span
+          className="mono"
+          style={{ marginLeft: "auto", fontSize: 12, color: "var(--ink-3)" }}
+        >
+          {total > 0
+            ? t("requestLogs.summaryFormat", { total, page, pages: totalPages })
+            : t("requestLogs.summaryEmpty")}
+        </span>
+      </div>
+
+      {query.isLoading && <div className="field-hint">{t("common.loading")}</div>}
+
+      {query.data && total === 0 && (
+        <EmptyState
+          icon={ScrollText}
+          message={
+            hasActiveFilter
+              ? t("requestLogs.empty.filtered")
+              : t("requestLogs.empty.none")
+          }
+          action={
+            hasActiveFilter ? (
+              <button className="btn sm" onClick={clearFilters} type="button">
+                {t("requestLogs.clearFilter")}
+              </button>
+            ) : undefined
+          }
+        />
+      )}
+
+      {items.length > 0 && (
+        <div className="card">
+          <table className="table">
+            <thead>
+              <tr>
+                <th style={{ width: 150 }}>{t("requestLogs.col.time")}</th>
+                <th style={{ width: 110 }}>{t("requestLogs.col.status")}</th>
+                <th style={{ width: 130 }}>{t("requestLogs.col.client")}</th>
+                <th style={{ width: 130 }}>{t("requestLogs.col.virtualModel")}</th>
+                <th style={{ width: 200 }}>{t("requestLogs.col.realModel")}</th>
+                <th>{t("requestLogs.col.responseModel")}</th>
+                <th style={{ width: 140 }}>{t("requestLogs.col.provider")}</th>
+                <th style={{ width: 70, textAlign: "right" }}>{t("requestLogs.col.tokensIn")}</th>
+                <th style={{ width: 70, textAlign: "right" }}>{t("requestLogs.col.tokensOut")}</th>
+                <th style={{ width: 90, textAlign: "right" }}>{t("requestLogs.col.latency")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => {
+                const lat = (row.total_latency_ms ?? 0) / 1000;
+                const provider = providerOf(row.provider_id);
+                const status = STATUS_TONE[row.status];
+                const isError = row.status !== "success";
+                return (
+                  <tr
+                    key={row.id}
+                    onClick={() => setActiveRequest(row)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <td className="mono muted">{fmtTime(row.timestamp)}</td>
+                    <td>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span className={`pill ${status.tone}`}>
+                          <span className="dot" />
+                          {t(status.labelKey)}
+                        </span>
+                        {isError && row.http_status != null && (
+                          <span className="pill tag mono">{row.http_status}</span>
+                        )}
+                        {row.is_streaming && (
+                          <span className="pill tag mono" title={t("requestLogs.sse")}>
+                            SSE
+                          </span>
+                        )}
+                        {row.tool_use_count != null && row.tool_use_count > 0 && (
+                          <span
+                            className="pill tag mono"
+                            title={t("requestLogs.col.toolsHint", { count: row.tool_use_count })}
+                          >
+                            🔧 {row.tool_use_count}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <ClientToolBadge
+                        toolId={row.client_tool}
+                        userAgent={row.client_user_agent}
+                      />
+                    </td>
+                    <td className="mono">{row.virtual_model_name}</td>
+                    <td className="mono strong">{row.real_model_name}</td>
+                    <td className="mono muted">{row.response_model_name ?? "—"}</td>
+                    <td>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <ProviderLogo
+                          iconId={provider?.icon ?? providerIconId(row.provider_id)}
+                          size={18}
+                          iconSize={12}
+                        />
+                        <span style={{ fontSize: 12.5 }}>
+                          {provider?.display_name ??
+                            customProviderLabel(row.provider_id, t) ??
+                            row.provider_id}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="mono tnum muted" style={{ textAlign: "right" }}>
+                      {fmtNum(row.input_tokens)}
+                    </td>
+                    <td className="mono tnum strong" style={{ textAlign: "right" }}>
+                      {fmtNum(row.output_tokens)}
+                    </td>
+                    <td className="mono tnum" style={{ textAlign: "right" }}>
+                      {row.total_latency_ms != null ? `${lat.toFixed(2)}s` : "-"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <Pagination
+        total={total}
+        page={page}
+        totalPages={totalPages}
+        onChange={setPage}
+        trailing={
+          hasActiveFilter ? (
+            <button
+              className="btn sm"
+              onClick={clearFilters}
+              type="button"
+              style={{ marginRight: "auto" }}
+            >
+              {t("requestLogs.clearFilter")}
+            </button>
+          ) : undefined
+        }
+      />
+
+      <RequestDetailDialog
+        request={activeRequest}
+        onClose={() => setActiveRequest(null)}
+      />
+    </>
+  );
+}

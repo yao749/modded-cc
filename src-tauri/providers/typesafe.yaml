@@ -1,0 +1,57 @@
+# TypeSafe (Jev 决策模型) provider
+#
+# 实测 (2026-10-06):
+#   - 接口: POST https://api.typesafe.ai/v1/systemone, 非流式 application/json
+#   - 鉴权: 只认 Authorization: Bearer <key>; 用 x-api-key 返回 403
+#   - 响应 model 会把别名解析成具体版本 (jev-latest → jev-1.13.0)
+#   - 错误体 {"detail": {"error_type", "message"}}; 缺字段时 422 (detail 为数组)
+#   - GET /v1/models 返回 {"models": [{name, ...}]}, 不是 OpenAI 形状, 不启用自动发现
+
+id: typesafe
+display_name: "TypeSafe"
+category: first_party
+description:
+  zh: "TypeSafe 的 Jev 决策模型 (System One), 只用于 model-jev"
+  en: "TypeSafe's Jev decision model (System One), for model-jev only"
+  ja: "TypeSafe の Jev 意思決定モデル（System One）。model-jev 専用"
+homepage: "https://typesafe.ai"
+
+compatibility: verified
+compatibility_notes:
+  zh: |
+    1. Jev 不生成文本, 不能给 Claude Code 对话用; 订阅只能绑定到 model-jev, 经 POST /v1/systemone 调用.
+    2. 模型名手动输入: jev-latest (稳定) 或 jev-preview (预览).
+  en: |
+    1. Jev does not generate text and cannot be used for Claude Code chat; subscriptions can only be bound
+       to model-jev and are called through POST /v1/systemone.
+    2. Enter the model name manually: jev-latest (stable) or jev-preview (preview).
+  ja: |
+    1. Jev はテキストを生成しないため Claude Code の会話には使えません。サブスクリプションは model-jev にのみ
+       割り当てられ、POST /v1/systemone 経由で呼び出されます。
+    2. モデル名は手動で入力してください: jev-latest（安定版）または jev-preview（プレビュー）。
+
+endpoints:
+  - id: default
+    label:
+      zh: "全球 · System One"
+      en: "Global · System One"
+      ja: "グローバル · System One"
+    base_url: "https://api.typesafe.ai"
+    messages_path: "/v1/systemone"
+    protocol: systemone
+    region: global
+    billing: pay_as_you_go
+
+default_endpoint: default
+
+auth:
+  type: api_key
+  header_name: "Authorization"
+  header_format: bearer
+
+required_headers: {}
+forward_headers: []
+
+model_discovery:
+  enabled: false
+  example_models: ["jev-latest", "jev-preview"]

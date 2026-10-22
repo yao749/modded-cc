@@ -1,0 +1,28 @@
+---
+source: crates/cc-router-tui/tests/ui.rs
+expression: out
+---
+"╭ cc-router ───────────────────────────────────────────── ● Connected · v9.9.9 ╮"
+"│ 1 Overview   2 Subscriptions   3 Virtual models   4 Live routing   5 Logs    │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"╭ Virtual models ─────────────────────╮╭ model-fallback ───────────────────────╮"
+"│   model-fable       Sequential    2 ││ ▌  1 ✕ 示例中转       自定义          │" Hidden by multi-width symbols: [(49, " "), (51, " "), (53, " "), (55, " "), (64, " "), (66, " "), (68, " ")]
+"│   model-opus        Round-robin   3 ││    2 ● Gemini 中转    will be skipped │" Hidden by multi-width symbols: [(56, " "), (58, " ")]
+"│   model-sonnet      Affinity      3 ││    3 ● Gemini 有兜底  Gemini          │" Hidden by multi-width symbols: [(56, " "), (58, " "), (60, " ")]
+"│   model-haiku       Sequential    0 ││                                       │"
+"│ ▌ model-fallback    Sequential    3 ││                                       │"
+"│   model-jev         Sequential    1 ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"│                                     ││                                       │"
+"╰─────────────────────────────────────╯╰───────── Sequential · 3 subscriptions ╯"
+" 1-5 Tabs   ↑↓ Select   ⏎ Members   m Mode   s Save             ? Help   q Quit "

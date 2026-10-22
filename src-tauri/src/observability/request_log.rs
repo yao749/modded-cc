@@ -1,0 +1,1158 @@
+//! 批量写入请求日志（设计稿 §9.3）。
+//!
+//! 生产端：请求 pipeline 发送 `RequestLogEntry`。
+//! 消费端：独立 tokio 任务累积到 50 条或 5 秒 flush 一次。
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use chrono::{DateTime, Days, Local, NaiveDate, NaiveTime, TimeZone, Utc};
+use sqlx::SqlitePool;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::{mpsc, RwLock};
+use tokio::time::{interval, Duration};
+use tracing::{debug, warn};
+use uuid::Uuid;
+
+use crate::observability::events::{EventEntry, EventKind, Severity};
+use crate::proxy::tool_log::{ToolLogFields, TRUNCATED_MARKER};
+use crate::subscription::model::SubscriptionRuntime;
+use crate::subscription::quota::QuotaPeriod;
+use crate::subscription::store::{save_quota_usage_rows, usage_to_rows, QuotaUsageRow};
+use crate::virtual_model::VirtualModelName;
+
+pub(crate) const DAY_MS: i64 = 86_400_000;
+
+/// `tool_stats_daily.client_tool` 的「未识别」哨兵, 与 `commands/requests.rs::UNKNOWN_SENTINEL`
+/// 及前端 `CLIENT_TOOL_UNKNOWN_SENTINEL` 同值 (单测锁住)。
+pub const TOOL_STATS_UNKNOWN_CLIENT: &str = "__unknown__";
+
+#[derive(Default)]
+struct StatsCounters {
+    request_count: i64,
+    success_count: i64,
+    error_count: i64,
+    timeout_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+    total_duration_ms_sum: i64,
+    total_duration_ms_count: i64,
+    ttft_ms_sum: i64,
+    ttft_ms_count: i64,
+    retry_count_sum: i64,
+    tool_use_count: i64,
+    tool_use_request_count: i64,
+    tool_result_count: i64,
+}
+
+/// 小票专用聚合计数 (receipt_stats_daily), 只有小票需要的 5 列。
+/// 与 StatsCounters 分开是因为聚合 key 多一维 real_model_name。
+#[derive(Default)]
+struct ReceiptCounters {
+    request_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+}
+
+/// 日聚合表 (`request_stats_daily` / `receipt_stats_daily`) 的 key: **本地日历日** `YYYY-MM-DD`。
+///
+/// 存日历日字符串而非「本地午夜的 UTC 瞬时」: 瞬时 → 本地日永远无歧义, 不需要 local → UTC
+/// 反算, DST / 换时区都不会让同一自然日分裂成两行。SQL `date(ts/1000,'unixepoch','localtime')`、
+/// 前端 `getFullYear/getMonth/getDate` 与这里三端天然一致 (migration 019 回填即用该 SQL 表达式)。
+/// 与限额 (`subscription::quota`) 一样按机器本地日历切桶。
+pub(crate) fn local_day_key(ts_ms: i64) -> String {
+    local_day_key_in(ts_ms, &Local)
+}
+
+/// 可注入时区的版本, 供单测用 `FixedOffset` 断言, 不依赖机器时区。
+pub(crate) fn local_day_key_in<Tz: TimeZone>(ts_ms: i64, tz: &Tz) -> String {
+    ms_to_local_date_in(ts_ms, tz).format("%Y-%m-%d").to_string()
+}
+
+/// `now_ms` 所在本地日往前推 `days_back` 天的日历日 key (days_back=0 即今天)。
+/// 用 NaiveDate 减天数而非 `N * DAY_MS` 硬减, DST 日不会偏移。
+pub(crate) fn local_days_ago_key(now_ms: i64, days_back: u32) -> String {
+    local_days_ago_key_in(now_ms, days_back, &Local)
+}
+
+pub(crate) fn local_days_ago_key_in<Tz: TimeZone>(now_ms: i64, days_back: u32, tz: &Tz) -> String {
+    local_days_ago_date_in(now_ms, days_back, tz)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// `now_ms` 所在本地日往前推 `days_back` 天那一天的本地 0 点 **UTC 瞬时** (ms)。
+/// 只用于需要瞬时的场景: 查 `requests` 原始表 (`timestamp >= ?`) 与小票的 `range_start_ms` 展示;
+/// 聚合表过滤一律用日历日 key。DST gap 时取 earliest, 再退回按 UTC 解释兜底 (同 quota)。
+pub(crate) fn local_days_ago_start_ms(now_ms: i64, days_back: u32) -> i64 {
+    local_days_ago_start_ms_in(now_ms, days_back, &Local)
+}
+
+pub(crate) fn local_days_ago_start_ms_in<Tz: TimeZone>(now_ms: i64, days_back: u32, tz: &Tz) -> i64 {
+    let date = local_days_ago_date_in(now_ms, days_back, tz);
+    let midnight = date.and_time(NaiveTime::MIN);
+    tz.from_local_datetime(&midnight)
+        .earliest()
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|| Utc.from_utc_datetime(&midnight))
+        .timestamp_millis()
+}
+
+fn ms_to_local_date_in<Tz: TimeZone>(ts_ms: i64, tz: &Tz) -> NaiveDate {
+    Utc.timestamp_millis_opt(ts_ms)
+        .single()
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+        .with_timezone(tz)
+        .date_naive()
+}
+
+fn local_days_ago_date_in<Tz: TimeZone>(now_ms: i64, days_back: u32, tz: &Tz) -> NaiveDate {
+    let today = ms_to_local_date_in(now_ms, tz);
+    today
+        .checked_sub_days(Days::new(days_back as u64))
+        .unwrap_or(today)
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestLogEntry {
+    pub id: Uuid,
+    pub timestamp_ms: i64,
+    pub virtual_model_name: VirtualModelName,
+    pub subscription_id: Uuid,
+    pub provider_id: String,
+    pub endpoint_id: String,
+    pub real_model_name: String,
+    /// 上游响应里的 message.model 原值(改写前)。错误/超时为 None。
+    pub response_model_name: Option<String>,
+    pub is_streaming: bool,
+    pub status: RequestStatus,
+    pub http_status: Option<u16>,
+    pub ttft_ms: Option<u64>,
+    pub total_latency_ms: Option<u64>,
+    pub upstream_input_tokens: Option<u32>,
+    pub upstream_output_tokens: Option<u32>,
+    pub upstream_cache_creation: Option<u32>,
+    pub upstream_cache_read: Option<u32>,
+    pub retry_count: u32,
+    pub error_message: Option<String>,
+    /// 仅错误路径填充, 截断至 4KB
+    pub upstream_response_body: Option<String>,
+    /// 客户端识别 (Claude Code / Zed / Codex CLI / ...), None 表示未识别 → 前端展示 "unk"
+    pub client_tool: Option<&'static str>,
+    /// 客户端原始 User-Agent (识别成功时也保留, 用于详情抽屉)
+    pub client_user_agent: Option<String>,
+    /// 从 UA 或 stainless headers 提取的版本号
+    pub client_version: Option<String>,
+    /// TCP 对端 IP (来自 axum ConnectInfo, 非 X-Forwarded-For). listen_all=true 时是核心排查信息.
+    pub client_ip: Option<String>,
+    /// 请求入口: "messages" (POST /v1/messages) 或 "responses" (POST /v1/responses).
+    /// 用 &'static str 不是 String 因为枚举的 as_str() 返回 'static slice, 跟 client_tool 同模式.
+    pub entry_kind: Option<&'static str>,
+    /// 下游 (CC ↔ cc-router) 协商的 HTTP 协议版本, 形如 "HTTP/1.1" / "HTTP/2.0".
+    pub downstream_http_version: Option<String>,
+    /// 思考强度 — 客户端本次请求携带的档位。拿不到为 None, 见 [`crate::proxy::effort_log`]。
+    pub client_effort: Option<String>,
+    /// 思考强度 — cc-router 实际发往上游的档位。
+    pub effective_effort: Option<String>,
+    /// `effective_effort` 的来源: "slot" / "client" / "yaml", 未知为 None。
+    pub effort_source: Option<&'static str>,
+    /// 上游响应回显的档位。仅 OpenAI Responses 系能拿到, 其余 provider 恒 None。
+    pub upstream_effort: Option<String>,
+    /// 工具调用观测五格 (stop_reason / 声明数 / 回传数 / 调用数 / 调用名), 见 [`crate::proxy::tool_log`]。
+    /// 刻意用无 `Default` 的子结构: 任何构造点漏写都编译失败。
+    pub tool_calls: ToolLogFields,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RequestStatus {
+    Success,
+    Error,
+    Timeout,
+}
+
+impl RequestStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+const FLUSH_SIZE: usize = 50;
+const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+const BUFFER_MAX: usize = 1000;
+
+/// Add one finished request's usage to the subscription's in-memory quota buckets.
+/// Returns the first period that crossed its limit *because of this entry* (for one-shot alerting).
+pub fn apply_entry_to_quota(
+    rt: &mut SubscriptionRuntime,
+    entry: &RequestLogEntry,
+    now: DateTime<Utc>,
+) -> Option<QuotaPeriod> {
+    let input = entry.upstream_input_tokens.unwrap_or(0) as u64;
+    let output = entry.upstream_output_tokens.unwrap_or(0) as u64;
+    let cc = entry.upstream_cache_creation.unwrap_or(0) as u64;
+    let cr = entry.upstream_cache_read.unwrap_or(0) as u64;
+    if input + output + cc + cr == 0 {
+        return None;
+    }
+    let before = rt.row.token_quotas.first_exceeded(&rt.quota_usage, now);
+    rt.quota_usage.add(now, input, output, cc, cr);
+    let after = rt.row.token_quotas.first_exceeded(&rt.quota_usage, now);
+    match (before, after) {
+        (None, Some(p)) => Some(p),
+        _ => None,
+    }
+}
+
+pub async fn run_consumer(
+    pool: SqlitePool,
+    mut rx: mpsc::Receiver<RequestLogEntry>,
+    app: AppHandle,
+    subscriptions: Arc<RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionRuntime>>>>>,
+    event_tx: mpsc::Sender<EventEntry>,
+) {
+    let mut buffer: VecDeque<RequestLogEntry> = VecDeque::with_capacity(FLUSH_SIZE);
+    let mut ticker = interval(FLUSH_INTERVAL);
+    let mut dirty: HashSet<Uuid> = HashSet::new();
+
+    loop {
+        tokio::select! {
+            maybe_entry = rx.recv() => {
+                match maybe_entry {
+                    Some(entry) => {
+                        let rt = subscriptions.read().await.get(&entry.subscription_id).cloned();
+                        if let Some(rt) = rt {
+                            let now = Utc::now();
+                            let crossed = {
+                                let mut g = rt.write().await;
+                                apply_entry_to_quota(&mut g, &entry, now)
+                            };
+                            dirty.insert(entry.subscription_id);
+                            if let Some(period) = crossed {
+                                let display_name = rt.read().await.row.display_name.clone();
+                                let ev = EventEntry {
+                                    id: Uuid::new_v4(),
+                                    timestamp_ms: now.timestamp_millis(),
+                                    kind: EventKind::QuotaReached,
+                                    severity: Severity::Warn,
+                                    subscription_id: Some(entry.subscription_id),
+                                    request_id: Some(entry.id),
+                                    summary: format!("{display_name} 已达 {} token 限额, 暂停调度至下一周期", period.label_zh()),
+                                    payload: Some(serde_json::json!({ "period": period.as_str() })),
+                                };
+                                if let Err(e) = event_tx.try_send(ev) {
+                                    warn!(?e, subscription_id = %entry.subscription_id, "quota_reached 事件投递失败");
+                                }
+                                if let Err(e) = app.emit(
+                                    "subscription_quota_reached",
+                                    serde_json::json!({ "subscription_id": entry.subscription_id.to_string(), "period": period.as_str() }),
+                                ) {
+                                    warn!(?e, subscription_id = %entry.subscription_id, "quota_reached 事件投递失败");
+                                }
+                            }
+                        }
+                        if buffer.len() >= BUFFER_MAX {
+                            buffer.pop_front();
+                        }
+                        buffer.push_back(entry);
+                        if buffer.len() >= FLUSH_SIZE {
+                            flush(&pool, &mut buffer, &app, &subscriptions, &mut dirty).await;
+                        }
+                    }
+                    None => {
+                        flush(&pool, &mut buffer, &app, &subscriptions, &mut dirty).await;
+                        break;
+                    }
+                }
+            }
+            _ = ticker.tick() => {
+                if !buffer.is_empty() {
+                    flush(&pool, &mut buffer, &app, &subscriptions, &mut dirty).await;
+                }
+            }
+        }
+    }
+}
+
+async fn flush(
+    pool: &SqlitePool,
+    buffer: &mut VecDeque<RequestLogEntry>,
+    app: &AppHandle,
+    subscriptions: &Arc<RwLock<HashMap<Uuid, Arc<RwLock<SubscriptionRuntime>>>>>,
+    dirty: &mut HashSet<Uuid>,
+) {
+    if buffer.is_empty() && dirty.is_empty() {
+        return;
+    }
+    let batch: Vec<RequestLogEntry> = buffer.drain(..).collect();
+    debug!(count = batch.len(), "flushing request logs");
+
+    // 先在外层读锁下把 dirty id 解析成 Arc clone 的列表, 再释放外层锁, 逐个取内层读锁——
+    // 与 run_consumer 的做法一致 (外层 guard 是临时值, 语句结束即释放), 不在持有外层锁时嵌套等内层锁。
+    let dirty_runtimes: Vec<(Uuid, Arc<RwLock<SubscriptionRuntime>>)> = {
+        let map = subscriptions.read().await;
+        dirty
+            .drain()
+            .filter_map(|id| map.get(&id).cloned().map(|rt| (id, rt)))
+            .collect()
+    };
+    let mut quota_rows: Vec<QuotaUsageRow> = Vec::new();
+    for (id, rt) in dirty_runtimes {
+        let g = rt.read().await;
+        quota_rows.extend(usage_to_rows(id, &g.quota_usage));
+    }
+
+    match flush_batch(pool, batch, quota_rows).await {
+        Ok(()) => {}
+        Err(FlushError::BeginFailed { batch, err }) => {
+            warn!(?err, "无法开启事务, 放回 buffer");
+            buffer.extend(batch);
+            let _ = app.emit("log_write_failed", err.to_string());
+        }
+        Err(FlushError::CommitFailed(err)) => {
+            warn!(?err, "提交请求日志事务失败");
+            let _ = app.emit("log_write_failed", err.to_string());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum FlushError {
+    BeginFailed {
+        batch: Vec<RequestLogEntry>,
+        err: sqlx::Error,
+    },
+    CommitFailed(sqlx::Error),
+}
+
+/// 不依赖 AppHandle 的纯 DB 部分, 便于单测。语义:
+/// - begin 失败 → 整批退还给 caller (BeginFailed)
+/// - 单条 INSERT/UPSERT 失败 → 仅 warn (局部丢条)
+/// - commit 失败 → 整批已 drain, 不退还 (CommitFailed)
+pub(crate) async fn flush_batch(
+    pool: &SqlitePool,
+    batch: Vec<RequestLogEntry>,
+    quota_rows: Vec<QuotaUsageRow>,
+) -> Result<(), FlushError> {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return Err(FlushError::BeginFailed { batch, err }),
+    };
+
+    // key → (provider_id, counters); provider_id 取首次写入的 entry 值。
+    let mut stats_acc: HashMap<(String, String, String), (String, StatsCounters)> = HashMap::new();
+    // 小票聚合: key 多 real_model_name 一维 (receipt_stats_daily)。
+    let mut receipt_acc: HashMap<(String, String, String, String), (String, ReceiptCounters)> =
+        HashMap::new();
+    // 工具榜: key → 调用次数。同一行内重复名累加多次 (语义是「调用次数」)。
+    let mut tool_acc: HashMap<(String, String, String), i64> = HashMap::new();
+
+    for entry in batch {
+        let key = (
+            local_day_key(entry.timestamp_ms),
+            entry.virtual_model_name.as_str().to_string(),
+            entry.subscription_id.to_string(),
+        );
+        let day_for_tools = key.0.clone();
+
+        let (_, racc) = receipt_acc
+            .entry((key.0.clone(), key.1.clone(), key.2.clone(), entry.real_model_name.clone()))
+            .or_insert_with(|| (entry.provider_id.clone(), ReceiptCounters::default()));
+        racc.request_count += 1;
+        racc.input_tokens += entry.upstream_input_tokens.unwrap_or(0) as i64;
+        racc.output_tokens += entry.upstream_output_tokens.unwrap_or(0) as i64;
+        racc.cache_creation_tokens += entry.upstream_cache_creation.unwrap_or(0) as i64;
+        racc.cache_read_tokens += entry.upstream_cache_read.unwrap_or(0) as i64;
+
+        let (_, acc) = stats_acc
+            .entry(key)
+            .or_insert_with(|| (entry.provider_id.clone(), StatsCounters::default()));
+        acc.request_count += 1;
+        match entry.status {
+            RequestStatus::Success => acc.success_count += 1,
+            RequestStatus::Error => acc.error_count += 1,
+            RequestStatus::Timeout => acc.timeout_count += 1,
+        }
+        acc.input_tokens += entry.upstream_input_tokens.unwrap_or(0) as i64;
+        acc.output_tokens += entry.upstream_output_tokens.unwrap_or(0) as i64;
+        acc.cache_creation_tokens += entry.upstream_cache_creation.unwrap_or(0) as i64;
+        acc.cache_read_tokens += entry.upstream_cache_read.unwrap_or(0) as i64;
+        if let Some(ms) = entry.total_latency_ms {
+            acc.total_duration_ms_sum += ms as i64;
+            acc.total_duration_ms_count += 1;
+        }
+        if let Some(ms) = entry.ttft_ms {
+            acc.ttft_ms_sum += ms as i64;
+            acc.ttft_ms_count += 1;
+        }
+        acc.retry_count_sum += entry.retry_count as i64;
+
+        let tool_uses = entry.tool_calls.tool_use_count.unwrap_or(0) as i64;
+        acc.tool_use_count += tool_uses;
+        if tool_uses > 0 {
+            acc.tool_use_request_count += 1;
+        }
+        acc.tool_result_count += entry.tool_calls.tool_result_count.unwrap_or(0) as i64;
+        if let Some(names_json) = entry.tool_calls.tool_use_names.as_deref() {
+            let client_key = entry
+                .client_tool
+                .unwrap_or(TOOL_STATS_UNKNOWN_CLIENT)
+                .to_string();
+            if let Ok(names) = serde_json::from_str::<Vec<String>>(names_json) {
+                for name in names {
+                    // 截断标记与空名都不是真实工具名, 跳过以免污染 tool_stats_daily
+                    if name == TRUNCATED_MARKER || name.is_empty() {
+                        continue;
+                    }
+                    *tool_acc
+                        .entry((day_for_tools.clone(), client_key.clone(), name))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+
+        let result = sqlx::query(
+            "INSERT INTO requests (id, timestamp, virtual_model_name, subscription_id,
+                provider_id, endpoint_id, real_model_name, response_model_name,
+                is_streaming, status,
+                http_status, ttft_ms, total_latency_ms,
+                upstream_input_tokens, upstream_output_tokens,
+                upstream_cache_creation, upstream_cache_read,
+                retry_count, error_message, upstream_response_body,
+                client_tool, client_user_agent, client_version, client_ip,
+                entry_kind, downstream_http_version,
+                client_effort, effective_effort, effort_source, upstream_effort,
+                stop_reason, tools_offered_count, tool_result_count, tool_use_count, tool_use_names)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(entry.id.to_string())
+        .bind(entry.timestamp_ms)
+        .bind(entry.virtual_model_name.as_str())
+        .bind(entry.subscription_id.to_string())
+        .bind(entry.provider_id)
+        .bind(entry.endpoint_id)
+        .bind(entry.real_model_name)
+        .bind(entry.response_model_name)
+        .bind(entry.is_streaming as i64)
+        .bind(entry.status.as_str())
+        .bind(entry.http_status.map(|v| v as i64))
+        .bind(entry.ttft_ms.map(|v| v as i64))
+        .bind(entry.total_latency_ms.map(|v| v as i64))
+        .bind(entry.upstream_input_tokens.map(|v| v as i64))
+        .bind(entry.upstream_output_tokens.map(|v| v as i64))
+        .bind(entry.upstream_cache_creation.map(|v| v as i64))
+        .bind(entry.upstream_cache_read.map(|v| v as i64))
+        .bind(entry.retry_count as i64)
+        .bind(entry.error_message)
+        .bind(entry.upstream_response_body)
+        .bind(entry.client_tool)
+        .bind(entry.client_user_agent)
+        .bind(entry.client_version)
+        .bind(entry.client_ip)
+        .bind(entry.entry_kind)
+        .bind(entry.downstream_http_version)
+        .bind(entry.client_effort)
+        .bind(entry.effective_effort)
+        .bind(entry.effort_source)
+        .bind(entry.upstream_effort)
+        .bind(entry.tool_calls.stop_reason)
+        .bind(entry.tool_calls.tools_offered_count.map(|v| v as i64))
+        .bind(entry.tool_calls.tool_result_count.map(|v| v as i64))
+        .bind(entry.tool_calls.tool_use_count.map(|v| v as i64))
+        .bind(entry.tool_calls.tool_use_names)
+        .execute(&mut *tx)
+        .await;
+        if let Err(e) = result {
+            warn!(?e, "写入单条请求日志失败");
+        }
+    }
+
+    // 同事务 UPSERT 聚合结果。requests + 两张 stats 表同进同退,
+    // 即使 cleanup 把 requests 老数据删了, stats 仍然完整。
+    for ((day, vm, sub_id), (provider_id, acc)) in stats_acc {
+        let result = sqlx::query(
+            "INSERT INTO request_stats_daily (
+                day, virtual_model_name, subscription_id, provider_id,
+                request_count, success_count, error_count, timeout_count,
+                input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                total_duration_ms_sum, total_duration_ms_count, ttft_ms_sum, ttft_ms_count,
+                retry_count_sum,
+                tool_use_count, tool_use_request_count, tool_result_count
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (day, virtual_model_name, subscription_id) DO UPDATE SET
+                request_count = request_count + excluded.request_count,
+                success_count = success_count + excluded.success_count,
+                error_count = error_count + excluded.error_count,
+                timeout_count = timeout_count + excluded.timeout_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+                total_duration_ms_sum = total_duration_ms_sum + excluded.total_duration_ms_sum,
+                total_duration_ms_count = total_duration_ms_count + excluded.total_duration_ms_count,
+                ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum,
+                ttft_ms_count = ttft_ms_count + excluded.ttft_ms_count,
+                retry_count_sum = retry_count_sum + excluded.retry_count_sum,
+                tool_use_count = tool_use_count + excluded.tool_use_count,
+                tool_use_request_count = tool_use_request_count + excluded.tool_use_request_count,
+                tool_result_count = tool_result_count + excluded.tool_result_count",
+        )
+        .bind(day)
+        .bind(vm)
+        .bind(sub_id)
+        .bind(provider_id)
+        .bind(acc.request_count)
+        .bind(acc.success_count)
+        .bind(acc.error_count)
+        .bind(acc.timeout_count)
+        .bind(acc.input_tokens)
+        .bind(acc.output_tokens)
+        .bind(acc.cache_creation_tokens)
+        .bind(acc.cache_read_tokens)
+        .bind(acc.total_duration_ms_sum)
+        .bind(acc.total_duration_ms_count)
+        .bind(acc.ttft_ms_sum)
+        .bind(acc.ttft_ms_count)
+        .bind(acc.retry_count_sum)
+        .bind(acc.tool_use_count)
+        .bind(acc.tool_use_request_count)
+        .bind(acc.tool_result_count)
+        .execute(&mut *tx)
+        .await;
+        if let Err(e) = result {
+            warn!(?e, "UPSERT 统计聚合失败");
+        }
+    }
+
+    for ((day, vm, sub_id, real_model), (provider_id, acc)) in receipt_acc {
+        let result = sqlx::query(
+            "INSERT INTO receipt_stats_daily (
+                day, virtual_model_name, subscription_id, real_model_name, provider_id,
+                request_count, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (day, virtual_model_name, subscription_id, real_model_name) DO UPDATE SET
+                request_count = request_count + excluded.request_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
+                cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens",
+        )
+        .bind(day)
+        .bind(vm)
+        .bind(sub_id)
+        .bind(real_model)
+        .bind(provider_id)
+        .bind(acc.request_count)
+        .bind(acc.input_tokens)
+        .bind(acc.output_tokens)
+        .bind(acc.cache_creation_tokens)
+        .bind(acc.cache_read_tokens)
+        .execute(&mut *tx)
+        .await;
+        if let Err(e) = result {
+            warn!(?e, "UPSERT 小票聚合失败");
+        }
+    }
+
+    for ((day, client_tool, tool_name), count) in tool_acc {
+        let result = sqlx::query(
+            "INSERT INTO tool_stats_daily (day, client_tool, tool_name, call_count)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (day, client_tool, tool_name) DO UPDATE SET
+                call_count = call_count + excluded.call_count",
+        )
+        .bind(day)
+        .bind(client_tool)
+        .bind(tool_name)
+        .bind(count)
+        .execute(&mut *tx)
+        .await;
+        if let Err(e) = result {
+            warn!(?e, "UPSERT 工具榜聚合失败");
+        }
+    }
+
+    if let Err(e) = save_quota_usage_rows(&mut tx, &quota_rows, now_ms()).await {
+        warn!(?e, "写 subscription_quota_usage 快照失败 (局部丢, 下次 flush 补写)");
+    }
+
+    tx.commit().await.map_err(FlushError::CommitFailed)?;
+    Ok(())
+}
+
+pub fn now_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::run_migrations;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::Row;
+
+    async fn fresh_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory db");
+        run_migrations(&pool)
+            .await
+            .expect("migrate");
+        pool
+    }
+
+    fn make_entry(
+        ts_ms: i64,
+        vm: VirtualModelName,
+        sub_id: Uuid,
+        provider: &str,
+        status: RequestStatus,
+        latency_ms: Option<u64>,
+        in_tokens: Option<u32>,
+        out_tokens: Option<u32>,
+    ) -> RequestLogEntry {
+        RequestLogEntry {
+            id: Uuid::new_v4(),
+            timestamp_ms: ts_ms,
+            virtual_model_name: vm,
+            subscription_id: sub_id,
+            provider_id: provider.to_string(),
+            endpoint_id: "ep".to_string(),
+            real_model_name: "claude-x".to_string(),
+            response_model_name: None,
+            is_streaming: false,
+            status,
+            http_status: Some(200),
+            ttft_ms: None,
+            total_latency_ms: latency_ms,
+            upstream_input_tokens: in_tokens,
+            upstream_output_tokens: out_tokens,
+            upstream_cache_creation: None,
+            upstream_cache_read: None,
+            retry_count: 0,
+            error_message: None,
+            upstream_response_body: None,
+            client_tool: None,
+            client_user_agent: None,
+            client_version: None,
+            client_ip: None,
+            entry_kind: None,
+            downstream_http_version: None,
+            client_effort: None,
+            effective_effort: None,
+            effort_source: None,
+            upstream_effort: None,
+            tool_calls: crate::proxy::tool_log::ToolLogFields::empty(),
+        }
+    }
+
+    /// 工具调用 5 列: 有值能读回; request_only 的 entry 响应侧三列为 NULL。
+    #[tokio::test]
+    async fn flush_persists_tool_call_columns() {
+        use crate::proxy::tool_log::{RequestToolShape, ToolLogFields, ToolUseTally};
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let day_start = 1_704_067_200_000;
+
+        let mut full = make_entry(day_start, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Success, Some(100), Some(1), Some(2));
+        let mut tally = ToolUseTally::default();
+        tally.observe_name("Read");
+        tally.observe_name("Bash");
+        tally.observe_stop_reason(Some("tool_use"));
+        full.tool_calls = tally.fields(&RequestToolShape {
+            tools_offered_count: Some(12),
+            tool_result_count: Some(3),
+        });
+        let full_id = full.id.to_string();
+
+        let mut bare = make_entry(day_start + 1000, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Error, Some(100), None, None);
+        bare.tool_calls = ToolLogFields::request_only(&RequestToolShape {
+            tools_offered_count: Some(12),
+            tool_result_count: Some(0),
+        });
+        let bare_id = bare.id.to_string();
+
+        flush_batch(&pool, vec![full, bare], vec![]).await.expect("flush");
+
+        let r = sqlx::query(
+            "SELECT stop_reason, tools_offered_count, tool_result_count, tool_use_count, tool_use_names
+             FROM requests WHERE id = ?")
+            .bind(&full_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(r.try_get::<Option<String>, _>("stop_reason").unwrap().as_deref(), Some("tool_use"));
+        assert_eq!(r.try_get::<Option<i64>, _>("tools_offered_count").unwrap(), Some(12));
+        assert_eq!(r.try_get::<Option<i64>, _>("tool_result_count").unwrap(), Some(3));
+        assert_eq!(r.try_get::<Option<i64>, _>("tool_use_count").unwrap(), Some(2));
+        assert_eq!(r.try_get::<Option<String>, _>("tool_use_names").unwrap().as_deref(), Some(r#"["Read","Bash"]"#));
+
+        let r = sqlx::query(
+            "SELECT stop_reason, tools_offered_count, tool_use_count, tool_use_names FROM requests WHERE id = ?")
+            .bind(&bare_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(r.try_get::<Option<String>, _>("stop_reason").unwrap(), None);
+        assert_eq!(r.try_get::<Option<i64>, _>("tools_offered_count").unwrap(), Some(12));
+        assert_eq!(r.try_get::<Option<i64>, _>("tool_use_count").unwrap(), None);
+        assert_eq!(r.try_get::<Option<String>, _>("tool_use_names").unwrap(), None);
+    }
+
+    /// 思考强度四列: 有值能读回, 老式全 None 的 entry 也照常落库 (NULL)。
+    #[tokio::test]
+    async fn flush_persists_effort_columns_and_tolerates_none() {
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let day_start = 1_704_067_200_000; // 2024-01-01 00:00:00 UTC
+
+        let mut with_effort = make_entry(
+            day_start,
+            VirtualModelName::Sonnet,
+            sub,
+            "openai",
+            RequestStatus::Success,
+            Some(100),
+            Some(1),
+            Some(2),
+        );
+        with_effort.client_effort = Some("low".to_string());
+        with_effort.effective_effort = Some("max".to_string());
+        with_effort.effort_source = Some("slot");
+        with_effort.upstream_effort = Some("max".to_string());
+        let with_effort_id = with_effort.id.to_string();
+
+        let bare = make_entry(
+            day_start + 1000,
+            VirtualModelName::Sonnet,
+            sub,
+            "anthropic",
+            RequestStatus::Success,
+            Some(100),
+            Some(1),
+            Some(2),
+        );
+        let bare_id = bare.id.to_string();
+
+        flush_batch(&pool, vec![with_effort, bare], vec![])
+            .await
+            .expect("flush ok");
+
+        let row = sqlx::query(
+            "SELECT client_effort, effective_effort, effort_source, upstream_effort
+             FROM requests WHERE id = ?",
+        )
+        .bind(&with_effort_id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row.try_get::<String, _>("client_effort").unwrap(), "low");
+        assert_eq!(row.try_get::<String, _>("effective_effort").unwrap(), "max");
+        assert_eq!(row.try_get::<String, _>("effort_source").unwrap(), "slot");
+        assert_eq!(row.try_get::<String, _>("upstream_effort").unwrap(), "max");
+
+        let row = sqlx::query(
+            "SELECT client_effort, effective_effort, effort_source, upstream_effort
+             FROM requests WHERE id = ?",
+        )
+        .bind(&bare_id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row.try_get::<Option<String>, _>("client_effort").unwrap(), None);
+        assert_eq!(row.try_get::<Option<String>, _>("effective_effort").unwrap(), None);
+        assert_eq!(row.try_get::<Option<String>, _>("effort_source").unwrap(), None);
+        assert_eq!(row.try_get::<Option<String>, _>("upstream_effort").unwrap(), None);
+    }
+
+    #[test]
+    fn local_day_key_follows_injected_timezone() {
+        use chrono::FixedOffset;
+        let cst = FixedOffset::east_opt(8 * 3600).unwrap();
+        let utc = Utc;
+        // 2026-08-15T17:00:00Z = 北京时间 08-16 01:00 → 东八区归 16 日, UTC 归 15 日
+        let ts = 1_786_813_200_000;
+        assert_eq!(local_day_key_in(ts, &cst), "2026-08-16");
+        assert_eq!(local_day_key_in(ts, &utc), "2026-08-15");
+        // 东八区当天最后一刻仍归当天; 再 +1ms 跨日
+        let cst_day_end = 1_786_895_999_999; // 2026-08-16T15:59:59.999Z = CST 08-16 23:59:59.999
+        assert_eq!(local_day_key_in(cst_day_end, &cst), "2026-08-16");
+        assert_eq!(local_day_key_in(cst_day_end + 1, &cst), "2026-08-17");
+    }
+
+    #[test]
+    fn local_days_ago_key_subtracts_calendar_days() {
+        use chrono::FixedOffset;
+        let cst = FixedOffset::east_opt(8 * 3600).unwrap();
+        let ts = 1_786_813_200_000; // CST 2026-08-16 01:00
+        assert_eq!(local_days_ago_key_in(ts, 0, &cst), "2026-08-16");
+        assert_eq!(local_days_ago_key_in(ts, 6, &cst), "2026-08-10");
+        assert_eq!(local_days_ago_key_in(ts, 29, &cst), "2026-07-18");
+        // 跨月/跨年
+        assert_eq!(local_days_ago_key_in(ts, 364, &cst), "2025-08-17");
+    }
+
+    #[test]
+    fn local_days_ago_start_ms_is_local_midnight_instant() {
+        use chrono::FixedOffset;
+        let cst = FixedOffset::east_opt(8 * 3600).unwrap();
+        let ts = 1_786_813_200_000; // CST 2026-08-16 01:00 (UTC 08-15 17:00)
+        // CST 08-16 00:00 = UTC 08-15 16:00 = 1_786_809_600_000
+        assert_eq!(local_days_ago_start_ms_in(ts, 0, &cst), 1_786_809_600_000);
+        assert_eq!(local_days_ago_start_ms_in(ts, 1, &cst), 1_786_809_600_000 - DAY_MS);
+        // 与 key 自洽: 起点瞬时的 key 就是那一天
+        let start = local_days_ago_start_ms_in(ts, 6, &cst);
+        assert_eq!(local_day_key_in(start, &cst), "2026-08-10");
+        assert_eq!(local_day_key_in(start - 1, &cst), "2026-08-09");
+    }
+
+    #[tokio::test]
+    async fn flush_inserts_requests_and_upserts_stats_atomically() {
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        // 同一天 (2024-01-01) / sonnet / 同一订阅, 灌 5 条
+        let day_start = 1_704_067_200_000; // 2024-01-01 00:00:00 UTC // 2024-01-01 00:00:00 UTC
+        let mut batch = Vec::new();
+        for i in 0..5 {
+            batch.push(make_entry(
+                day_start + i * 1000,
+                VirtualModelName::Sonnet,
+                sub,
+                "anthropic",
+                if i < 4 {
+                    RequestStatus::Success
+                } else {
+                    RequestStatus::Error
+                },
+                Some(100 + i as u64),
+                Some(10),
+                Some(20),
+            ));
+        }
+        flush_batch(&pool, batch, vec![]).await.expect("flush ok");
+
+        // requests 表应有 5 行
+        let req_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM requests")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .try_get("c")
+            .unwrap();
+        assert_eq!(req_count, 5);
+
+        // stats 表应有 1 行, request_count=5, success=4, error=1
+        let row = sqlx::query("SELECT * FROM request_stats_daily")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.try_get::<i64, _>("request_count").unwrap(), 5);
+        assert_eq!(row.try_get::<i64, _>("success_count").unwrap(), 4);
+        assert_eq!(row.try_get::<i64, _>("error_count").unwrap(), 1);
+        assert_eq!(row.try_get::<i64, _>("input_tokens").unwrap(), 50);
+        assert_eq!(row.try_get::<i64, _>("output_tokens").unwrap(), 100);
+        // 5 条延迟样本: 100+101+102+103+104 = 510
+        assert_eq!(row.try_get::<i64, _>("total_duration_ms_sum").unwrap(), 510);
+        assert_eq!(row.try_get::<i64, _>("total_duration_ms_count").unwrap(), 5);
+        assert_eq!(row.try_get::<String, _>("day").unwrap(), local_day_key(day_start));
+        assert_eq!(
+            row.try_get::<String, _>("virtual_model_name").unwrap(),
+            "model-sonnet"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_groups_by_three_dimensions() {
+        let pool = fresh_pool().await;
+        let sub_a = Uuid::new_v4();
+        let sub_b = Uuid::new_v4();
+        let day = 1_704_067_200_000; // 2024-01-01 00:00:00 UTC
+        let next_day = day + DAY_MS;
+
+        let batch = vec![
+            // (day, sonnet, sub_a) ×2
+            make_entry(day, VirtualModelName::Sonnet, sub_a, "anthropic",
+                       RequestStatus::Success, Some(100), Some(10), Some(20)),
+            make_entry(day, VirtualModelName::Sonnet, sub_a, "anthropic",
+                       RequestStatus::Success, Some(200), Some(10), Some(20)),
+            // (day, opus, sub_a) ×1
+            make_entry(day, VirtualModelName::Opus, sub_a, "anthropic",
+                       RequestStatus::Success, Some(300), Some(10), Some(20)),
+            // (day, sonnet, sub_b) ×1
+            make_entry(day, VirtualModelName::Sonnet, sub_b, "zhipu",
+                       RequestStatus::Success, Some(400), Some(10), Some(20)),
+            // (next_day, sonnet, sub_a) ×1
+            make_entry(next_day, VirtualModelName::Sonnet, sub_a, "anthropic",
+                       RequestStatus::Success, Some(500), Some(10), Some(20)),
+        ];
+        flush_batch(&pool, batch, vec![]).await.expect("flush ok");
+
+        let stats_count: i64 =
+            sqlx::query("SELECT COUNT(*) AS c FROM request_stats_daily")
+                .fetch_one(&pool).await.unwrap().try_get("c").unwrap();
+        assert_eq!(stats_count, 4, "应有 4 个 (date,vm,sub) 唯一组合");
+
+        // (day, sonnet, sub_a) 这一行 request_count=2
+        let row = sqlx::query(
+            "SELECT request_count FROM request_stats_daily
+             WHERE day=? AND virtual_model_name=? AND subscription_id=?",
+        )
+        .bind(local_day_key(day))
+        .bind("model-sonnet")
+        .bind(sub_a.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.try_get::<i64, _>("request_count").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn flush_upserts_existing_stats_row() {
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let day = 1_704_067_200_000; // 2024-01-01 00:00:00 UTC
+
+        // 第一次 flush 2 条
+        flush_batch(
+            &pool,
+            vec![
+                make_entry(day, VirtualModelName::Haiku, sub, "moonshot",
+                           RequestStatus::Success, Some(50), Some(5), Some(10)),
+                make_entry(day, VirtualModelName::Haiku, sub, "moonshot",
+                           RequestStatus::Success, Some(50), Some(5), Some(10)),
+            ],
+            vec![],
+        )
+        .await
+        .expect("first flush");
+
+        // 第二次 flush 3 条 (相同 key)
+        flush_batch(
+            &pool,
+            vec![
+                make_entry(day, VirtualModelName::Haiku, sub, "moonshot",
+                           RequestStatus::Error, Some(60), Some(5), Some(10)),
+                make_entry(day, VirtualModelName::Haiku, sub, "moonshot",
+                           RequestStatus::Success, None, Some(5), Some(10)),
+                make_entry(day, VirtualModelName::Haiku, sub, "moonshot",
+                           RequestStatus::Timeout, None, None, None),
+            ],
+            vec![],
+        )
+        .await
+        .expect("second flush");
+
+        // stats 仍只有 1 行, 累加结果
+        let row = sqlx::query("SELECT * FROM request_stats_daily")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.try_get::<i64, _>("request_count").unwrap(), 5);
+        assert_eq!(row.try_get::<i64, _>("success_count").unwrap(), 3);
+        assert_eq!(row.try_get::<i64, _>("error_count").unwrap(), 1);
+        assert_eq!(row.try_get::<i64, _>("timeout_count").unwrap(), 1);
+        // 4 条有 token (10+10+10+10), 1 条 None=0
+        assert_eq!(row.try_get::<i64, _>("input_tokens").unwrap(), 20);
+        assert_eq!(row.try_get::<i64, _>("output_tokens").unwrap(), 40);
+        // 3 条有 latency: 50+50+60=160
+        assert_eq!(row.try_get::<i64, _>("total_duration_ms_sum").unwrap(), 160);
+        assert_eq!(row.try_get::<i64, _>("total_duration_ms_count").unwrap(), 3);
+    }
+
+    #[test]
+    fn apply_entry_to_quota_accumulates_and_reports_first_crossing() {
+        use crate::subscription::model::{SubscriptionRow, SubscriptionRuntime};
+        use crate::subscription::quota::{QuotaPeriod, TokenQuotas};
+        let mut row = SubscriptionRow::test_fixture("p", "e");
+        row.token_quotas = TokenQuotas { daily: Some(150), ..Default::default() };
+        let mut rt = SubscriptionRuntime::from_row(row);
+        let now = Utc::now();
+        let sub = rt.row.id;
+        let mut e = make_entry(now.timestamp_millis(), VirtualModelName::Sonnet, sub, "p", RequestStatus::Success, Some(1), Some(100), Some(20));
+        e.upstream_cache_creation = Some(0);
+        e.upstream_cache_read = Some(0);
+        assert_eq!(apply_entry_to_quota(&mut rt, &e, now), None); // 120 < 150
+        assert_eq!(rt.quota_usage.bucket(QuotaPeriod::Daily).total(), 120);
+        assert_eq!(apply_entry_to_quota(&mut rt, &e, now), Some(QuotaPeriod::Daily)); // 240 >= 150, 首次跨
+        assert_eq!(apply_entry_to_quota(&mut rt, &e, now), None); // 已达标, 不再重复报
+        // usage 为 None 的 entry (失败请求) 不改变计数
+        let mut e2 = e.clone();
+        e2.upstream_input_tokens = None; e2.upstream_output_tokens = None;
+        let before = rt.quota_usage.bucket(QuotaPeriod::Daily).total();
+        apply_entry_to_quota(&mut rt, &e2, now);
+        assert_eq!(rt.quota_usage.bucket(QuotaPeriod::Daily).total(), before);
+    }
+
+    #[tokio::test]
+    async fn flush_batch_persists_quota_rows() {
+        use crate::subscription::quota::{QuotaPeriod, QuotaUsage};
+        use crate::subscription::store::usage_to_rows;
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let now = Utc::now();
+        let mut u = QuotaUsage::default();
+        u.add(now, 5, 6, 7, 8);
+        let rows = usage_to_rows(sub, &u);
+        flush_batch(&pool, vec![], rows).await.expect("flush ok");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscription_quota_usage").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 4);
+        let total: i64 = sqlx::query_scalar(
+            "SELECT input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
+             FROM subscription_quota_usage WHERE subscription_id = ? AND period = ?")
+            .bind(sub.to_string()).bind(QuotaPeriod::Weekly.as_str())
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(total, 26);
+    }
+
+    #[tokio::test]
+    async fn flush_writes_receipt_stats_with_real_model_dimension() {
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let day = 1_704_067_200_000; // 2024-01-01 00:00:00 UTC
+
+        // 同 (day, vm, sub) 下两个 real_model: claude-x ×2 + other-model ×1
+        let e1 = make_entry(day, VirtualModelName::Sonnet, sub, "anthropic",
+                            RequestStatus::Success, None, Some(10), Some(20));
+        let e2 = make_entry(day, VirtualModelName::Sonnet, sub, "anthropic",
+                            RequestStatus::Error, None, Some(5), Some(5));
+        let mut e3 = make_entry(day, VirtualModelName::Sonnet, sub, "anthropic",
+                                RequestStatus::Success, None, Some(1), Some(1));
+        e3.real_model_name = "other-model".to_string();
+        flush_batch(&pool, vec![e1, e2, e3], vec![]).await.expect("first flush");
+
+        let count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM receipt_stats_daily")
+            .fetch_one(&pool).await.unwrap().try_get("c").unwrap();
+        assert_eq!(count, 2, "real_model_name 是聚合 key 的一维");
+
+        let row = sqlx::query(
+            "SELECT * FROM receipt_stats_daily WHERE real_model_name='claude-x'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.try_get::<i64, _>("request_count").unwrap(), 2);
+        assert_eq!(row.try_get::<i64, _>("input_tokens").unwrap(), 15);
+        assert_eq!(row.try_get::<i64, _>("output_tokens").unwrap(), 25);
+        assert_eq!(row.try_get::<String, _>("day").unwrap(), local_day_key(day));
+        assert_eq!(row.try_get::<String, _>("provider_id").unwrap(), "anthropic");
+
+        // 二次 flush 相同 key → UPSERT 累加而非新行
+        let e4 = make_entry(day, VirtualModelName::Sonnet, sub, "anthropic",
+                            RequestStatus::Success, None, Some(3), Some(4));
+        flush_batch(&pool, vec![e4], vec![]).await.expect("second flush");
+
+        let row = sqlx::query(
+            "SELECT * FROM receipt_stats_daily WHERE real_model_name='claude-x'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.try_get::<i64, _>("request_count").unwrap(), 3);
+        assert_eq!(row.try_get::<i64, _>("input_tokens").unwrap(), 18);
+        assert_eq!(row.try_get::<i64, _>("output_tokens").unwrap(), 29);
+    }
+
+    #[tokio::test]
+    async fn flush_aggregates_tool_counts_into_stats_and_tool_stats_daily() {
+        use crate::proxy::tool_log::{RequestToolShape, ToolUseTally};
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let day_start = 1_704_067_200_000;
+        let day_key = local_day_key(day_start);
+
+        // e1: CC, 调 Read×2 + Bash×1, 回传 2
+        let mut e1 = make_entry(day_start, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Success, Some(100), Some(1), Some(2));
+        e1.client_tool = Some("claude_code");
+        let mut t1 = ToolUseTally::default();
+        t1.observe_name("Read"); t1.observe_name("Bash"); t1.observe_name("Read");
+        e1.tool_calls = t1.fields(&RequestToolShape { tools_offered_count: Some(9), tool_result_count: Some(2) });
+
+        // e2: 未识别客户端, 调 Read×1, 回传 0
+        let mut e2 = make_entry(day_start + 1, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Success, Some(100), Some(1), Some(2));
+        e2.client_tool = None;
+        let mut t2 = ToolUseTally::default();
+        t2.observe_name("Read");
+        e2.tool_calls = t2.fields(&RequestToolShape { tools_offered_count: Some(9), tool_result_count: Some(0) });
+
+        // e3: 成功但 0 次工具调用 → 不计入 tool_use_request_count
+        let mut e3 = make_entry(day_start + 2, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Success, Some(100), Some(1), Some(2));
+        e3.client_tool = Some("claude_code");
+        e3.tool_calls = ToolUseTally::default().fields(&RequestToolShape { tools_offered_count: Some(9), tool_result_count: Some(1) });
+
+        flush_batch(&pool, vec![e1, e2, e3], vec![]).await.expect("flush");
+
+        let r = sqlx::query(
+            "SELECT tool_use_count, tool_use_request_count, tool_result_count
+             FROM request_stats_daily WHERE day = ? AND subscription_id = ?")
+            .bind(&day_key).bind(sub.to_string()).fetch_one(&pool).await.unwrap();
+        assert_eq!(r.try_get::<i64, _>("tool_use_count").unwrap(), 4);
+        assert_eq!(r.try_get::<i64, _>("tool_use_request_count").unwrap(), 2);
+        assert_eq!(r.try_get::<i64, _>("tool_result_count").unwrap(), 3);
+
+        let rows = sqlx::query(
+            "SELECT client_tool, tool_name, call_count FROM tool_stats_daily WHERE day = ?
+             ORDER BY client_tool, tool_name")
+            .bind(&day_key).fetch_all(&pool).await.unwrap();
+        let got: Vec<(String, String, i64)> = rows.iter().map(|r| (
+            r.try_get("client_tool").unwrap(),
+            r.try_get("tool_name").unwrap(),
+            r.try_get("call_count").unwrap(),
+        )).collect();
+        assert_eq!(got, vec![
+            (TOOL_STATS_UNKNOWN_CLIENT.to_string(), "Read".to_string(), 1),
+            ("claude_code".to_string(), "Bash".to_string(), 1),
+            ("claude_code".to_string(), "Read".to_string(), 2),
+        ]);
+
+        // 第二批同 key 再来一次 Read → 累加成 3, 不新建行
+        let mut e4 = make_entry(day_start + 3, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Success, Some(100), Some(1), Some(2));
+        e4.client_tool = Some("claude_code");
+        let mut t4 = ToolUseTally::default();
+        t4.observe_name("Read");
+        e4.tool_calls = t4.fields(&RequestToolShape::default());
+        flush_batch(&pool, vec![e4], vec![]).await.expect("flush2");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT call_count FROM tool_stats_daily WHERE day = ? AND client_tool = 'claude_code' AND tool_name = 'Read'")
+            .bind(&day_key).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 3);
+    }
+
+    /// 截断标记不能变成一个「工具名」进聚合表。
+    #[tokio::test]
+    async fn flush_skips_truncation_marker_in_tool_stats() {
+        use crate::proxy::tool_log::{RequestToolShape, ToolUseTally, TRUNCATED_MARKER};
+        let pool = fresh_pool().await;
+        let sub = Uuid::new_v4();
+        let day_start = 1_704_067_200_000;
+        let mut e = make_entry(day_start, VirtualModelName::Sonnet, sub, "anthropic",
+            RequestStatus::Success, Some(100), Some(1), Some(2));
+        let mut t = ToolUseTally::default();
+        let long = "y".repeat(300);
+        for _ in 0..30 { t.observe_name(&long); }
+        e.tool_calls = t.fields(&RequestToolShape::default());
+        flush_batch(&pool, vec![e], vec![]).await.unwrap();
+        let marker_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tool_stats_daily WHERE tool_name = ?")
+            .bind(TRUNCATED_MARKER).fetch_one(&pool).await.unwrap();
+        assert_eq!(marker_rows, 0);
+    }
+
+    /// 三处哨兵必须同值: 本模块 `TOOL_STATS_UNKNOWN_CLIENT`、`commands/requests.rs::UNKNOWN_SENTINEL`
+    /// (筛选器「未识别」选项)、前端 `src/types.ts::CLIENT_TOOL_UNKNOWN_SENTINEL`,
+    /// 否则工具榜与筛选口径会静默不一致。
+    #[test]
+    fn tool_stats_unknown_client_matches_requests_filter_sentinel() {
+        assert_eq!(TOOL_STATS_UNKNOWN_CLIENT, crate::commands::requests::UNKNOWN_SENTINEL);
+        assert_eq!(TOOL_STATS_UNKNOWN_CLIENT, "__unknown__");
+    }
+}

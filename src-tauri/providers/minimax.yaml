@@ -1,0 +1,99 @@
+id: minimax
+display_name: "MiniMax"
+icon: minimax
+category: first_party
+description:
+  zh: "MiniMax M3 / M2 系列模型"
+  en: "MiniMax M3 / M2 series models"
+  ja: "MiniMax M3 / M2 シリーズのモデル"
+homepage: "https://platform.minimax.io"
+docs_url: "https://platform.minimax.io/docs"
+api_key_url: "https://platform.minimax.io/user-center/basic-information/interface-key"
+
+compatibility: untested
+compatibility_notes: 
+
+endpoints:
+  - id: china_coding_plan
+    label:
+      zh: "国内版 · Coding Plan 订阅"
+      en: "China · Coding Plan subscription"
+      ja: "中国版 · Coding Plan サブスクリプション"
+    description:
+      zh: "订阅制，通过 MiniMax Coding Plan 购买（国内加速）"
+      en: "Subscription-based, purchased via MiniMax Coding Plan (accelerated in China)"
+      ja: "サブスクリプション制。MiniMax Coding Plan で購入（中国国内向け高速化）"
+    base_url: "https://api.minimaxi.com/anthropic"
+    messages_path: "/v1/messages"
+    region: china
+    billing: subscription
+
+  - id: global_coding_plan
+    label:
+      zh: "国际版 · Coding Plan 订阅"
+      en: "International · Coding Plan subscription"
+      ja: "国際版 · Coding Plan サブスクリプション"
+    description:
+      zh: "订阅制，通过 MiniMax Coding Plan 购买"
+      en: "Subscription-based, purchased via MiniMax Coding Plan"
+      ja: "サブスクリプション制。MiniMax Coding Plan で購入"
+    base_url: "https://api.minimax.io/anthropic"
+    messages_path: "/v1/messages"
+    region: global
+    billing: subscription
+
+  - id: china_paygo
+    label:
+      zh: "国内版 · 按量付费 API"
+      en: "China · Pay-as-you-go API"
+      ja: "中国版 · 従量課金 API"
+    description:
+      zh: "国内加速访问"
+      en: "Accelerated access in China"
+      ja: "中国国内向け高速アクセス"
+    base_url: "https://api.minimaxi.com/anthropic"
+    messages_path: "/v1/messages"
+    region: china
+    billing: pay_as_you_go
+
+  - id: global_paygo
+    label:
+      zh: "国际版 · 按量付费 API"
+      en: "International · Pay-as-you-go API"
+      ja: "国際版 · 従量課金 API"
+    description:
+      zh: "按 token 计费"
+      en: "Billed per token"
+      ja: "トークン従量課金"
+    base_url: "https://api.minimax.io/anthropic"
+    messages_path: "/v1/messages"
+    region: global
+    billing: pay_as_you_go
+
+default_endpoint: china_coding_plan
+
+auth:
+  type: api_key
+  header_name: "Authorization"
+  header_format: bearer
+
+required_headers:
+  anthropic-version: "2023-06-01"
+
+forward_headers: []
+
+model_discovery:
+  # MiniMax 未提供公开的 /models 接口 (/anthropic/models 返回 404), 只能手动输入
+  enabled: false
+  path: "/v1/models"
+  cache_ttl_hours: 24
+  # 来源: https://platform.minimax.io/docs/guides/models-intro (2026-07 核对)
+  example_models:
+    - "MiniMax-M3"
+    - "MiniMax-M2.7"
+    - "MiniMax-M2.7-highspeed"
+    - "MiniMax-M2.5"
+    - "MiniMax-M2.5-highspeed"
+    - "MiniMax-M2.1"
+    - "MiniMax-M2.1-highspeed"
+    - "MiniMax-M2"

@@ -1,0 +1,94 @@
+# Requesty provider
+#
+# 官方文档（核对 2026-09）:
+#   - Anthropic Messages API: https://docs.requesty.ai
+#       接口: https://router.requesty.ai/v1/messages
+#       请求体格式与 Anthropic 官方一致,stream: true 受支持。
+#       欧洲区域: https://router.eu.requesty.ai/v1/messages, 同一个 Key 通用。
+#   - 鉴权: Authorization: Bearer <REQUESTY_API_KEY>
+#       Key 申请: https://app.requesty.ai/api-keys
+#   - /v1/models/managed 公开接口: https://router.requesty.ai/v1/models/managed
+#       Requesty 维护的精选模型策略列表, 与 messages 同域同前缀, 本 provider 用它做动态 model_discovery。
+#       完整模型目录见 /v1/models, ID 格式为 <vendor>/<model-name>, 譬如:
+#       anthropic/claude-sonnet-4-5、openai/gpt-4o-mini、google/gemini-2.5-pro
+#   - 模型 ID: /v1/models/managed 返回的短名(如 claude-sonnet-4-5)与 /v1/models 的
+#       <vendor>/<model-name> 都可直接填入。
+
+id: requesty
+display_name: "Requesty"
+icon: requesty
+category: aggregator
+description:
+  zh: "Requesty 模型路由网关，覆盖 Anthropic / OpenAI / Google / DeepSeek / xAI 等数百款模型"
+  en: "Requesty model routing gateway, covering hundreds of models from Anthropic / OpenAI / Google / DeepSeek / xAI and more"
+  ja: "Requesty モデルルーティングゲートウェイ。Anthropic / OpenAI / Google / DeepSeek / xAI など数百のモデルに対応"
+homepage: "https://requesty.ai"
+docs_url: "https://docs.requesty.ai"
+api_key_url: "https://app.requesty.ai/api-keys"
+
+compatibility: verified
+compatibility_notes:
+
+endpoints:
+  - id: paygo
+    label:
+      zh: "全球 · 按量付费 API"
+      en: "Global · Pay-as-you-go API"
+      ja: "グローバル · 従量課金 API"
+    description:
+      zh: "Requesty 默认端点，按 token 转发到对应底层提供商"
+      en: "Requesty's default endpoint; forwards requests to the underlying providers, billed per token"
+      ja: "Requesty の既定エンドポイント。トークン従量課金で下層のプロバイダへ転送"
+    base_url: "https://router.requesty.ai"
+    messages_path: "/v1/messages"
+    region: global
+    billing: pay_as_you_go
+
+  - id: paygo_eu
+    label:
+      zh: "欧洲 · 按量付费 API"
+      en: "Europe · Pay-as-you-go API"
+      ja: "ヨーロッパ · 従量課金 API"
+    description:
+      zh: "Requesty 欧洲区域端点 (法兰克福)，与默认端点共用同一个 Key"
+      en: "Requesty's European endpoint (Frankfurt); uses the same key as the default endpoint"
+      ja: "Requesty のヨーロッパリージョンのエンドポイント（フランクフルト）。既定エンドポイントと同じ Key を使用"
+    base_url: "https://router.eu.requesty.ai"
+    messages_path: "/v1/messages"
+    region: eu
+    billing: pay_as_you_go
+
+default_endpoint: paygo
+
+auth:
+  type: api_key
+  header_name: "Authorization"
+  header_format: bearer
+
+required_headers:
+  anthropic-version: "2023-06-01"
+  HTTP-Referer: "https://ccrouter.app"
+  X-Title: "cc-router"
+
+forward_headers: []
+
+model_discovery:
+  # Requesty 公开 /v1/models/managed 接口, 与 messages 同域同前缀
+  enabled: true
+  path: "/v1/models/managed"
+  cache_ttl_hours: 24
+  # 来源: /v1/models/managed 返回的模型策略 ID（2026-09-27 核对，仅作填写示例）
+  # 排序原则: Claude 系列优先（cc-router 主场景）> 其他主流模型
+  example_models:
+    - "claude-opus-5-5"
+    - "claude-sonnet-5"
+    - "claude-fable-5.1"
+    - "claude-sonnet-4-5"
+    - "claude-opus-4-6"
+    - "claude-haiku-4-5"
+    - "gpt-6-sol"
+    - "gpt-5.4"
+    - "gemini-3.5-flash"
+    - "deepseek-v4-flash"
+    - "grok-4.6"
+    - "kimi-k3"

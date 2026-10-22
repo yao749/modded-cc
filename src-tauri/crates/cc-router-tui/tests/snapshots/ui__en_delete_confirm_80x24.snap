@@ -1,0 +1,28 @@
+---
+source: crates/cc-router-tui/tests/ui.rs
+expression: "render(&mut a, 80, 24)"
+---
+"╭ cc-router ───────────────────────────────────────────── ● Connected · v9.9.9 ╮"
+"│ 1 Overview   2 Subscriptions   3 Virtual models   4 Live routing   5 Logs    │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"╭ Subscriptions (3) ───────────────────────────────────────────────────────────╮"
+"│      Name                 Status               Provider     sonnet           │"
+"│ ▌ ●  智谱主号             Healthy              智谱         glm-4.6          │" Hidden by multi-width symbols: [(8, " "), (10, " "), (12, " "), (14, " "), (50, " "), (52, " ")]
+"│   ◐  Kimi 备用            Rate limited · 00:42 Moonshot     (pending)        │" Hidden by multi-width symbols: [(13, " "), (15, " ")]
+"│   ✕  示例中转             Auth failed          自定义中转   claude-sonnet-4… │" Hidden by multi-width symbols: [(8, " "), (10, " "), (12, " "), (14, " "), (50, " "), (52, " "), (54, " "), (56, " "), (58, " ")]
+"│                                                                              │"
+"│      ╭ Confirm ────────────────────────────────────────────────────────╮     │"
+"│      │                                                                 │     │"
+"│      │  Delete subscription "智谱主号"?                                │     │" Hidden by multi-width symbols: [(32, " "), (34, " "), (36, " "), (38, " ")]
+"│      │  Used by 2 virtual models (unbound automatically on delete):    │     │"
+"│      │  model-sonnet, model-opus                                       │     │"
+"│      │                                                                 │     │"
+"│      ╰─────────────────────────────────────────────────── y Yes   n No ╯     │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"╰───────────────────────────────────────────────────────────────────────── 1/3 ╯"
+" 1-5 Tabs   ↑↓ Select   ⏎ Details   e On/off   t Test           ? Help   q Quit "

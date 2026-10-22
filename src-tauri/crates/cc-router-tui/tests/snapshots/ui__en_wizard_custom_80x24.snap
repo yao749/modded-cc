@@ -1,0 +1,28 @@
+---
+source: crates/cc-router-tui/tests/ui.rs
+expression: "render(&mut custom_wizard_probed_and_filled(), 80, 24)"
+---
+"╭ cc-router ───────────────────────────────────────────────────── ⠯ Connecting ╮"
+"│ 1 Overview   2 Subscriptions   3 Virtual models   4 Live routing   5 Logs    │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"╭ Add subscription · Custom ───────────────────────────────────────────────────╮"
+"│                                                                              │"
+"│    Protocol       Anthropic compatible                             ⏎ Select  │"
+"│    Provider name  我的中转                                                   │" Hidden by multi-width symbols: [(21, " "), (23, " "), (25, " "), (27, " ")]
+"│    Base URL       https://api.example.com                                    │"
+"│    Request path   /v1/messages                                               │"
+"│    Auth           Authorization · Bearer                           ⏎ Select  │"
+"│    API key        ••••••                                 Ctrl+R Show / hide  │"
+"│    Note           我的中转                                                   │" Hidden by multi-width symbols: [(21, " "), (23, " "), (25, " "), (27, " ")]
+"│                             [ Fetch model list ]                             │"
+"│    fable          claude-sonnet-4                                  ⏎ Select  │"
+"│    opus           claude-sonnet-4                                  ⏎ Select  │"
+"│    sonnet         claude-sonnet-4                                  ⏎ Select  │"
+"│    haiku          claude-haiku-4                                   ⏎ Select  │"
+"│  ▌ fallback       (not set)                                        ⏎ Select  │"
+"│                                  [ Create ]                                  │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+" ↑↓ Field   ⏎ Select                                                 Esc Cancel "

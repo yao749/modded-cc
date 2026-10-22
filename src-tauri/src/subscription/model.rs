@@ -1,0 +1,925 @@
+use std::collections::{BTreeMap, HashMap};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::provider::model::{
+    join_base_path, AuthHeaderFormat, AuthType, BalanceDiscovery, EndpointProtocol, LocalizedText,
+    ModelDiscovery, SystemoneWire,
+};
+use crate::provider::Provider;
+use crate::subscription::quota::{QuotaPeriod, QuotaUsage, TokenQuotas};
+use crate::virtual_model::model::SubscriptionSlot;
+
+/// OAuth 凭据元数据, 持久化为 `subscriptions.oauth_metadata` 列 (JSON 字符串).
+///
+/// 按 `auth_type` 区分使用的字段子集:
+/// - `ChatgptOauth`: `account_id` + `email` + `refresh_token` + `authenticated_at`
+/// - `KiroOauth`: 上述基础字段 + `kiro` 子结构 (auth_method, region, profile_arn, client_id/secret, disguise)
+///
+/// 所有 kiro 专用字段都是 `Option` + `skip_serializing_if`, 老 chatgpt 订阅的 JSON 反序列化不受影响 (向后兼容).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OAuthMetadata {
+    /// ChatGPT/Kiro 账户 id. ChatGPT 时是 chatgpt_account_id (做 ChatGPT-Account-Id header),
+    /// Kiro 时是 sub claim 或邮箱 (仅显示用, Kiro API 不需要 account-id header).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account_id: String,
+    /// 显示用账号 email.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// 长期 refresh_token. ChatGPT/Kiro 共用此字段.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub refresh_token: String,
+    /// 首次完成授权的时间戳 (毫秒). 显示用.
+    #[serde(default)]
+    pub authenticated_at: i64,
+    /// Kiro 专用元数据 (auth_method, region, profile_arn, client_id/secret, 4 个伪装字段).
+    /// 仅 `auth_type = KiroOauth` 时有值; ChatGPT 订阅此字段为 None, 不序列化.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiro: Option<KiroOAuthExtras>,
+}
+
+/// Kiro OAuth 扩展字段 (序列化嵌套在 OAuthMetadata.kiro).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KiroOAuthExtras {
+    /// `social` (Kiro IDE 桌面登录) 或 `idc` (AWS SSO / Builder ID / 企业 IdC).
+    /// 决定 token refresh 走哪个 endpoint.
+    pub auth_method: KiroAuthMethod,
+    /// Auth region (token refresh 用), 默认 us-east-1.
+    pub region: String,
+    /// AWS CodeWhisperer profile ARN. Builder ID 用户可能没有, 留 None 时请求体不注入 profileArn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_arn: Option<String>,
+    /// IdC / AWS SSO 需要的 client_id (OIDC token refresh body 必填).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// IdC / AWS SSO 需要的 client_secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// 风控伪装字段 (用户在 UI 可修改).
+    pub disguise: KiroDisguise,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KiroAuthMethod {
+    /// Kiro IDE 桌面登录 (无 client_id/client_secret).
+    /// Refresh URL: `https://prod.{region}.auth.desktop.kiro.dev/refreshToken`
+    Social,
+    /// AWS SSO / Builder ID / 企业 IdC (有 client_id + client_secret).
+    /// Refresh URL: `https://oidc.{region}.amazonaws.com/token`
+    Idc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KiroDisguise {
+    /// 64 位十六进制 machineId. 首次创建订阅时随机生成, 跟随订阅持久化.
+    pub machine_id: String,
+    pub kiro_version: String,
+    pub system_version: String,
+    pub node_version: String,
+}
+
+impl Default for KiroDisguise {
+    fn default() -> Self {
+        Self {
+            machine_id: random_machine_id(),
+            kiro_version: default_kiro_version().to_string(),
+            system_version: default_system_version().to_string(),
+            node_version: default_node_version().to_string(),
+        }
+    }
+}
+
+pub fn random_machine_id() -> String {
+    use uuid::Uuid;
+    let a = Uuid::new_v4().simple().to_string();
+    let b = Uuid::new_v4().simple().to_string();
+    format!("{a}{b}")
+}
+
+pub fn default_kiro_version() -> &'static str {
+    "0.11.107"
+}
+
+pub fn default_system_version() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "win32#10.0.22631"
+    } else {
+        "darwin#24.6.0"
+    }
+}
+
+pub fn default_node_version() -> &'static str {
+    "22.22.0"
+}
+
+/// 自定义订阅的来源标记常量。
+///
+/// 历史: v3.4 前是 `__custom__` 系双下划线包裹格式, 在 UI/DB 里裸露不美观,
+/// migration 014 把存量数据统一改写成现在的 kebab-case 短格式。
+/// 新格式刻意不与任何内置 provider yaml id 冲突 (内置全是 snake_case)。
+pub const CUSTOM_SOURCE_MARKER: &str = "custom";
+
+/// 自定义 Gemini 兼容订阅的来源标记常量。
+/// 与 `CUSTOM_SOURCE_MARKER` 平级, 但走 [`AuthType::GeminiApiKey`] 翻译分支.
+pub const CUSTOM_GEMINI_SOURCE_MARKER: &str = "custom-gemini";
+
+/// 自定义 OpenAI Responses 订阅的来源标记常量。
+/// 与 `CUSTOM_SOURCE_MARKER` 平级, 但走 [`AuthType::OpenaiResponsesApiKey`] 翻译分支.
+pub const CUSTOM_OPENAI_SOURCE_MARKER: &str = "custom-openai";
+
+/// 自定义 OpenAI Chat Completions 订阅的来源标记常量。
+/// 与 `CUSTOM_SOURCE_MARKER` 平级, 但走 [`AuthType::OpenaiChatCompletionsApiKey`] 翻译分支.
+/// 覆盖 DeepSeek/Together/Groq/Ollama/各类 one-api 中转等 OpenAI Chat Completions 兼容生态。
+pub const CUSTOM_OPENAI_CHAT_SOURCE_MARKER: &str = "custom-openai-chat";
+
+/// 自定义 Gemini Interactions 订阅的来源标记常量。
+/// 与 `CUSTOM_SOURCE_MARKER` 平级, 但走 [`AuthType::GeminiInteractionsApiKey`] 翻译分支.
+/// 对应 Google 新的 `/v1beta/interactions` 接口 (区别于 `CUSTOM_GEMINI_SOURCE_MARKER` 的旧 generateContent)。
+pub const CUSTOM_GEMINI_INTERACTIONS_SOURCE_MARKER: &str = "custom-gemini-interactions";
+
+/// 自定义 System One 订阅 (Jev / Clef 决策模型) 的来源标记常量。
+/// `auth_type` 仍是 [`AuthType::ApiKey`], 由快照里的 `endpoint_protocol = Systemone` 区分;
+/// 只进 model-jev, 走 [`crate::proxy::systemone`] 原样透传。
+pub const CUSTOM_SYSTEMONE_SOURCE_MARKER: &str = "custom-systemone";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSlots {
+    pub fable: String,
+    pub opus: String,
+    pub sonnet: String,
+    pub haiku: String,
+    /// 兜底槽 (可选): fallback 虚拟模型命中该订阅时, 非空则把请求 model 改写为此值,
+    /// 空串 = 未配置 = 透传原始 model. `#[serde(default)]` 兼容不带该字段的旧输入.
+    #[serde(default)]
+    pub fallback: String,
+    /// Jev 槽 (可选): model-jev 命中该订阅时, 非空则把请求 model 改写为此值,
+    /// 空串 = 透传客户端 model。只对 systemone 订阅有意义。
+    #[serde(default)]
+    pub jev: String,
+}
+
+impl ModelSlots {
+    pub fn get(&self, slot: SubscriptionSlot) -> &str {
+        match slot {
+            SubscriptionSlot::Fable => &self.fable,
+            SubscriptionSlot::Opus => &self.opus,
+            SubscriptionSlot::Sonnet => &self.sonnet,
+            SubscriptionSlot::Haiku => &self.haiku,
+        }
+    }
+
+    /// 兜底槽取值: 空白 = 未配置(透传)。fallback 刻意不进 [`SubscriptionSlot`] enum,
+    /// 不参与 slot_efforts / ping 探测, 所以单独开 getter 而不是塞进 `get`。
+    pub fn fallback_model(&self) -> Option<&str> {
+        let t = self.fallback.trim();
+        (!t.is_empty()).then_some(t)
+    }
+
+    /// Jev 槽取值: 空白 = 未配置 (透传)。与兜底槽同理不进 [`SubscriptionSlot`]。
+    pub fn jev_model(&self) -> Option<&str> {
+        let t = self.jev.trim();
+        (!t.is_empty()).then_some(t)
+    }
+}
+
+/// 每个模型槽位的 reasoning effort 覆盖, 持久化为 `subscriptions.slot_efforts` 列 (JSON 字符串).
+///
+/// 语义: `None` (JSON 里字段缺失) = auto, 即透传 Claude Code 请求携带的 effort;
+/// `Some(level)` = 强制用该档位, **丢弃客户端传入值** (用于只接受单一 effort 的模型).
+/// 强制语义的注入点见 `proxy::transform::openai::resolve_reasoning_effort` 的 `forced_effort`
+/// 参数 (翻译类 provider) 与 `proxy::sanitize::force_anthropic_effort` (Anthropic 透传).
+///
+/// 存 `Option<String>` 而不是 `ReasoningEffort` 枚举: 与 provider yaml 侧的
+/// `ProviderDescriptor::default_reasoning_effort` 形状一致, 且避免持久化层依赖协议翻译层.
+/// 合法档位在 commands 层用白名单校验 (见 `commands::subscriptions::ALLOWED_SLOT_EFFORTS`).
+///
+/// 每字段 `#[serde(default)]` + `skip_serializing_if`: 对齐 [`OAuthMetadata`] 的向后兼容配方 —
+/// 老订阅的 `'{}'` 反序列化得到全 None (全 auto), 未来加第 5 个槽位也不需要 DB migration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlotEfforts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sonnet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haiku: Option<String>,
+}
+
+impl SlotEfforts {
+    /// 取某槽位的强制 effort. 空字符串按 None 处理 — 前端 auto 的 sentinel 是 `""`,
+    /// 万一漏了归一化也不会把空串当合法档位往下传.
+    pub fn get(&self, slot: SubscriptionSlot) -> Option<&str> {
+        let raw = match slot {
+            SubscriptionSlot::Fable => &self.fable,
+            SubscriptionSlot::Opus => &self.opus,
+            SubscriptionSlot::Sonnet => &self.sonnet,
+            SubscriptionSlot::Haiku => &self.haiku,
+        };
+        raw.as_deref().filter(|s| !s.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// 订阅的持久化字段。对应 `subscriptions` 表。
+///
+/// snapshot 模型: 创建订阅时把 yaml 模板的连接信息全部拷贝下来,
+/// pipeline 运行时只读 row 自己的字段, 不再反查 state.providers.
+/// `api_key` 明文存储——类比 Claude Code 的 settings.json 做法。
+#[derive(Debug, Clone)]
+pub struct SubscriptionRow {
+    pub id: Uuid,
+    /// 来源标记: 内置 yaml id 或 `CUSTOM_SOURCE_MARKER`
+    pub provider_id: String,
+    /// 来源 endpoint id, 自定义订阅写 `CUSTOM_SOURCE_MARKER`
+    pub endpoint_id: String,
+    pub display_name: String,
+    /// API Key 明文 (auth_type=ApiKey 用); auth_type=ChatgptOauth 时留空, 实际凭据走 oauth_metadata.
+    pub api_key: String,
+    /// 凭据来源类型, 决定 pipeline 走 api_key 路径还是 OAuth 路径.
+    pub auth_type: AuthType,
+    /// OAuth 元数据 (account_id, refresh_token 等), 仅 auth_type=ChatgptOauth 有值.
+    pub oauth_metadata: OAuthMetadata,
+    pub model_slots: ModelSlots,
+    /// 每槽位 reasoning effort 覆盖. 字段缺失 = auto (透传客户端值).
+    pub slot_efforts: SlotEfforts,
+    /// 用户设的 token 限额 (cc-router 侧安全阀). 字段缺失 = 该周期不限.
+    pub token_quotas: TokenQuotas,
+    pub enabled: bool,
+    pub is_auth_failed: bool,
+    pub last_error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+
+    pub base_url: String,
+    pub messages_path: String,
+    pub auth_header_name: String,
+    pub auth_header_format: AuthHeaderFormat,
+    pub required_headers: BTreeMap<String, String>,
+    pub forward_headers: Vec<String>,
+    /// 「透传客户端请求头」开关 (migration 020, 默认 false = 历史行为)。
+    /// 打开后 Anthropic 透传路径按 proxy/forward.rs 的内置白名单转发客户端头;
+    /// 翻译类 auth_type 不消费此字段。
+    pub forward_client_headers: bool,
+    /// 创建时快照的端点协议, 之后不可变 (migration 023)。决定订阅只能绑哪类虚拟模型。
+    pub endpoint_protocol: EndpointProtocol,
+    /// User-supplied provider params as entered (migration 024). The resolved strings are
+    /// already snapshotted into base_url / headers / discovery url, this copy is for editing
+    /// and export.
+    pub url_params: BTreeMap<String, String>,
+    /// System One upstream dialect snapshot (migration 024). `Standard` for every non-systemone row.
+    pub systemone_wire: SystemoneWire,
+    pub model_discovery: ModelDiscovery,
+    /// 余额查询配置 snapshot. provider yaml 不声明则为 None, UI 不显示余额卡片.
+    pub balance_discovery: Option<BalanceDiscovery>,
+
+    pub provider_display_name: String,
+    pub provider_icon: String,
+    pub is_user_defined: bool,
+}
+
+impl SubscriptionRow {
+    pub fn messages_url(&self) -> String {
+        join_base_path(&self.base_url, &self.messages_path)
+    }
+
+    pub fn auth_header_value(&self) -> String {
+        self.auth_header_format.apply(&self.api_key)
+    }
+
+    /// Apply the auth header + all `required_headers` from the provider snapshot
+    /// onto a `RequestBuilder`. Shared by every "introspection" endpoint
+    /// (model_discovery, balance_discovery, future usage probes).
+    pub fn apply_auth_and_required_headers(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        let mut req = req.header(&self.auth_header_name, self.auth_header_value());
+        for (k, v) in self.resolved_required_headers().iter() {
+            req = req.header(k, v);
+        }
+        req
+    }
+
+    /// Headers as sent upstream: `{api_key}` in values is filled at send time, never stored.
+    pub fn resolved_required_headers(&self) -> BTreeMap<String, String> {
+        self.required_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), crate::provider::url_template::fill_api_key(v, &self.api_key)))
+            .collect()
+    }
+}
+
+/// 订阅健康状态枚举（设计稿 §6.1）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionState {
+    Healthy,
+    RateLimited,
+    QuotaExhausted,
+    TransientError,
+    AuthFailed,
+    Disabled,
+}
+
+impl SubscriptionState {
+    pub fn is_dispatchable(self) -> bool {
+        matches!(self, SubscriptionState::Healthy)
+    }
+}
+
+/// 订阅的全量运行时视图（持久化字段 + 运行时状态）。
+/// 使用 `Arc<RwLock<SubscriptionRuntime>>` 放入 `AppState`，单订阅一把锁（§6.4）。
+#[derive(Debug, Clone)]
+pub struct SubscriptionRuntime {
+    pub row: SubscriptionRow,
+    pub state: SubscriptionState,
+    pub state_entered_at: DateTime<Utc>,
+    pub cooldown_until: Option<DateTime<Utc>>,
+    pub consecutive_errors: u32,
+    pub transient_error_level: u32,
+    pub last_error_message: Option<String>,
+    pub model_cache: Option<ModelCache>,
+    /// 余额查询缓存 (运行时). None = 从未查过或 provider 不支持. 持久化在
+    /// `subscription_balance_cache` 表, 启动时通过 store::load_balance_cache 装填.
+    pub balance_cache: Option<BalanceSnapshot>,
+    /// 内存用量计数 (4 周期桶), 判定真值; 启动时由 store::load_quota_usage 装填,
+    /// request_log consumer 实时累加, flush 时按快照落 subscription_quota_usage 表.
+    pub quota_usage: QuotaUsage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCache {
+    pub fetched_at: DateTime<Utc>,
+    pub models: Vec<ModelInfo>,
+}
+
+/// 余额查询的统一 UI-ready 结构. 异构 provider 响应在 parser 里翻译成此结构,
+/// 前端只渲染不处理 provider 差异.
+///
+/// 设计:
+/// - `entries: Vec`: 支持多币种 (DeepSeek 国际版可能 USD + CNY 两条) 或多额度类型
+///   (Token 配额 + 充值余额)
+/// - 字段全部是 UI-ready 字符串, parser 已计算好 severity 阈值 (provider 专属知识)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceSnapshot {
+    /// 账户是否可用 (DeepSeek `is_available`). None 表示该 provider 不报告此字段.
+    /// false 时账户可能欠费/封号, UI 提示警告.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_available: Option<bool>,
+    pub entries: Vec<BalanceEntry>,
+    pub fetched_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceEntry {
+    /// 主标签, 中文优先 (例: "余额", "Token 配额").
+    pub label: String,
+    /// 数值, 字符串保留原始精度 (避免 f64 精度坑, 例 DeepSeek 返回 "39.28").
+    pub value_text: String,
+    /// 单位 (例: "CNY", "USD", "tokens", "credits"). UI 与 value_text 拼显示.
+    pub unit: String,
+    /// 副标题, 例 "充值 ¥39.28, 赠送 ¥0.00".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// UI 着色级别, parser 根据 provider 专属阈值计算 (DeepSeek CNY <10 = Low 等).
+    pub severity: BalanceSeverity,
+    /// `label` / `hint` 的结构化形式, 供桌面端按界面语言显示。老版本落库的缓存没有它,
+    /// 前端退回 `label` / `hint` 原文 (TUI 一直用原文)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<BalanceDetail>,
+}
+
+/// 余额条目的结构化文案。金额保持字符串 (与 `value_text` 同理); 标签恒为「余额 (unit)」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum BalanceDetail {
+    /// 「充值 X, 赠送 Y」(DeepSeek)。
+    TopupGranted { topped_up: String, granted: String },
+    /// 「充值 X, 已用 Y」(OpenRouter)。
+    TopupUsed { topped_up: String, used: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BalanceSeverity {
+    Normal,
+    Low,
+    Critical,
+}
+
+impl SubscriptionRuntime {
+    pub fn from_row(row: SubscriptionRow) -> Self {
+        let state = if !row.enabled {
+            SubscriptionState::Disabled
+        } else if row.is_auth_failed {
+            SubscriptionState::AuthFailed
+        } else {
+            SubscriptionState::Healthy
+        };
+        let last_error_message = row.last_error_message.clone();
+        Self {
+            row,
+            state,
+            state_entered_at: Utc::now(),
+            cooldown_until: None,
+            consecutive_errors: 0,
+            transient_error_level: 0,
+            last_error_message,
+            model_cache: None,
+            balance_cache: None,
+            quota_usage: QuotaUsage::default(),
+        }
+    }
+
+    pub fn is_dispatchable(&self, now: DateTime<Utc>) -> bool {
+        if !self.row.enabled {
+            return false;
+        }
+        if !self.state.is_dispatchable() {
+            return false;
+        }
+        if let Some(until) = self.cooldown_until {
+            if until > now {
+                return false;
+            }
+        }
+        if self.row.token_quotas.any_exceeded(&self.quota_usage, now) {
+            return false;
+        }
+        true
+    }
+}
+
+/// 单个周期的当前用量快照, 供前端渲染进度条 / 剩余额度. 前端 DTO, 与内部 `QuotaBucket` 分开维护.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaUsageDto {
+    pub period: QuotaPeriod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    pub input: u64,
+    pub output: u64,
+    pub cache_creation: u64,
+    pub cache_read: u64,
+    pub period_start_ms: i64,
+    /// `Total` 周期不滚动, 没有下一个周期边界.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period_end_ms: Option<i64>,
+    pub exceeded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionDto {
+    pub id: Uuid,
+    pub provider_id: String,
+    pub endpoint_id: String,
+    pub display_name: String,
+    pub model_slots: ModelSlots,
+    /// 每槽位 reasoning effort 覆盖. 字段缺失 = auto (透传客户端值).
+    /// 刻意不加 `skip_serializing_if`: 前端把它声明为必填, DTO 必须总是带这个 key (可以是 `{}`).
+    #[serde(default)]
+    pub slot_efforts: SlotEfforts,
+    /// 用户设的 token 限额; 刻意不 skip: 前端声明为必填.
+    #[serde(default)]
+    pub token_quotas: TokenQuotas,
+    /// 4 个周期的当前用量 (始终 4 项, 顺序 daily/weekly/monthly/total).
+    #[serde(default)]
+    pub quota_usage: Vec<QuotaUsageDto>,
+    pub enabled: bool,
+    pub state: SubscriptionState,
+    /// 调度器此刻会不会选它: `SubscriptionRuntime::is_dispatchable` 的结果 (启用 + 健康 + 不在冷却 + 限额未满)。
+    /// 给只想显示「N 个可调度」的客户端 (TUI) 用, 免得它们各自重算这四个条件。
+    #[serde(default)]
+    pub is_dispatchable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_until: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_message: Option<String>,
+    /// `last_error_message` 的结构化形式, 供桌面端按界面语言显示; 认不出的文本为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_code: Option<crate::subscription::last_error::LastError>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub referenced_by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_cache: Option<ModelCacheDto>,
+
+    pub base_url: String,
+    pub messages_path: String,
+    pub auth_header_name: String,
+    pub auth_header_format: AuthHeaderFormat,
+    pub required_headers: BTreeMap<String, String>,
+    pub forward_headers: Vec<String>,
+    /// 「透传客户端请求头」开关. 默认 false 兼容老 DTO 消费者.
+    #[serde(default)]
+    pub forward_client_headers: bool,
+    /// 端点协议 (`messages` / `systemone`)。客户端据此决定显示四槽还是 Jev 槽、能绑哪些虚拟模型。
+    #[serde(default)]
+    pub endpoint_protocol: EndpointProtocol,
+    /// 用户填的 provider 参数原值 (如 account_id), 编辑时回显用。
+    #[serde(default)]
+    pub url_params: BTreeMap<String, String>,
+    pub model_discovery: ModelDiscovery,
+    /// Whether this subscription's provider exposes a balance/quota endpoint.
+    /// Derived from `balance_discovery.is_some_and(|b| b.enabled)` server-side;
+    /// the full `BalanceDiscovery` (url/parser/etc) stays out of the wire format.
+    #[serde(default)]
+    pub balance_supported: bool,
+    /// Last cached balance payload. `None` when never fetched or unsupported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_cache: Option<BalanceCacheDto>,
+    /// 创建订阅时写进 DB 的厂商名快照 (中文)。自定义订阅是用户自己填的名字。
+    pub provider_display_name: String,
+    /// 内置厂商的三语名字, 按 `provider_id` 从当前 yaml 现查; 显示时优先用它, 快照只给自定义订阅
+    /// 和「yaml 已删掉的厂商」兜底。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_names: Option<LocalizedText>,
+    pub provider_icon: String,
+    pub is_user_defined: bool,
+    /// api_key 是否非空。DTO 不带 Key 本身; 前端据此提示「待填写 API Key」(导入时缺 Key 的订阅)。
+    #[serde(default)]
+    pub has_api_key: bool,
+
+    /// 凭据来源类型. 默认 'api_key' 兼容老 DTO 消费者.
+    #[serde(default = "default_auth_type")]
+    pub auth_type: AuthType,
+    /// OAuth 公开元数据 (account_id + email + authenticated_at), 不含 refresh_token.
+    /// 仅 auth_type=ChatgptOauth 有意义.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<OAuthAccountDto>,
+}
+
+fn default_auth_type() -> AuthType {
+    AuthType::ApiKey
+}
+
+/// 暴露给前端的 OAuth 账号信息. 不含 refresh_token, 类比现有 DTO 不暴露 api_key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthAccountDto {
+    pub account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub authenticated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCacheDto {
+    pub fetched_at: i64,
+    pub models: Vec<ModelInfo>,
+}
+
+/// 余额缓存的前端 DTO. fetched_at 用 Unix ms (与 ModelCacheDto 风格一致).
+/// snapshot 内层也带 fetched_at 但外层这个用 i64 方便前端 Date.parse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceCacheDto {
+    pub fetched_at: i64,
+    pub snapshot: BalanceSnapshot,
+}
+
+#[cfg(test)]
+impl SubscriptionRow {
+    /// 测试用 fixture: 生成一个连接信息全空但字段齐全的 row, 调用方可后续覆盖关心的字段。
+    pub fn test_fixture(provider_id: &str, endpoint_id: &str) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            provider_id: provider_id.into(),
+            endpoint_id: endpoint_id.into(),
+            display_name: "test".into(),
+            api_key: "test-key".into(),
+            auth_type: AuthType::ApiKey,
+            oauth_metadata: OAuthMetadata::default(),
+            model_slots: ModelSlots {
+                fable: "d".into(),
+                opus: "a".into(),
+                sonnet: "b".into(),
+                haiku: "c".into(),
+                fallback: String::new(),
+                jev: String::new(),
+            },
+            slot_efforts: SlotEfforts::default(),
+            token_quotas: TokenQuotas::default(),
+            enabled: true,
+            is_auth_failed: false,
+            last_error_message: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            base_url: String::new(),
+            messages_path: String::new(),
+            auth_header_name: String::new(),
+            auth_header_format: AuthHeaderFormat::Bearer,
+            required_headers: BTreeMap::new(),
+            forward_headers: Vec::new(),
+            forward_client_headers: false,
+            endpoint_protocol: EndpointProtocol::Messages,
+            url_params: BTreeMap::new(),
+            systemone_wire: SystemoneWire::Standard,
+            model_discovery: ModelDiscovery::default(),
+            balance_discovery: None,
+            provider_display_name: String::new(),
+            provider_icon: String::new(),
+            is_user_defined: false,
+        }
+    }
+}
+
+impl SubscriptionDto {
+    /// `providers` 是内置厂商注册表 (`AppState.providers`), 用来填 `provider_names`。
+    pub fn from_runtime(
+        rt: &SubscriptionRuntime,
+        referenced_by: Vec<String>,
+        providers: &HashMap<String, Provider>,
+    ) -> Self {
+        Self {
+            id: rt.row.id,
+            provider_id: rt.row.provider_id.clone(),
+            endpoint_id: rt.row.endpoint_id.clone(),
+            display_name: rt.row.display_name.clone(),
+            model_slots: rt.row.model_slots.clone(),
+            slot_efforts: rt.row.slot_efforts.clone(),
+            token_quotas: rt.row.token_quotas.clone(),
+            quota_usage: {
+                let now = Utc::now();
+                crate::subscription::quota::ALL_PERIODS
+                    .into_iter()
+                    .map(|p| {
+                        let b = rt.quota_usage.effective(p, now);
+                        let limit = rt.row.token_quotas.limit(p);
+                        QuotaUsageDto {
+                            period: p,
+                            limit,
+                            input: b.input,
+                            output: b.output,
+                            cache_creation: b.cache_creation,
+                            cache_read: b.cache_read,
+                            period_start_ms: b.period_start.timestamp_millis(),
+                            period_end_ms: crate::subscription::quota::period_end(p, now)
+                                .map(|t| t.timestamp_millis()),
+                            exceeded: limit.is_some_and(|l| b.total() >= l),
+                        }
+                    })
+                    .collect()
+            },
+            enabled: rt.row.enabled,
+            state: rt.state,
+            is_dispatchable: rt.is_dispatchable(Utc::now()),
+            cooldown_until: rt.cooldown_until.map(|t| t.timestamp_millis()),
+            last_error_message: rt.last_error_message.clone(),
+            last_error_code: rt
+                .last_error_message
+                .as_deref()
+                .and_then(crate::subscription::last_error::LastError::parse),
+            created_at: rt.row.created_at.timestamp_millis(),
+            updated_at: rt.row.updated_at.timestamp_millis(),
+            referenced_by,
+            model_cache: rt.model_cache.as_ref().map(|c| ModelCacheDto {
+                fetched_at: c.fetched_at.timestamp_millis(),
+                models: c.models.clone(),
+            }),
+            base_url: rt.row.base_url.clone(),
+            messages_path: rt.row.messages_path.clone(),
+            auth_header_name: rt.row.auth_header_name.clone(),
+            auth_header_format: rt.row.auth_header_format.clone(),
+            required_headers: rt.row.required_headers.clone(),
+            forward_headers: rt.row.forward_headers.clone(),
+            forward_client_headers: rt.row.forward_client_headers,
+            endpoint_protocol: rt.row.endpoint_protocol,
+            url_params: rt.row.url_params.clone(),
+            model_discovery: rt.row.model_discovery.clone(),
+            balance_supported: rt
+                .row
+                .balance_discovery
+                .as_ref()
+                .is_some_and(|b| b.enabled),
+            balance_cache: rt.balance_cache.as_ref().map(|s| BalanceCacheDto {
+                fetched_at: s.fetched_at.timestamp_millis(),
+                snapshot: s.clone(),
+            }),
+            provider_display_name: rt.row.provider_display_name.clone(),
+            provider_names: providers
+                .get(&rt.row.provider_id)
+                .filter(|_| !rt.row.is_user_defined)
+                .map(|p| p.display_name.clone()),
+            provider_icon: rt.row.provider_icon.clone(),
+            is_user_defined: rt.row.is_user_defined,
+            has_api_key: !rt.row.api_key.is_empty(),
+            auth_type: rt.row.auth_type,
+            oauth_account: oauth_account_dto(&rt.row),
+        }
+    }
+}
+
+/// 把 row.oauth_metadata (含 refresh_token) 缩减成前端可见的 OAuthAccountDto.
+/// auth_type=ApiKey 或 account_id 空时返回 None.
+fn oauth_account_dto(row: &SubscriptionRow) -> Option<OAuthAccountDto> {
+    if row.auth_type != AuthType::ChatgptOauth {
+        return None;
+    }
+    if row.oauth_metadata.account_id.is_empty() {
+        return None;
+    }
+    Some(OAuthAccountDto {
+        account_id: row.oauth_metadata.account_id.clone(),
+        email: row.oauth_metadata.email.clone(),
+        authenticated_at: row.oauth_metadata.authenticated_at,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 老订阅向后兼容的核心断言: migration 013 的 DEFAULT '{}' 必须反序列化成全 auto。
+    #[test]
+    fn slot_efforts_empty_json_is_all_auto() {
+        let se: SlotEfforts = serde_json::from_str("{}").unwrap();
+        assert!(se.fable.is_none());
+        assert!(se.opus.is_none());
+        assert!(se.sonnet.is_none());
+        assert!(se.haiku.is_none());
+    }
+
+    #[test]
+    fn slot_efforts_get_per_slot() {
+        let se = SlotEfforts {
+            opus: Some("max".into()),
+            ..Default::default()
+        };
+        assert_eq!(se.get(SubscriptionSlot::Opus), Some("max"));
+        assert_eq!(se.get(SubscriptionSlot::Sonnet), None);
+        assert_eq!(se.get(SubscriptionSlot::Fable), None);
+        assert_eq!(se.get(SubscriptionSlot::Haiku), None);
+    }
+
+    /// 前端 auto 的 sentinel 是 "", 后端再兜一层, 不把空串当合法档位往下传。
+    #[test]
+    fn slot_efforts_get_treats_empty_string_as_none() {
+        let se = SlotEfforts {
+            fable: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(se.get(SubscriptionSlot::Fable), None);
+    }
+
+    /// skip_serializing_if 让列里只存用户真的固定过的槽位。
+    #[test]
+    fn slot_efforts_serializes_skipping_none() {
+        let se = SlotEfforts {
+            opus: Some("max".into()),
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_string(&se).unwrap(), r#"{"opus":"max"}"#);
+    }
+
+    /// 前向兼容: 从含第 5 个槽位的版本降级到旧 binary 时不能炸。
+    #[test]
+    fn slot_efforts_unknown_field_is_ignored() {
+        let se: SlotEfforts =
+            serde_json::from_str(r#"{"opus":"max","future_slot":"low"}"#).unwrap();
+        assert_eq!(se.get(SubscriptionSlot::Opus), Some("max"));
+    }
+
+    /// 兜底槽: 空串 / 纯空白 = 未配置, trim 后返回配置值。
+    #[test]
+    fn fallback_model_treats_blank_as_none() {
+        let mut slots = ModelSlots {
+            fable: "d".into(),
+            opus: "a".into(),
+            sonnet: "b".into(),
+            haiku: "c".into(),
+            fallback: String::new(),
+            jev: String::new(),
+        };
+        assert_eq!(slots.fallback_model(), None);
+        slots.fallback = "   ".into();
+        assert_eq!(slots.fallback_model(), None);
+        slots.fallback = " glm-4.7 ".into();
+        assert_eq!(slots.fallback_model(), Some("glm-4.7"));
+    }
+
+    /// 旧前端 payload 不带 fallback 字段时反序列化得到空串 (= 未配置)。
+    #[test]
+    fn model_slots_deserializes_without_fallback_field() {
+        let slots: ModelSlots =
+            serde_json::from_str(r#"{"fable":"d","opus":"a","sonnet":"b","haiku":"c"}"#).unwrap();
+        assert_eq!(slots.fallback, "");
+        assert_eq!(slots.fallback_model(), None);
+    }
+
+    #[test]
+    fn is_dispatchable_false_when_quota_exceeded() {
+        use crate::subscription::quota::{QuotaPeriod, TokenQuotas};
+        let mut row = SubscriptionRow::test_fixture("p", "e");
+        row.token_quotas = TokenQuotas { total: Some(100), ..Default::default() };
+        let mut rt = SubscriptionRuntime::from_row(row);
+        let now = Utc::now();
+        assert!(rt.is_dispatchable(now));
+        rt.quota_usage.add(now, 60, 40, 0, 0); // 恰好 100 → 视为超
+        assert!(!rt.is_dispatchable(now));
+        // 未设限的订阅不受影响
+        let mut row2 = SubscriptionRow::test_fixture("p", "e");
+        row2.token_quotas = TokenQuotas::default();
+        let mut rt2 = SubscriptionRuntime::from_row(row2);
+        rt2.quota_usage.add(now, 1_000_000, 0, 0, 0);
+        assert!(rt2.is_dispatchable(now));
+        let _ = QuotaPeriod::Total;
+    }
+
+    #[test]
+    fn dto_is_dispatchable_follows_the_runtime() {
+        use crate::subscription::quota::TokenQuotas;
+        let mut row = SubscriptionRow::test_fixture("p", "e");
+        row.token_quotas = TokenQuotas { total: Some(100), ..Default::default() };
+        let mut rt = SubscriptionRuntime::from_row(row);
+        assert!(SubscriptionDto::from_runtime(&rt, vec![], &HashMap::new()).is_dispatchable);
+        rt.quota_usage.add(Utc::now(), 100, 0, 0, 0);
+        assert!(!SubscriptionDto::from_runtime(&rt, vec![], &HashMap::new()).is_dispatchable, "限额满了");
+
+        let mut row = SubscriptionRow::test_fixture("p", "e");
+        row.enabled = false;
+        let rt = SubscriptionRuntime::from_row(row);
+        assert!(!SubscriptionDto::from_runtime(&rt, vec![], &HashMap::new()).is_dispatchable, "手动停用");
+    }
+
+    #[test]
+    fn dto_exposes_four_quota_periods_with_exceeded_flag() {
+        use crate::subscription::quota::{QuotaPeriod, TokenQuotas};
+        let mut row = SubscriptionRow::test_fixture("p", "e");
+        row.token_quotas = TokenQuotas {
+            weekly: Some(10),
+            ..Default::default()
+        };
+        let mut rt = SubscriptionRuntime::from_row(row);
+        rt.quota_usage.add(Utc::now(), 10, 0, 0, 0);
+        let dto = SubscriptionDto::from_runtime(&rt, vec![], &HashMap::new());
+        assert_eq!(dto.quota_usage.len(), 4);
+        let weekly = dto
+            .quota_usage
+            .iter()
+            .find(|q| q.period == QuotaPeriod::Weekly)
+            .unwrap();
+        assert_eq!(weekly.limit, Some(10));
+        assert!(weekly.exceeded);
+        assert!(weekly.period_end_ms.is_some());
+        let total = dto
+            .quota_usage
+            .iter()
+            .find(|q| q.period == QuotaPeriod::Total)
+            .unwrap();
+        assert!(total.period_end_ms.is_none());
+        assert!(!total.exceeded);
+        assert_eq!(dto.token_quotas.weekly, Some(10));
+    }
+
+    #[test]
+    fn jev_slot_is_optional_in_json_and_blank_means_passthrough() {
+        let slots: ModelSlots =
+            serde_json::from_str(r#"{"fable":"","opus":"","sonnet":"","haiku":""}"#).unwrap();
+        assert_eq!(slots.jev_model(), None);
+        let slots = ModelSlots { jev: "  jev-latest ".into(), ..slots };
+        assert_eq!(slots.jev_model(), Some("jev-latest"));
+    }
+
+    #[test]
+    fn resolved_required_headers_fills_api_key_and_keeps_others() {
+        let mut row = SubscriptionRow::test_fixture("p", "e");
+        row.api_key = "k-123".into();
+        row.required_headers.insert("cf-aig-authorization".into(), "Bearer {api_key}".into());
+        row.required_headers.insert("cf-aig-gateway-id".into(), "gw1".into());
+        let h = row.resolved_required_headers();
+        assert_eq!(h["cf-aig-authorization"], "Bearer k-123");
+        assert_eq!(h["cf-aig-gateway-id"], "gw1");
+        // the row itself still holds the template
+        assert_eq!(row.required_headers["cf-aig-authorization"], "Bearer {api_key}");
+    }
+
+    #[test]
+    fn dto_exposes_url_params() {
+        let mut row = SubscriptionRow::test_fixture("cloudflare", "gateway");
+        row.url_params.insert("account_id".into(), "abc".into());
+        let rt = SubscriptionRuntime::from_row(row);
+        let dto = SubscriptionDto::from_runtime(&rt, vec![], &HashMap::new());
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["url_params"]["account_id"], "abc");
+    }
+
+    #[test]
+    fn dto_exposes_endpoint_protocol() {
+        let mut row = SubscriptionRow::test_fixture("typesafe", "default");
+        row.endpoint_protocol = crate::provider::model::EndpointProtocol::Systemone;
+        let rt = SubscriptionRuntime::from_row(row);
+        let dto = SubscriptionDto::from_runtime(&rt, vec![], &HashMap::new());
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["endpoint_protocol"], "systemone");
+        assert_eq!(json["model_slots"]["jev"], "");
+    }
+}

@@ -1,0 +1,1093 @@
+// 与 Rust 后端 DTO 对齐的类型定义。
+// 约定：Rust 侧 serde 使用 serde(rename_all = "snake_case") 序列化。
+
+export type Compatibility = "verified" | "partial" | "untested";
+export type ProviderCategory = "first_party" | "second_party" | "aggregator";
+export type AuthType =
+  | "api_key"
+  | "chatgpt_oauth"
+  | "kiro_oauth"
+  | "gemini_api_key"
+  | "openai_responses_api_key"
+  | "openai_chat_completions_api_key"
+  | "gemini_interactions_api_key";
+export type AuthHeaderFormat = "raw" | "bearer";
+
+// ===== Kiro OAuth DTO (与 oauth/kiro.rs + subscription/model.rs 对齐) =====
+
+export type KiroAuthMethod = "social" | "idc";
+
+/** 凭据来源预览, 不含 refresh_token. */
+export interface KiroImportPreview {
+  auth_method: KiroAuthMethod;
+  region: string;
+  has_profile_arn: boolean;
+  has_access_token: boolean;
+}
+
+/** 凭据导入完成后的 session 句柄. 前端在创建订阅时回传 session_id. */
+export interface KiroImportResult {
+  session_id: string;
+  preview: KiroImportPreview;
+}
+
+export interface KiroDeviceFlowStart {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  region: string;
+  /** 秒 */
+  expires_in: number;
+}
+
+export interface KiroAccount {
+  auth_method: KiroAuthMethod;
+  region: string;
+  /** Unix ms */
+  authenticated_at: number;
+}
+
+/** 风控伪装字段, 创建/编辑订阅时由 UI 提供 (None 走后端默认值). */
+export interface KiroDisguise {
+  /** 64 位十六进制 */
+  machine_id: string;
+  kiro_version: string;
+  system_version: string;
+  node_version: string;
+}
+
+export interface CreateKiroSubscriptionInput {
+  /** 方案 A 凭据来源: cache_imported_session 的 session_id */
+  session_id?: string;
+  /** 方案 B 凭据来源: device flow 的 device_code */
+  device_code?: string;
+  provider_id: string;
+  endpoint_id: string;
+  display_name: string;
+  model_slots: ModelSlots;
+  disguise?: KiroDisguise;
+  profile_arn_override?: string;
+}
+
+/**
+ * Device Code 启动结果, 对应 Rust 侧 oauth::chatgpt::DeviceFlowStart.
+ */
+export interface DeviceFlowStart {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  /** 秒 */
+  expires_in: number;
+}
+
+/**
+ * ChatGPT 账号公开信息, 不含 refresh_token. 对应 Rust 侧 oauth::chatgpt::ChatGptAccount.
+ */
+export interface ChatGptAccount {
+  account_id: string;
+  email?: string;
+  /** Unix ms */
+  authenticated_at: number;
+}
+
+export interface CreateChatGptOAuthSubscriptionInput {
+  device_code: string;
+  provider_id: string;
+  endpoint_id: string;
+  display_name: string;
+  model_slots: ModelSlots;
+}
+export type VirtualModelName =
+  | "model-fable"
+  | "model-opus"
+  | "model-sonnet"
+  | "model-haiku"
+  | "model-fallback"
+  | "model-jev";
+
+/** 端点协议: messages = 对话类 (三个对话入口); systemone = Jev 决策协议, 只服务 POST /v1/systemone */
+export type EndpointProtocol = "messages" | "systemone";
+export type SubscriptionSlot = "fable" | "opus" | "sonnet" | "haiku";
+export type RoutingMode = "sequential" | "round_robin" | "sticky";
+export type SubscriptionState =
+  | "healthy"
+  | "rate_limited"
+  | "quota_exhausted"
+  | "transient_error"
+  | "auth_failed"
+  | "disabled";
+
+export interface ProviderEndpointInfo {
+  id: string;
+  label: string;
+  description?: string;
+  base_url: string;
+  messages_path: string;
+  region?: string;
+  billing?: string;
+  protocol: EndpointProtocol;
+  /** 仅本端点的模型输入提示; 空数组 = 用 provider 级 model_discovery.example_models */
+  example_models: string[];
+  /** 本端点用到的 url_params id (顺序 = 出现顺序); 订阅表单据此只渲染需要的输入框 */
+  url_params_used: string[];
+}
+
+/** 用户需要填的 URL 占位符 (如 Cloudflare 的 account_id)。label / placeholder 是界面语言 (useProviders 已换好)。 */
+export interface UrlParamInfo {
+  id: string;
+  label: string;
+  placeholder?: string;
+  pattern: string;
+}
+
+export interface ProviderInfo {
+  id: string;
+  display_name: string;
+  description?: string;
+  homepage?: string;
+  docs_url?: string;
+  api_key_url?: string;
+  icon?: string;
+  compatibility: Compatibility;
+  compatibility_notes?: string;
+  category?: ProviderCategory;
+  endpoints: ProviderEndpointInfo[];
+  default_endpoint?: string;
+  auth: {
+    type: AuthType;
+    header_name: string;
+    header_format: AuthHeaderFormat;
+  };
+  model_discovery: {
+    enabled: boolean;
+    path: string;
+    cache_ttl_hours: number;
+    example_models: string[];
+  };
+  /**
+   * 顶层的 display_name / description / compatibility_notes / endpoints[].label / .description 是中文,
+   * 英日文在这里 (后端保证三语齐全)。界面里不要直接读, 走 useProviders() —— 它已经按界面语言换好了。
+   */
+  translations: Record<"en" | "ja", ProviderText>;
+  url_params: UrlParamInfo[];
+}
+
+export interface ProviderText {
+  display_name: string;
+  description?: string;
+  compatibility_notes?: string;
+  /** key 是 endpoint id */
+  endpoints: Record<string, { label: string; description?: string }>;
+  /** key 是 url_param id */
+  url_params: Record<string, { label: string; placeholder?: string }>;
+}
+
+/** 后端 provider::model::LocalizedText: 三语各一份。 */
+export type LocalizedText = Record<"zh" | "en" | "ja", string>;
+
+export interface ModelSlots {
+  fable: string;
+  opus: string;
+  sonnet: string;
+  haiku: string;
+  /**
+   * 兜底槽 (可选): fallback 虚拟模型命中该订阅时, 非空则把请求 model 改写为此值;
+   * 缺失 / 空串 = 未配置 = 透传原始 model。刻意 optional: 不参与 allSlotsFilled 必填校验,
+   * Rust 侧 #[serde(default)] 兼容不带该字段的 payload。
+   */
+  fallback?: string;
+  /**
+   * Jev 槽 (可选, 只对 systemone 订阅有意义): model-jev 命中该订阅时非空则改写请求 model;
+   * 缺失 / 空串 = 透传客户端 model。不参与 allSlotsFilled。
+   */
+  jev?: string;
+}
+
+/**
+ * 单个槽位的 reasoning effort 档位。
+ * 刻意不含 "minimal" —— 它是 OpenAI 系专有档, Anthropic 不接受;
+ * 理由见 src-tauri/src/commands/subscriptions.rs::ALLOWED_SLOT_EFFORTS。
+ */
+export type SlotEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * 每槽位 reasoning effort 覆盖。字段缺失 = auto (透传 Claude Code 请求携带的 effort);
+ * 有值 = 强制该档位, 丢弃客户端传入值。
+ * 与 Rust `SlotEfforts` 对齐 (每字段 serde skip_serializing_if = Option::is_none)。
+ */
+export interface SlotEfforts {
+  fable?: SlotEffort;
+  opus?: SlotEffort;
+  sonnet?: SlotEffort;
+  haiku?: SlotEffort;
+}
+
+export type QuotaPeriod = "daily" | "weekly" | "monthly" | "total";
+
+/** 每周期 token 限额 (cc-router 侧安全阀)。字段缺失/undefined = 该周期不限。 */
+export interface TokenQuotas {
+  daily?: number | null;
+  weekly?: number | null;
+  monthly?: number | null;
+  total?: number | null;
+}
+
+/**
+ * 单个周期的用量快照。后端总是按 daily/weekly/monthly/total 顺序返回 4 条。
+ * `limit` / `period_end_ms` 缺失 (undefined) = 该周期未配置限额 / 无固定结束时间 (total)。
+ */
+export interface QuotaUsageDto {
+  period: QuotaPeriod;
+  limit?: number;
+  input: number;
+  output: number;
+  cache_creation: number;
+  cache_read: number;
+  /** Unix ms */
+  period_start_ms: number;
+  /** Unix ms */
+  period_end_ms?: number;
+  exceeded: boolean;
+}
+
+export interface ModelInfo {
+  id: string;
+  display_name?: string;
+}
+
+export interface ModelDiscoveryDto {
+  enabled: boolean;
+  path: string;
+  url?: string;
+  cache_ttl_hours: number;
+  example_models: string[];
+}
+
+export type BalanceSeverity = "normal" | "low" | "critical";
+
+/** 单条余额展示项. 一个订阅可能有多条 (DeepSeek 多币种, 或未来 token 配额 + 充值余额). */
+export interface BalanceEntry {
+  /** 主标签, 例 "余额 (CNY)" */
+  label: string;
+  /** 数值字符串, 保留原始精度 ("39.28") */
+  value_text: string;
+  /** 单位, 例 "CNY" / "USD" / "tokens" */
+  unit: string;
+  /** 副标题, 例 "充值 ¥39.28, 赠送 ¥0.00" */
+  hint?: string;
+  severity: BalanceSeverity;
+  /** label / hint 的结构化形式; 老版本缓存没有, 此时退回 label / hint 原文 */
+  detail?: BalanceDetail;
+}
+
+/** 对齐 Rust `BalanceDetail`; 金额为字符串, 标签恒为「余额 (unit)」 */
+export type BalanceDetail =
+  | { code: "topup_granted"; topped_up: string; granted: string }
+  | { code: "topup_used"; topped_up: string; used: string };
+
+/** 余额快照. 异构 provider 响应在 Rust 翻译后的 UI-ready 结构. */
+export interface BalanceSnapshot {
+  /** 账户是否可用 (DeepSeek 提供; 不提供则 undefined). false 时 UI 警示账户欠费/封号. */
+  is_available?: boolean;
+  entries: BalanceEntry[];
+  /** ISO 8601 字符串 (来自 chrono::DateTime<Utc>). 通常用 BalanceCacheDto.fetched_at 取 ms. */
+  fetched_at: string;
+}
+
+/** 余额缓存 DTO (持久化在 subscription_balance_cache 表). */
+export interface BalanceCacheDto {
+  /** Unix ms */
+  fetched_at: number;
+  snapshot: BalanceSnapshot;
+}
+
+/** refresh_subscription_balance command 返回. */
+export type RefreshBalanceResult =
+  | { kind: "success"; snapshot: BalanceSnapshot; fetched_at: number }
+  | { kind: "failed"; reason: string }
+  | { kind: "unsupported" };
+
+export interface SubscriptionDto {
+  id: string;
+  /** 来源标记: 内置 yaml id 或自定义 marker (如 "custom" / "custom-openai") */
+  provider_id: string;
+  /** 来源 endpoint id, 自定义订阅写同 provider_id 的 marker */
+  endpoint_id: string;
+  display_name: string;
+  model_slots: ModelSlots;
+  /** 每槽位 reasoning effort 覆盖。字段缺失 = auto。后端总是带这个 key (可以是 {})。 */
+  slot_efforts: SlotEfforts;
+  /** 每周期 token 限额。字段缺失 = 该周期不限。后端总是带这个 key (可以是 {})。 */
+  token_quotas: TokenQuotas;
+  /** 四周期用量快照, 固定按 daily/weekly/monthly/total 顺序返回 4 条。 */
+  quota_usage: QuotaUsageDto[];
+  enabled: boolean;
+  state: SubscriptionState;
+  /** 调度器此刻会不会选它 (启用 + 健康 + 不在冷却 + 限额未满), 后端算好的。 */
+  is_dispatchable: boolean;
+  cooldown_until?: number;
+  last_error_message?: string;
+  /** last_error_message 的结构化形式; 认不出的文本 (如老版本写的) 为 undefined */
+  last_error_code?: LastErrorCode;
+  created_at: number;
+  updated_at: number;
+  /** 该订阅被哪些虚拟模型引用 */
+  referenced_by: VirtualModelName[];
+  /** 缓存的模型列表（可能为空，fetched_at = Unix ms） */
+  model_cache?: {
+    fetched_at: number;
+    models: ModelInfo[];
+  };
+
+  // snapshot 字段
+  base_url: string;
+  messages_path: string;
+  auth_header_name: string;
+  auth_header_format: AuthHeaderFormat;
+  required_headers: Record<string, string>;
+  forward_headers: string[];
+  /** 「透传客户端请求头」开关 (仅 auth_type=api_key 的透传路径消费, 默认 false) */
+  forward_client_headers: boolean;
+  /** 创建时快照的端点协议, 之后不可变。systemone 订阅只能绑 model-jev, 反之亦然。 */
+  endpoint_protocol: EndpointProtocol;
+  /** Provider params as entered (e.g. account_id); resolved strings are already in base_url etc. */
+  url_params: Record<string, string>;
+  model_discovery: ModelDiscoveryDto;
+  /** true 表示该 provider 声明且启用了余额查询接口. */
+  balance_supported: boolean;
+  /** 余额缓存 (上次拉到的值). undefined 表示从未查过或不支持. */
+  balance_cache?: BalanceCacheDto;
+  /** 创建时写进 DB 的厂商名快照 (中文); 显示走 lib/providerText.ts::providerName。 */
+  provider_display_name: string;
+  /** 内置厂商的三语名字 (后端按 yaml 现查); 自定义订阅与 yaml 已删的厂商没有。 */
+  provider_names?: LocalizedText;
+  provider_icon: string;
+  is_user_defined: boolean;
+  /** api_key 是否非空 (DTO 不带 Key 本身); 导入时缺 Key 的订阅据此提示「待填写 API Key」 */
+  has_api_key: boolean;
+
+  /** 凭据来源类型. 默认 "api_key" 兼容老 DTO 消费者. */
+  auth_type: AuthType;
+  /** OAuth 账号信息 (仅 auth_type=chatgpt_oauth 有值, 不含 refresh_token) */
+  oauth_account?: {
+    account_id: string;
+    email?: string;
+    /** Unix ms */
+    authenticated_at: number;
+  };
+}
+
+/** 创建订阅时的 source: 内置 yaml 模板 vs 用户自定义 */
+export type CreateSource =
+  | {
+      kind: "from_template";
+      provider_id: string;
+      endpoint_id: string;
+      /** provider 声明的 url_params 取值; 缺省 = 空 */
+      url_params?: Record<string, string>;
+    }
+  | {
+      kind: "custom";
+      provider_display_name: string;
+      base_url: string;
+      messages_path: string;
+      auth_header_name: string;
+      auth_header_format: AuthHeaderFormat;
+      /** 协议家族 — 缺省=anthropic 透传; "gemini"=Gemini generateContent 翻译; "gemini_interactions"=Gemini Interactions API 翻译; "openai_responses"=OpenAI Responses 翻译; "openai_chat_completions"=OpenAI Chat Completions 翻译 (DeepSeek/Together/Groq/Ollama 等兼容生态); "systemone"=System One 决策模型原样透传, 只进 model-jev */
+      protocol?: CustomProtocol;
+      /** 表单里「获取模型列表」实际打通的地址 (probe_custom_models 返回值原样回传); 没探测过则省略 */
+      models_url?: string;
+    };
+
+export type CustomProtocol =
+  | "anthropic"
+  | "gemini"
+  | "gemini_interactions"
+  | "openai_responses"
+  | "openai_chat_completions"
+  | "systemone";
+
+/** probe_custom_models 入参: 保存前探测, 不落库 */
+export interface ProbeCustomModelsInput {
+  base_url: string;
+  auth_header_name: string;
+  auth_header_format: AuthHeaderFormat;
+  api_key: string;
+  protocol?: CustomProtocol;
+}
+
+export type ProbeCustomModelsResult =
+  | { kind: "auto"; models: ModelInfo[]; models_url: string }
+  | { kind: "manual_fallback"; reason: string };
+
+/** tui_launch_info 返回值. path 为 null = 此构建未包含 cc-router-tui (dev / 旧版本) */
+export interface TuiLaunchInfo {
+  path: string | null;
+  is_appimage: boolean;
+  /** 「添加到 PATH」在这台机器上的做法. system = 已在系统 PATH (deb), unavailable = 没有 sidecar; 这两种不显示按钮 */
+  install_kind: "symlink" | "user_path" | "copy" | "system" | "unavailable";
+  in_path: boolean;
+  /** 已安装时的位置: macOS 链接路径 / Windows PATH 条目 / Linux 复制目标 */
+  installed_at: string | null;
+  can_install: boolean;
+  install_blocked: "translocated" | "on_disk_image" | "occupied" | null;
+  /** 仅 copy: ~/.local/bin 不在 PATH 里 */
+  local_bin_off_path: boolean;
+}
+
+/** install_tui_command / uninstall_tui_command 返回值. cancelled = 用户在系统授权框里点了取消 (不是错误, 什么都没发生) */
+export interface TuiInstallOutcome {
+  info: TuiLaunchInfo;
+  cancelled: boolean;
+}
+
+export interface CreateSubscriptionInput {
+  display_name: string;
+  api_key: string;
+  model_slots: ModelSlots;
+  source: CreateSource;
+}
+
+/** 自定义订阅修改连接信息时的 patch */
+export interface ConnectionPatch {
+  base_url?: string;
+  messages_path?: string;
+  auth_header_name?: string;
+  auth_header_format?: AuthHeaderFormat;
+  provider_display_name?: string;
+  /** 额外出站 header, 整块替换; 缺省 = 不改 */
+  required_headers?: Record<string, string>;
+}
+
+export interface SubscriptionPatch {
+  display_name?: string;
+  model_slots?: ModelSlots;
+  /** 每槽位 effort 覆盖, 整块替换 (与 model_slots 一致, 无 per-slot patch) */
+  slot_efforts?: SlotEfforts;
+  /** 「透传客户端请求头」开关 (仅透传订阅显示, 内置/自定义均可改) */
+  forward_client_headers?: boolean;
+  /** 内置订阅: 切换 endpoint, 后端 re-snapshot */
+  endpoint_id?: string;
+  /** 内置订阅: 改 url_params (可与 endpoint_id 同发), 后端与现有值合并后整体重新快照; 自定义订阅会被拒绝 */
+  url_params?: Record<string, string>;
+  /** 自定义订阅: 改连接信息 */
+  connection?: ConnectionPatch;
+}
+
+export interface TestConnectionResult {
+  ok: boolean;
+  message: string;
+  /** 上游 HTTP 状态码;网络错误时为 undefined */
+  http_status?: number;
+  /** 实际用于测试的 model 名 */
+  model_used?: string;
+  /** 测试通过且触发了状态机复活 */
+  state_reset: boolean;
+  /** message 是 cc-router 固定文案时的结构化形式; 上游原文为 undefined */
+  note?: ProbeNote;
+}
+
+/** 对齐 Rust `subscription::ping::ProbeNote` */
+export type ProbeNote =
+  | { code: "ok" }
+  | { code: "network"; detail: string }
+  | { code: "no_test_model" };
+
+/** 对齐 Rust `subscription::last_error::LastError` */
+export type LastErrorCode =
+  | { code: "auth_failed"; status: number }
+  | { code: "rate_limited" }
+  | { code: "server_error"; status: number }
+  | { code: "network" }
+  | { code: "upstream_quota_exhausted" }
+  | { code: "upstream_rate_limited" };
+
+export type RefreshModelListResult =
+  | { kind: "auto"; models: ModelInfo[]; fetched_at: number }
+  | { kind: "manual_fallback"; reason: string };
+
+export interface VirtualModelDto {
+  name: VirtualModelName;
+  mode: RoutingMode;
+  subscription_ids: string[];
+}
+
+export interface UpdateVirtualModelInput {
+  mode: RoutingMode;
+  subscription_ids: string[];
+}
+
+/** 代理监听协议组合 (Settings.proxy_mode). 默认 "http". */
+export type ProxyMode = "http" | "https" | "both";
+
+export interface Settings {
+  proxy_port: number;
+  /** 代理监听协议组合, 默认 "http"; 切换后点「重启代理服务」生效 */
+  proxy_mode: ProxyMode;
+  /** HTTPS 端口, 默认 23457; 仅当 proxy_mode 包含 https 时使用 */
+  https_port: number;
+  /** 用户配置的额外 SAN (IP/hostname). 内置 localhost/127.0.0.1/::1 永远在 leaf 证书里, 此项追加. */
+  tls_extra_sans: string[];
+  /** true: 监听 0.0.0.0（局域网可访问）；false: 仅 127.0.0.1 */
+  listen_all: boolean;
+  /**
+   * HTTPS 端口是否启用 HTTP/2 (通过 TLS ALPN 协商). 默认 true.
+   * true: 客户端按 ALPN 协商选 h2 或 h1; false: 强制 HTTP/1.1.
+   * 切换需重启 app。
+   */
+  https_enable_h2: boolean;
+  autostart: boolean;
+  log_retention_days: number;
+  db_size_limit_mb: number;
+  /** true: 校验 token;false: 任何请求放行 */
+  auth_enabled: boolean;
+  /** 当前 token 明文,通过 generate_new_token 命令重新生成 */
+  auth_token: string;
+  /** true: 响应附加 CORS 头;false: 浏览器跨域调用会被拦截 */
+  cors_enabled: boolean;
+  /** Access-Control-Allow-Origin 值,默认 "*" */
+  cors_allow_origin: string;
+  /** 前端 UI 语言偏好: "system" 跟随系统 / "zh" / "en" / "ja"。默认 system */
+  preferred_language: "system" | "zh" | "en" | "ja";
+  /**
+   * 更新源选择: null=未设置(走 tauri.conf.json 默认 GitHub),
+   * "international"=国际(GitHub) / "china"=中国大陆(阿里云 OSS)。
+   * 首次启动后前端按 navigator.language 自动写入。
+   */
+  update_source: UpdateSource | null;
+  /**
+   * 调试模式: 开启后每次出站 attempt 把客户端请求体 / cc-router 出站请求体 /
+   * 上游响应体三段写入 app_data_dir/debug-dumps/ 下 .txt 文件,排查协议适配类问题.
+   * 默认关闭。
+   */
+  debug_mode: boolean;
+  /** 入站请求体上限 (MiB), 默认 32。修改需重启 app 才生效 (router 构建时读取)。 */
+  max_request_body_mb: number;
+  /** 是否在代理端口上提供网页管理界面 (/ui)。默认 false，改动即时生效 */
+  web_ui_enabled: boolean;
+  /** 网页界面是否要求登录（凭代理 auth_token）。默认 true，与 auth_enabled 互相独立 */
+  web_ui_auth_enabled: boolean;
+  /** 终端界面 (cc-router-tui) 是否允许接入. 默认关, 与 web_ui_enabled 互相独立 */
+  tui_enabled: boolean;
+  /** 导出用量小票时是否播放「小票机吐纸」动画, 默认 true */
+  receipt_print_animation: boolean;
+  /** 上次关闭「更新内容」弹窗时的 app 版本; null = 从没有此功能的老版本升上来。只读, 由 mark_release_notes_seen 写 */
+  last_seen_release_notes: string | null;
+}
+
+export type UpdateSource = "international" | "china";
+
+export interface SettingsPatch {
+  proxy_port?: number;
+  proxy_mode?: ProxyMode;
+  https_port?: number;
+  tls_extra_sans?: string[];
+  listen_all?: boolean;
+  https_enable_h2?: boolean;
+  autostart?: boolean;
+  log_retention_days?: number;
+  db_size_limit_mb?: number;
+  auth_enabled?: boolean;
+  cors_enabled?: boolean;
+  cors_allow_origin?: string;
+  preferred_language?: "system" | "zh" | "en" | "ja";
+  update_source?: UpdateSource;
+  debug_mode?: boolean;
+  max_request_body_mb?: number;
+  web_ui_enabled?: boolean;
+  web_ui_auth_enabled?: boolean;
+  tui_enabled?: boolean;
+  receipt_print_animation?: boolean;
+  // 注意: auth_token 不在 patch 里,必须通过 generateNewToken() 改
+}
+
+/** Rust 侧 commands::app::StorageStatsDto */
+export interface StorageStatsDto {
+  db_bytes: number;
+  requests_rows: number;
+  events_rows: number;
+  stats_rows: number;
+}
+
+/** Rust 侧 commands::updater::UpdateInfo */
+export interface UpdateInfo {
+  version: string;
+  current_version: string;
+  body?: string;
+}
+
+/** updater://progress 事件 payload */
+export type UpdaterProgressEvent =
+  | { phase: "started"; content_length: number | null }
+  | { phase: "progress"; chunk_length: number }
+  | { phase: "finished" };
+
+/** 代理正在运行的实例的生效配置 (后端 proxy/listeners.rs::ProxyConfig). 与设置不等 = 有未生效改动. */
+export interface AppliedProxyConfig {
+  proxy_mode: ProxyMode;
+  proxy_port: number;
+  https_port: number;
+  listen_all: boolean;
+  https_enable_h2: boolean;
+  max_request_body_mb: number;
+}
+
+export interface ProxyStatus {
+  /** 兼容字段: HTTP 端口 (HTTPS-only 模式下回退到 HTTPS 端口) */
+  port: number;
+  running: boolean;
+  mode: ProxyMode;
+  /** HTTP listener 实际端口, 未启用为 null */
+  http_port: number | null;
+  /** HTTPS listener 实际端口, 未启用为 null */
+  https_port: number | null;
+  /** 监听地址 (0.0.0.0 vs 127.0.0.1) */
+  listen_all: boolean;
+  /** 客户端工具应连接的完整 base URL (含 scheme + port). 由后端 AppState::local_base_url 决定. */
+  base_url: string;
+  /** 代理在运行且有需要「重启代理服务」才生效的改动 */
+  restart_pending: boolean;
+  /** 生效配置; null = 未运行 */
+  applied: AppliedProxyConfig | null;
+  /** 最近一次启动 / 重启 / 运行中崩溃的原因 */
+  last_error: string | null;
+}
+
+export type RestartProxyResult =
+  | { outcome: "applied"; status: ProxyStatus }
+  | { outcome: "rolled_back" | "stopped" | "failed"; status: ProxyStatus; error: string };
+
+/** TLS 状态 (cc-router 自签 CA 信息). 对应 Rust 侧 tls::TlsStatus */
+export interface TlsStatus {
+  ca_exists: boolean;
+  /** SHA-256 hex 全小写, 64 字符. ca_exists=false 时为 null */
+  ca_fingerprint_sha256: string | null;
+  /** CA 公钥 PEM 文件绝对路径. ca_exists=false 时为 null */
+  ca_pem_path: string | null;
+}
+
+export interface OnboardingState {
+  completed: boolean;
+}
+
+export type RequestStatus = "success" | "error" | "timeout";
+
+/**
+ * 客户端识别短标签. 与 Rust 侧 `proxy::client_fingerprint::SUPPORTED_TOOLS`
+ * 手工同步; `list_supported_client_tools` command 返回的值必须落在此 union 内。
+ * Backend 返回 NULL → 前端展示 "unk" (未识别).
+ */
+export type ClientToolId =
+  | "claude-code"
+  | "claude-desktop"
+  | "codex-cli"
+  | "codex-desktop"
+  | "cc-router"
+  | "zed"
+  | "cursor"
+  | "opencode"
+  | "anthropic-sdk-python"
+  | "anthropic-sdk-js";
+
+/**
+ * 筛选器 sentinel: 选 "未识别" 时前端发送此值, 后端拼 `client_tool IS NULL`.
+ * 必须与 Rust 侧 `commands/requests.rs::UNKNOWN_SENTINEL` 保持同值, 漂移会让筛选静默失效。
+ */
+export const CLIENT_TOOL_UNKNOWN_SENTINEL = "__unknown__";
+
+/**
+ * `tool_use_names` JSON 数组超长截断时追加的标记。必须与 Rust 侧
+ * `proxy/tool_log.rs::TRUNCATED_MARKER` 保持同值。
+ */
+export const TOOL_NAME_TRUNCATED_MARKER = "…";
+
+export interface RequestLogDto {
+  id: string;
+  timestamp: number;
+  virtual_model_name: VirtualModelName;
+  subscription_id: string;
+  provider_id: string;
+  endpoint_id: string;
+  real_model_name: string;
+  /** 上游响应里的 message.model 原值;错误/超时为 undefined */
+  response_model_name?: string;
+  is_streaming: boolean;
+  status: RequestStatus;
+  http_status?: number;
+  total_latency_ms?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
+  error_message?: string;
+  /** 上游错误响应 body 截断(最多 4KB), 仅错误路径有值 */
+  upstream_response_body?: string;
+  /** 未识别为 undefined → 前端展示 "unk" */
+  client_tool?: ClientToolId;
+  client_user_agent?: string;
+  client_version?: string;
+  /** TCP 对端 IP. listen_all=true 时区分本机 vs 局域网设备 */
+  client_ip?: string;
+  /** 请求入口端点: "messages" / "responses". 老日志为 undefined → 前端展示 "—" */
+  entry_kind?: string;
+  /** 下游 (CC ↔ cc-router) HTTP 协议版本, 形如 "HTTP/1.1" / "HTTP/2.0" */
+  downstream_http_version?: string;
+  /** 思考强度: 客户端本次请求携带的档位, 老日志为 null */
+  client_effort?: string | null;
+  /** 思考强度: cc-router 实际发往上游的档位 */
+  effective_effort?: string | null;
+  /** effective_effort 的来源: "slot" / "client" / "yaml" */
+  effort_source?: string | null;
+  /** 上游响应回显的档位, 仅 OpenAI Responses 系有值 */
+  upstream_effort?: string | null;
+  /** 响应 stop_reason 原值 (tool_use / end_turn / max_tokens …), 老日志或错误为 null */
+  stop_reason?: string | null;
+  /** 请求 tools[] 长度 */
+  tools_offered_count?: number | null;
+  /** 最后一条 user 消息里的 tool_result 块数 */
+  tool_result_count?: number | null;
+  /** 响应中 tool_use + server_tool_use 块数; 成功路径恒有值 (含 0), 错误路径 null */
+  tool_use_count?: number | null;
+  /** 调用名 JSON 数组字符串, 保序允许重复; 0 次时 null; 超长以 "…" 结尾 */
+  tool_use_names?: string | null;
+}
+
+export interface ListRequestsResult {
+  items: RequestLogDto[];
+  total: number;
+}
+
+export interface RequestLogFilters {
+  virtual_model_name?: VirtualModelName;
+  provider_id?: string;
+  status?: RequestStatus;
+  subscription_id?: string;
+  /** ClientToolId 或 CLIENT_TOOL_UNKNOWN_SENTINEL */
+  client_tool?: string;
+}
+
+// ===== 统计聚合 (commands/statistics.rs) =====
+
+export type StatsRange =
+  | "today"
+  | "last7_days"
+  | "last30_days"
+  | "last90_days"
+  | "all_time";
+
+export type BreakdownBy = "virtual_model" | "subscription";
+
+export interface OverallStatsDto {
+  total_requests: number;
+  success_count: number;
+  error_count: number;
+  timeout_count: number;
+  /** 0–100 */
+  success_rate_pct: number;
+  avg_duration_ms?: number;
+  p95_duration_ms?: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cache_creation_tokens: number;
+  total_cache_read_tokens: number;
+  total_tool_use_count: number;
+  /** 至少一次工具调用的请求数, 占比分母用 success_count */
+  tool_use_request_count: number;
+}
+
+export interface DailySeriesPointDto {
+  /** 本地日历日 YYYY-MM-DD */
+  day: string;
+  /** 本地小时 0–23, 仅 range=today 按小时分桶时有值 */
+  hour?: number;
+  request_count: number;
+  success_count: number;
+  error_count: number;
+  timeout_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cache_creation_tokens: number;
+  total_cache_read_tokens: number;
+  avg_duration_ms?: number;
+}
+
+export interface BreakdownDto {
+  /** virtual_model_name 或 subscription_id (UUID 字符串) */
+  key: string;
+  /** 显示名 (虚拟模型字面量 / 订阅 alias / "(已删除订阅)") */
+  label: string;
+  request_count: number;
+  success_count: number;
+  error_count: number;
+  timeout_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cache_creation_tokens: number;
+  total_cache_read_tokens: number;
+  avg_duration_ms?: number;
+  tool_use_count: number;
+}
+
+export interface HeatmapDayDto {
+  /** 本地日历日 YYYY-MM-DD */
+  day: string;
+  /** input + output tokens (不含缓存两项) */
+  total_tokens: number;
+  request_count: number;
+}
+
+export interface ToolBreakdownDto {
+  tool_name: string;
+  /** ClientToolId 原值; 未识别为 undefined */
+  client_tool?: string | null;
+  call_count: number;
+}
+
+/**
+ * Live Routing「客户端接入」聚合行 (commands/requests.rs::ClientActivityDto)。
+ * 由 requests.client_tool 分组的被动流量检测结果 —— 哪个客户端最近真的走了 cc-router。
+ * `client_tool` 为空 = 未识别桶 (UA 认不出, 或迁移 009 之前的老日志)。
+ */
+export interface ClientActivityDto {
+  client_tool?: string | null;
+  request_count: number;
+  /** 最近一次请求时间 (ms epoch) */
+  last_seen: number;
+  /** 上游输入 + 输出 token 之和 (不含缓存读写), 拿不到用量的请求按 0 计 */
+  total_tokens: number;
+}
+
+// ===== Receipts (commands/receipts.rs) =====
+// 与 StatsRange 故意分开: Receipts 直接查 requests 原始表, 支持 24h 滚动窗口
+
+export type ReceiptRange =
+  | "last_24_hours"
+  | "last7_days"
+  | "last30_days"
+  | "last_year"
+  | "all_time";
+
+export interface ReceiptTotalsDto {
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+}
+
+export interface ReceiptSubItemDto {
+  subscription_id: string;
+  /** undefined 表示订阅已被删除; 前端按 i18n 显示兜底文案 */
+  subscription_display_name?: string;
+  provider_id: string;
+  provider_display_name: string;
+  real_model_name: string;
+  totals: ReceiptTotalsDto;
+}
+
+export interface ReceiptVirtualModelItemDto {
+  /** "model-fable" | "model-opus" | "model-sonnet" | "model-haiku" | "model-jev" — fallback 不出现 */
+  virtual_model_name: string;
+  subtotal: ReceiptTotalsDto;
+  sub_items: ReceiptSubItemDto[];
+}
+
+export interface ReceiptDto {
+  range: ReceiptRange;
+  range_start_ms: number;
+  range_end_ms: number;
+  generated_at_ms: number;
+  /** 8 位大写 hex 单号 */
+  slip_no: string;
+  /** 4 项 (fable/opus/sonnet/haiku, 顺序固定, 空也返回), 有 Jev 用量时末尾多一项 model-jev */
+  items: ReceiptVirtualModelItemDto[];
+  grand_total: ReceiptTotalsDto;
+}
+
+export type EventKind =
+  | "subscription_state_change"
+  | "system_error"
+  | "quota_reached";
+export type EventSeverity = "info" | "warn" | "error";
+
+export interface EventDto {
+  id: string;
+  timestamp: number;
+  kind: EventKind;
+  severity: EventSeverity;
+  subscription_id?: string;
+  request_id?: string;
+  summary: string;
+  /** 解析后的结构化对象, 后端已 JSON.parse */
+  payload?: unknown;
+}
+
+export interface ListEventsResult {
+  items: EventDto[];
+  total: number;
+}
+
+export interface EventFilters {
+  kind?: EventKind;
+  subscription_id?: string;
+  severity?: EventSeverity;
+}
+
+/** subscription_state_change 事件的 payload 反序列化形态 */
+export interface StateChangePayload {
+  from: SubscriptionState;
+  to: SubscriptionState;
+  reason: string;
+  last_error?: string | null;
+  /** 老事件没有此字段 */
+  last_error_code?: LastErrorCode | null;
+}
+
+/** quota_reached 事件的 payload 反序列化形态 */
+export interface QuotaReachedPayload {
+  period: QuotaPeriod;
+}
+
+// 路由实时事件(对应 proxy/pipeline.rs 里 emit 的 payload)
+export interface RouteAttemptStartedEvent {
+  subscription_id: string;
+  virtual_model: VirtualModelName;
+}
+
+export interface RouteAttemptFinishedEvent {
+  subscription_id: string;
+  virtual_model: VirtualModelName;
+  success: boolean;
+}
+
+export type RouteFlashKind = "attempt" | "success" | "error";
+
+// ===== 客户端集成共享 (claude_code / 未来 ollama 等) =====
+
+/**
+ * 配置文件同步状态. 五态对应后端 SyncStatus enum (字面量需保持一致).
+ * 各 integration 模块可继续 export 别名 (`ClaudeCodeSyncStatus = SyncStatus`) 以兼容老 import.
+ */
+export type SyncStatus =
+  | "in_sync"
+  | "needs_apply"
+  | "never_applied"
+  | "file_missing"
+  | "parse_error";
+
+// ===== Claude Code 集成 (commands/integrations.rs) =====
+
+export type ClaudeCodeSyncStatus = SyncStatus;
+
+export interface ClaudeCodeReadResult {
+  path: string;
+  /** null 表示 ~/.claude/settings.json 不存在 */
+  content: string | null;
+}
+
+export interface ClaudeCodeInspectResult {
+  path: string;
+  status: ClaudeCodeSyncStatus;
+  current_base_url: string | null;
+  current_token_matches: boolean;
+}
+
+export interface ClaudeCodeWriteOutcome {
+  path: string;
+  /** Some=触发了备份; null=未触发或已有 .bak */
+  backup_path: string | null;
+  bytes_written: number;
+}
+
+// === 更新内容 (src-tauri/src/release_notes) ===
+export type NotesLang = "zh" | "en" | "ja";
+
+export type NotesInline =
+  | { kind: "text"; text: string }
+  | { kind: "bold"; text: string }
+  | { kind: "code"; text: string }
+  | { kind: "link"; text: string; url: string };
+
+export interface NotesItem {
+  text: NotesInline[];
+  /** 二级列表项, 只有一层 */
+  children: NotesInline[][];
+}
+
+export interface NotesSection {
+  heading: string;
+  items: NotesItem[];
+}
+
+export interface NotesDoc {
+  /** 第一个分节之前的摘要段落 */
+  summary: NotesInline[][];
+  sections: NotesSection[];
+}
+
+export interface VersionNotes {
+  version: string;
+  date: string | null;
+  codename: string | null;
+  /** zh 必有, en / ja 可缺 */
+  notes: { zh: NotesDoc } & Partial<Record<"en" | "ja", NotesDoc>>;
+}
+
+export interface ReleaseNotesDto {
+  current: string;
+  /** 该自动弹出的版本, 倒序; 空 = 不弹 */
+  unseen: string[];
+  /** 全部内嵌版本, 倒序 */
+  versions: VersionNotes[];
+}
+
+// ---- 配置导入导出 (commands/backup.rs) ----
+
+export interface ExportSummary {
+  subscriptions: number;
+  with_secrets: boolean;
+}
+
+export type ImportPreviewStatus = "new" | "skip_existing_id" | "skip_oauth" | "skip_invalid";
+
+export interface ImportPreviewItem {
+  id: string;
+  display_name: string;
+  provider_id: string;
+  /** 导出时的厂商名快照 (中文); 本机能按 provider_id 找到内置厂商时优先用本地化名 */
+  provider_display_name: string;
+  provider_icon: string;
+  status: ImportPreviewStatus;
+  has_api_key: boolean;
+  redacted_headers: string[];
+  /** 仅 status = skip_invalid 时有: 与新建订阅相同的校验没通过的原因 (后端原文) */
+  invalid_reason?: string;
+}
+
+export interface ImportPreview {
+  app_version: string;
+  exported_at: number;
+  has_secrets: boolean;
+  local_subscription_count: number;
+  subscriptions: ImportPreviewItem[];
+}
+
+export interface ImportOptions {
+  password?: string;
+  skip_secrets: boolean;
+  import_token: boolean;
+}
+
+export interface ImportReport {
+  imported: number;
+  skipped_existing: number;
+  skipped_oauth: string[];
+  /** 没通过新建订阅校验而跳过的订阅 */
+  skipped_invalid: { name: string; reason: string }[];
+  /** 跨类绑定 (对话订阅 ↔ model-jev) 被跳过的记录; 后端为空时省略 */
+  skipped_bindings?: { name: string; reason: string }[];
+  disabled_missing_key: string[];
+  token_imported: boolean;
+  token_error?: string;
+}

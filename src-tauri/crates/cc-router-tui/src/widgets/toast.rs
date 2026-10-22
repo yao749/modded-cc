@@ -1,0 +1,86 @@
+//! 右上角的短提示。一次只显示一条, 后来的排队。
+
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
+
+use crate::format::fit;
+use crate::theme::Theme;
+
+/// 从出现到消失的总时长; 最后 [`crate::fx::ms::TOAST_OUT`] 毫秒在播消散效果。
+pub const LIFETIME_MS: i64 = 3000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toast {
+    pub kind: ToastKind,
+    pub text: String,
+    /// 第一次被画出来的时刻 (Unix 毫秒); 还在排队时为 None。
+    pub shown_at: Option<i64>,
+    pub fading: bool,
+}
+
+impl Toast {
+    pub fn new(kind: ToastKind, text: impl Into<String>) -> Self {
+        Self { kind, text: text.into(), shown_at: None, fading: false }
+    }
+
+    pub fn expired(&self, now_ms: i64) -> bool {
+        self.shown_at.is_some_and(|t| now_ms - t >= LIFETIME_MS)
+    }
+}
+
+/// 贴着右边、顶部对齐 `top`——调用方传内容区的 `y`, 这样有版本不一致横幅时 toast 不会盖住它。
+pub fn area(screen: Rect, top: u16, text: &str) -> Rect {
+    let max = screen.width.saturating_sub(4);
+    let width = (text.width() as u16 + 4).min(max);
+    Rect::new(screen.right().saturating_sub(width + 1), top, width, 3).intersection(screen)
+}
+
+pub fn draw(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {
+    let color = match toast.kind {
+        ToastKind::Info => theme.accent,
+        ToastKind::Success => theme.ok,
+        ToastKind::Error => theme.err,
+    };
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(color));
+    let inner_width = area.width.saturating_sub(4) as usize;
+    // M3 (fix round final): 裸 `Clear` 修不好紧贴 toast 左右边缘、横跨边界的宽字符 (CJK 等),
+    // 跟三个弹窗当初踩的是同一个坑 (`widgets::clear_popup_area` 的文档有完整解释)——toast 也贴着
+    // 屏幕内容画, 同样可能撞上这种情况, 复用弹窗那一套修复, 不再是单独一份裸 `Clear`。
+    crate::widgets::clear_popup_area(frame, area);
+    frame.render_widget(Paragraph::new(format!(" {} ", fit(&toast.text, inner_width))).block(block), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_toast_does_not_age() {
+        let mut t = Toast::new(ToastKind::Info, "x");
+        assert!(!t.expired(i64::MAX));
+        t.shown_at = Some(1_000);
+        assert!(!t.expired(1_000 + LIFETIME_MS - 1));
+        assert!(t.expired(1_000 + LIFETIME_MS));
+    }
+
+    #[test]
+    fn area_hugs_the_right_edge_and_never_leaves_the_screen() {
+        let screen = Rect::new(0, 0, 80, 24);
+        let a = area(screen, 3, "已重新连接"); // 10 列
+        assert_eq!((a.width, a.height, a.right(), a.y), (14, 3, 79, 3));
+        let long = "长".repeat(100);
+        let a = area(screen, 3, &long);
+        assert_eq!(a.width, 76);
+        assert!(screen.contains(ratatui::layout::Position::new(a.x, a.y)));
+    }
+}

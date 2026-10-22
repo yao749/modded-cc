@@ -1,0 +1,1227 @@
+/* ============================================================
+ * 画风「素净」(data-art="plain") —— 经典主题的外形:
+ * 1px 浅灰细线、规整小圆角、柔光阴影、系统字体, 没有手写批注和波浪线。
+ *
+ * styles.css 按手绘画风写成, 这里只盖掉两套画风不同的部分:
+ * - 外形 token (圆角 / 投影 / 字体 / 墨线色) 放在层外, 天然压过层内的 :root;
+ * - 规则一律写成 `:where([data-art~="plain"]) 原选择器`, 放进同一个 utilities 层:
+ *   :where() 不加权重, 权重与原规则持平, 本文件又排在 styles.css 之后, 所以恰好盖掉
+ *   原规则而不误伤更具体的规则 (例如盖 .btn 不会压过 .btn.primary)。
+ *   原规则里手绘版新加、经典版没有的属性要显式复位 (transform: none 之类),
+ *   否则会从 styles.css 漏过来。
+ * - styles.css 层外的暗色修补, 这里同样放在层外, 用 .dark:where(...) 对齐权重。
+ * 改 styles.css 里某条规则的外形时, 记得看看这里有没有对应的经典版。
+ * ============================================================ */
+
+:root:where([data-art~="plain"]) {
+  --r-sketch:     var(--r-sm);
+  --r-sketch-alt: var(--r-sm);
+  --r-card:       var(--r-lg);
+  --r-card-alt:   var(--r-md);
+  --r-blob:       50%;
+
+  --shadow-card: var(--shadow-sm);
+  --shadow-pop:  var(--shadow-lg);
+  --shadow-ink:  none;
+
+  /* 手绘版的「墨线」在经典版里是普通的中灰描边 */
+  --stroke: var(--line-2);
+
+  /* 系统字体, 不用随包的拉丁 webfont; 衬线标题与手写批注都回落到正文字体 */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont,
+    "Segoe UI Variable Text", "Segoe UI",
+    Inter, Roboto, "Helvetica Neue", Arial,
+    "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Micro Hei",
+    system-ui, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    "Cascadia Mono", "Cascadia Code", Consolas,
+    "DejaVu Sans Mono", "Liberation Mono",
+    "Source Han Mono SC", monospace;
+  --font-display: var(--font-sans);
+  --font-hand:    var(--font-sans);
+}
+
+@layer utilities {
+
+/* === Layout / Sidebar === */
+:where([data-art~="plain"]) .app { grid-template-columns: 204px 1fr; }
+:where([data-art~="plain"]) .sidebar {
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  padding: calc(22px + var(--titlebar-inset)) 14px 18px;
+  gap: 6px;
+}
+:where([data-art~="plain"]) .sidebar::after { display: none; }
+:where([data-art~="plain"]) .brand {
+  padding: 6px 10px 18px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+:where([data-art~="plain"]) .brand-name {
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 15px;
+}
+:where([data-art~="plain"]) .brand-tag { font-size: 11px; }
+
+:where([data-art~="plain"]) .nav-item {
+  min-height: 0;
+  padding: 8px 11px;
+  border: none;
+  border-radius: var(--r-sm);
+  transition: background 0.12s, color 0.12s;
+}
+:where([data-art~="plain"]) .nav-label { flex: initial; }
+:where([data-art~="plain"]) .nav-item:hover { background: var(--surface-3); }
+:where([data-art~="plain"]) .nav-item.active {
+  background: var(--ink);
+  color: var(--surface);
+  box-shadow: none;
+  font-weight: 500;
+}
+:where([data-art~="plain"]) .nav-item .nav-icon {
+  width: 16px; height: 16px;
+  color: var(--ink-3);
+  transition: none;
+}
+:where([data-art~="plain"]) .nav-item:hover .nav-icon { transform: none; }
+:where([data-art~="plain"]) .nav-item.active .nav-icon { color: var(--accent); }
+:where([data-art~="plain"]) .nav-item .badge {
+  display: block;
+  min-width: 0;
+  height: auto;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: inherit;
+  line-height: inherit;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border: none;
+  border-radius: 4px;
+  transform: none;
+}
+:where([data-art~="plain"]) .nav-item.active .badge {
+  background: rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.85);
+}
+/* 状态点: 经典版是一粒 CSS 圆点 (Sidebar 按画风渲染 <span>) */
+:where([data-art~="plain"]) .nav-dot {
+  width: 8px; height: 8px;
+  border-radius: 9999px;
+  background: var(--err);
+  box-shadow: 0 0 0 2px var(--err-bg);
+}
+:where([data-art~="plain"]) .nav-dot.ok {
+  width: 6px; height: 6px;
+  background: var(--ok);
+  box-shadow: 0 0 0 2px var(--ok-bg);
+}
+:where([data-art~="plain"]) .nav-footer { gap: 6px; }
+:where([data-art~="plain"]) .nav-ver {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+  transform: none;
+}
+:where([data-art~="plain"]) .nav-toggles { padding: 4px 0 0; }
+:where([data-art~="plain"]) .nav-toggle {
+  width: 30px; height: 30px;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--ink-3);
+}
+:where([data-art~="plain"]) .nav-toggle:hover { background: var(--surface-3); color: var(--ink); }
+:where([data-art~="plain"]) .nav-toggle:hover > svg { transform: none; }
+
+/* 像素 Logo (LogoMark 在经典画风下渲染成 <img>): 最近邻缩放保持锐利 */
+.logo-plain {
+  display: inline-block;
+  flex-shrink: 0;
+  line-height: 0;
+  overflow: hidden;
+  border-radius: 25%;
+}
+.logo-plain > img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+.logo-plain.tile { box-shadow: var(--shadow-sm); }
+
+/* === Page header === */
+:where([data-art~="plain"]) .page-header { margin-bottom: 18px; }
+:where([data-art~="plain"]) .page-header h1 {
+  position: static;
+  display: block;
+  z-index: auto;
+  font-family: inherit;
+  font-size: var(--fs-h1);
+  font-weight: 700;
+  line-height: inherit;
+  letter-spacing: -0.02em;
+  margin: 0 0 4px;
+}
+:where([data-art~="plain"]) .page-header h1::after { display: none; }
+:where([data-art~="plain"]) .page-header .subtitle {
+  font-size: 13px;
+  max-width: 720px;
+  line-height: 1.5;
+}
+:where([data-art~="plain"]) .page-actions { margin-bottom: 18px; }
+:where([data-art~="plain"]) .hand-note { display: none; }
+:where([data-art~="plain"]) .page-bar h1 {
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+/* === Cards === */
+:where([data-art~="plain"]) .card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+:where([data-art~="plain"]) .card-title {
+  font-family: inherit;
+  font-size: 13px;
+}
+
+/* === Buttons === */
+:where([data-art~="plain"]) .btn {
+  padding: 8px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  transition: background 0.12s, border-color 0.12s, transform 0.05s;
+}
+:where([data-art~="plain"]) .btn:hover {
+  background: var(--surface-2);
+  border-color: var(--ink-4);
+  transform: none;
+  box-shadow: none;
+}
+:where([data-art~="plain"]) .btn:active { transform: translateY(1px); box-shadow: none; }
+:where([data-art~="plain"]) .btn:disabled,
+:where([data-art~="plain"]) .btn[disabled] { transform: none; box-shadow: none; }
+:where([data-art~="plain"]) .btn.primary {
+  background: var(--ink);
+  color: var(--surface);
+  border-color: var(--ink);
+  font-weight: 500;
+}
+:where([data-art~="plain"]) .btn.primary:hover:not(:disabled) { background: var(--ink-2); box-shadow: none; }
+:where([data-art~="plain"]) .btn.accent {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 500;
+}
+:where([data-art~="plain"]) .btn.accent:hover:not(:disabled) { filter: brightness(0.95); box-shadow: none; }
+:where([data-art~="plain"]) .btn.danger {
+  background: var(--err);
+  color: #fff;
+  border-color: var(--err);
+  border-radius: var(--r-sm);
+  font-weight: 500;
+}
+:where([data-art~="plain"]) .btn.danger:hover:not(:disabled) { filter: brightness(0.95); box-shadow: none; }
+:where([data-art~="plain"]) .btn.ghost {
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .btn.ghost:hover { border-color: var(--ink-4); }
+:where([data-art~="plain"]) .btn.bare {
+  border: none;
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .btn.sm {
+  padding: 5px 10px;
+  border-width: 1px;
+  border-radius: 5px;
+}
+
+/* === Pills === */
+:where([data-art~="plain"]) .pill {
+  padding: 2px 8px;
+  border: none;
+  border-radius: 999px;
+}
+:where([data-art~="plain"]) .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+:where([data-art~="plain"]) .pill.ok { color: oklch(0.40 0.12 150); }
+:where([data-art~="plain"]) .pill.warn {
+  background: oklch(0.96 0.05 75);
+  color: oklch(0.45 0.13 75);
+}
+:where([data-art~="plain"]) .pill.err { color: oklch(0.42 0.16 28); }
+:where([data-art~="plain"]) .pill.tag {
+  border: 1px solid var(--line-2);
+  padding: 1px 6px;
+}
+
+/* === Inputs === */
+:where([data-art~="plain"]) .input,
+:where([data-art~="plain"]) .select {
+  padding: 8px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  transition: border 0.12s, box-shadow 0.12s;
+}
+/* 经典版悬停不加深边框; :not(:focus) 让聚焦态的深色边框照常生效 */
+:where([data-art~="plain"]) :is(.input, .select):hover:not(:disabled):not(:focus) { border-color: var(--line-2); }
+:where([data-art~="plain"]) .input:focus,
+:where([data-art~="plain"]) .select:focus {
+  border-color: var(--ink-2);
+  box-shadow: 0 0 0 3px rgba(0,0,0,0.04);
+}
+:where([data-art~="plain"]) .input:disabled,
+:where([data-art~="plain"]) .select:disabled { border-style: solid; }
+:where([data-art~="plain"]) .help-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+/* 开关: 实心轨道 + 白色圆钮 */
+:where([data-art~="plain"]) .toggle {
+  width: 38px; height: 22px;
+  background: var(--ink-5);
+  border: none;
+  border-radius: 999px;
+  transition: background 0.15s;
+}
+:where([data-art~="plain"]) .toggle::after {
+  width: 18px; height: 18px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  transition: transform 0.15s;
+}
+:where([data-art~="plain"]) .toggle.on { background: var(--ink); }
+:where([data-art~="plain"]) .toggle.on::after { transform: translateX(16px); background: #fff; }
+
+/* 分段控件: 灰底凹槽 + 白色滑块 */
+:where([data-art~="plain"]) .radio-group {
+  align-items: normal;
+  background: var(--surface-3);
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 3px;
+}
+:where([data-art~="plain"]) .radio-group button {
+  padding: 4px 12px;
+  border-radius: 5px;
+  transition: none;
+}
+:where([data-art~="plain"]) .radio-group button.on {
+  background: var(--surface);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+
+:where([data-art~="plain"]) .logo { border-radius: 5px; }
+
+/* === Tables === */
+:where([data-art~="plain"]) .table th {
+  font-weight: 500;
+  color: var(--ink-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+:where([data-art~="plain"]) .table td { border-bottom: 1px solid var(--line); }
+
+/* === Slot cards / endpoints === */
+:where([data-art~="plain"]) .slot-grid { gap: var(--gap-md); }
+:where([data-art~="plain"]) .slot-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--pad-card);
+  box-shadow: var(--shadow-sm);
+}
+:where([data-art~="plain"]) .slot-card:nth-child(even) { border-radius: var(--r-lg); }
+:where([data-art~="plain"]) .slot-card.wide {
+  box-shadow: var(--shadow-sm);
+  border-left: 3px solid var(--accent-line);
+}
+:where([data-art~="plain"]) .slot-head.compact .slot-name { font-size: 14px; }
+:where([data-art~="plain"]) .slot-head.compact .slot-purpose { font-size: 11.5px; }
+:where([data-art~="plain"]) .endpoint {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  transition: none;
+}
+:where([data-art~="plain"]) .endpoint:nth-child(even) { border-radius: var(--r-sm); }
+:where([data-art~="plain"]) .endpoint:hover { border-color: var(--line); }
+:where([data-art~="plain"]) .endpoint .grip { color: var(--ink-5); }
+:where([data-art~="plain"]) .endpoint .priority {
+  width: 18px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: inherit;
+  color: var(--ink-4);
+  background: var(--surface-3);
+  border-radius: 4px;
+}
+:where([data-art~="plain"]) .endpoint-status { width: 6px; height: 6px; border-radius: 50%; }
+:where([data-art~="plain"]) .endpoint .remove { border-radius: 4px; }
+:where([data-art~="plain"]) .endpoint .remove:hover { color: var(--err); background: var(--err-bg); }
+:where([data-art~="plain"]) .endpoint-list { gap: 5px; }
+:where([data-art~="plain"]) .endpoint.compact { height: 30px; }
+:where([data-art~="plain"]) .endpoint.compact .priority { width: 16px; height: 16px; font-size: 9.5px; }
+:where([data-art~="plain"]) .add-endpoint {
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-sm);
+  transition: none;
+}
+:where([data-art~="plain"]) .add-endpoint:hover:not(:disabled) {
+  border-color: var(--ink-4);
+  background: var(--surface-2);
+  transform: none;
+}
+:where([data-art~="plain"]) .add-endpoint.compact { height: 26px; }
+:where([data-art~="plain"]) .endpoint-empty {
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+/* === Logs / Statistics === */
+:where([data-art~="plain"]) .stat {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+:where([data-art~="plain"]) .range-tabs {
+  align-items: normal;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 3px;
+}
+:where([data-art~="plain"]) .range-tab { padding: 5px 12px; border-radius: 4px; }
+:where([data-art~="plain"]) .range-tab.active {
+  background: var(--surface);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+:where([data-art~="plain"]) .stats-section {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: none;
+}
+:where([data-art~="plain"]) .stats-section-title { font-family: inherit; font-size: 13px; }
+:where([data-art~="plain"]) .stats-tooltip {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+:where([data-art~="plain"]) .stats-block-title { font-family: inherit; font-size: 14px; }
+:where([data-art~="plain"]) .seg-tabs {
+  align-items: normal;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .seg-tab { padding: 3px 9px; border-radius: 3px; }
+:where([data-art~="plain"]) .seg-tab.active {
+  background: var(--surface);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+:where([data-art~="plain"]).dark .seg-tab.active { box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+
+/* === Wizard / settings / misc === */
+:where([data-art~="plain"]) .step .num {
+  width: 22px; height: 22px;
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: inherit;
+}
+:where([data-art~="plain"]) .setting-row { border-bottom: 1px solid var(--line); }
+:where([data-art~="plain"]) .codeblock {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .codeblock .copy { border: 1px solid var(--line-2); border-radius: 4px; }
+:where([data-art~="plain"]) .copyline {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .copyline-copy { border: 1px solid var(--line-2); border-radius: 4px; }
+:where([data-art~="plain"]) .danger-card {
+  background: oklch(0.98 0.02 28);
+  border: 1px solid oklch(0.85 0.08 28);
+  border-radius: var(--r-md);
+}
+:where([data-art~="plain"]) .app-mark {
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+}
+:where([data-art~="plain"]) .onboarding-disclaimer-mark {
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+}
+:where([data-art~="plain"]) .alert {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .alert.warn {
+  background: oklch(0.96 0.05 75);
+  border-color: oklch(0.85 0.07 75);
+  color: oklch(0.36 0.13 75);
+}
+:where([data-art~="plain"]) .alert.err {
+  border-color: oklch(0.82 0.10 28);
+  color: oklch(0.42 0.16 28);
+}
+:where([data-art~="plain"]) .status-dot { border-radius: 50%; }
+:where([data-art~="plain"]) .brand-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+/* === Dialogs === */
+:where([data-art~="plain"]) .cc-dialog {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+}
+:where([data-art~="plain"]) .cc-dialog-overlay { background: rgba(20, 18, 12, 0.32); }
+
+/* === Tabs: 选中项下方一道 2px 墨线, 没有波浪笔触 === */
+:where([data-art~="plain"]) .tabs {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+}
+:where([data-art~="plain"]) .tab {
+  position: static;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+}
+:where([data-art~="plain"]) .tab::after { display: none; }
+:where([data-art~="plain"]) .tab.active {
+  border-bottom-color: var(--ink);
+  font-weight: 500;
+}
+
+/* === 虚拟模型 · 添加订阅弹窗 (手绘改版后才有, 这里给出经典外形) === */
+:where([data-art~="plain"]) .pick-row {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+:where([data-art~="plain"]) .pick-row:nth-child(even) { border-radius: var(--r-sm); }
+:where([data-art~="plain"]) .pick-row.on {
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+  box-shadow: none;
+}
+:where([data-art~="plain"]) .pick-check {
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--surface);
+  color: #fff;
+}
+:where([data-art~="plain"]) .pick-row.on .pick-check { background: var(--accent); border-color: var(--accent); }
+:where([data-art~="plain"]) .pick-side { border-left: 1px solid var(--line); }
+:where([data-art~="plain"]) .pick-count {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* === 请求详情弹窗 === */
+:where([data-art~="plain"]) .rd-node {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+:where([data-art~="plain"]) .rd-node:nth-child(4n+3) { border-radius: var(--r-sm); }
+:where([data-art~="plain"]) .rd-node.accent {
+  border-color: var(--accent-line);
+  background: var(--accent-bg);
+  box-shadow: none;
+}
+:where([data-art~="plain"]) .rd-stat {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .rd-stat.strong { border-color: var(--line-2); }
+:where([data-art~="plain"]) .rd-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+:where([data-art~="plain"]) .rd-card-title { font-size: 13px; }
+:where([data-art~="plain"]) .rd-pre {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+/* === 更新内容弹窗 === */
+:where([data-art~="plain"]) .rn {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+:where([data-art~="plain"]) .rn-tabs { border-bottom: 1px solid var(--line); }
+:where([data-art~="plain"]) .rn-x { border-radius: var(--r-sm); }
+:where([data-art~="plain"]) .rn-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transform: none;
+}
+:where([data-art~="plain"]) .rn-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-top: 6px;
+}
+:where([data-art~="plain"]) .rn-title::after { display: none; }
+:where([data-art~="plain"]) .rn-meta { margin-top: 8px; }
+:where([data-art~="plain"]) .rn-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+:where([data-art~="plain"]) .rn-doodle { transform: none; color: var(--accent); }
+:where([data-art~="plain"]) .rn-chip {
+  padding: 1px 8px;
+  font-size: 11.5px;
+  border: none;
+  border-radius: 4px;
+  transform: none;
+}
+:where([data-art~="plain"]) .rn-chip-a { background: var(--accent-bg); color: var(--accent-ink); }
+:where([data-art~="plain"]) .rn-chip-b { background: var(--surface-3); border-radius: 4px; transform: none; }
+:where([data-art~="plain"]) .rn-chip-c { background: var(--surface-3); }
+:where([data-art~="plain"]) .rn-ul li::before {
+  left: 5px; top: 0.72em;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  transform: none;
+}
+/* 分隔线: 波浪 SVG 收成一道 1px 细线 */
+:where([data-art~="plain"]) .rn-rule { height: 1px; background: var(--line); }
+:where([data-art~="plain"]) .rn-rule path { display: none; }
+:where([data-art~="plain"]) .rn-group {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+:where([data-art~="plain"]) .rn-row {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+:where([data-art~="plain"]) .rn-row:nth-child(even) { border-radius: var(--r-sm); }
+:where([data-art~="plain"]) .rn-row.open {
+  border-color: var(--line-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+:where([data-art~="plain"]) .rn-fallback {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+:where([data-art~="plain"]) .rn-foot { border-top: 1px solid var(--line); }
+:where([data-art~="plain"]) .rn-hint {
+  font-size: 12px;
+  color: var(--ink-4);
+  transform: none;
+}
+
+/* ============================================================
+ * 经典版实时路由页 (LiveRoutingClassic / RouteFlowDiagramClassic)
+ * 原样取自手绘改版前的 styles.css, 类名统一加 lrc- 前缀 —— 手绘版的实时路由页
+ * 沿用了同名类 (.rf-canvas / .vm-map ...), 不改名两边的规则会互相串。
+ * ============================================================ */
+
+/* 通栏区块 */
+.lrc-flush-section {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 16px 24px 18px;
+}
+.lrc-flush-section:last-child { border-bottom: none; }
+.lrc-flush-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* 两栏通栏: 用竖线代替 gap */
+.lrc-flush-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  align-items: stretch;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.lrc-flush-split > * { padding: 14px 24px 16px; min-width: 0; }
+.lrc-flush-split > * + * { border-left: 1px solid var(--line); }
+
+/* 路由图: 固定 1000×340 画布 + 绝对定位 —— 弧线的贝塞尔控制点与节点坐标
+ * 是一体的, 用流式布局无法保证端点对齐。 */
+.lrc-rf-wrap {
+  /* 画布 1000px 是死的, 而最小窗口(1120) 减掉侧边栏(204) 只剩 916 —— 直接溢出。
+   * 拓扑图的价值在于一眼看全形状, 横向滚动等于毁掉它, 所以窄窗口下整体等比缩小。
+   * 标签行与画布必须一起缩放, 否则「UPSTREAMS」会跟云朵错位。
+   * 阈值 = 画布 1000 + 侧边栏 204 —— 改经典画风的侧边栏宽度必须同步改这里。 */
+  --rf-scale: 1;
+  background: var(--surface);
+  padding: 12px 0 14px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+@media (max-width: 1203px) {
+  .lrc-rf-wrap { --rf-scale: 0.9; }
+}
+/* transform 缩放后元素仍占原始高度(364 = 标签 20 + 间隔 4 + 画布 340),
+ * 用负 margin 把多出来的空白收回; margin-left 承担居中(margin:auto 在
+ * 子元素比容器宽时会失效, 只能自己算)。 */
+.lrc-rf-stage {
+  width: 1000px;
+  transform: scale(var(--rf-scale));
+  transform-origin: top left;
+  /* 24px = 标签行 20 + 与画布的间隔 4 */
+  margin-bottom: calc((24px + var(--rf-h, 340px)) * (var(--rf-scale) - 1));
+  margin-left: calc((100% - 1000px * var(--rf-scale)) / 2);
+}
+.lrc-rf-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 30px;
+  margin-bottom: 4px;
+}
+.lrc-rf-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+  color: var(--ink-4);
+}
+.lrc-rf-count { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); }
+/* 高度由 RouteFlowDiagramClassic 按上游家数算出后经 --rf-h 传进来 (10 家以内恒为 340) */
+.lrc-rf-canvas { position: relative; width: 1000px; height: var(--rf-h, 340px); }
+.lrc-rf-arcs { position: absolute; inset: 0; overflow: visible; }
+/* @keyframes flow 与手绘版共用 (styles.css) */
+.lrc-rf-flow { animation: flow 2.4s linear infinite; }
+
+/* logo 自带白底圆角, 再套一层深色方块等于两重边框, 所以 hub 只做定位容器。
+ * 纵向跟着画布中心走 (96/2 = 48), 画布变高时不会留在原地。 */
+.lrc-rf-hub {
+  position: absolute;
+  left: 452px;
+  top: calc(var(--rf-h, 340px) / 2 - 48px);
+  width: 96px; height: 96px;
+  display: grid;
+  place-items: center;
+}
+.lrc-rf-hub img {
+  width: 76px; height: 76px;
+  border-radius: 18px;
+  image-rendering: pixelated;
+  display: block;
+  box-shadow: 0 8px 24px -10px rgba(20,18,12,0.40);
+}
+.lrc-rf-hub.off img { box-shadow: none; opacity: 0.7; }
+.dark .lrc-rf-hub img { box-shadow: 0 8px 24px -10px rgba(0,0,0,0.70); }
+.lrc-rf-hub-label {
+  position: absolute;
+  left: 400px;
+  top: calc(var(--rf-h, 340px) / 2 + 56px);
+  width: 200px;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* 客户端 = 圆角终端窗口 */
+.lrc-rf-client {
+  position: absolute;
+  left: 14px;
+  width: 150px; height: 60px;
+  border: 1.5px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.lrc-rf-client-bar {
+  height: 15px;
+  background: var(--surface-3);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 7px;
+}
+.lrc-rf-client-bar i {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--ink-5);
+  display: block;
+}
+.lrc-rf-client-body {
+  height: calc(100% - 15px);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+}
+.lrc-rf-client-caret {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.lrc-rf-client-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 休眠方块 (保留期内没见过该客户端的请求): 整块淡出, 与手绘版的灰便签同理 */
+:where([data-art~="plain"]) .lrc-rf-client.dormant {
+  opacity: 0.45;
+  box-shadow: none;
+}
+:where([data-art~="plain"]) .lrc-rf-client.dormant .lrc-rf-client-name { color: var(--ink-4); }
+:where([data-art~="plain"]) .lrc-rf-client.dormant .lrc-rf-client-caret { color: var(--ink-4); }
+
+/* === 客户端接入 (被动流量检测) === */
+:where([data-art~="plain"]) .lrc-ca-sub {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ink-4);
+}
+:where([data-art~="plain"]) .lrc-ca-list { display: flex; flex-direction: column; margin-top: 8px; }
+/* 四列 5:3:2:2 比例铺开 (与手绘版同一套比例): 通栏比手绘卡更宽且不限宽,
+   定宽数值列会把时间/请求数挤在右角, 名字后面留下几百像素死区 */
+:where([data-art~="plain"]) .lrc-ca-row {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(110px, 3fr) minmax(84px, 2fr) minmax(76px, 2fr);
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+}
+:where([data-art~="plain"]) .lrc-ca-row.head {
+  border-top: none;
+  padding-bottom: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-4);
+  text-transform: uppercase;
+}
+/* 组行 = 手风琴按钮: 整行可点, button 默认样式全部复位 (网格/padding 沿用 .lrc-ca-row)。
+   放在 .lrc-ca-row.off 之前 —— 同优先级下让 off 的灰色盖过这里的 color: inherit */
+:where([data-art~="plain"]) .lrc-ca-row.group {
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+:where([data-art~="plain"]) .lrc-ca-row.group:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+:where([data-art~="plain"]) .lrc-ca-row.group:hover .lrc-ca-gname { text-decoration: underline; text-underline-offset: 3px; }
+:where([data-art~="plain"]) .lrc-ca-client { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+:where([data-art~="plain"]) .lrc-ca-gname {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where([data-art~="plain"]) .lrc-ca-chev { flex: none; transition: transform 0.15s ease; }
+:where([data-art~="plain"]) .lrc-ca-chev.open { transform: rotate(90deg); }
+/* 本文件晚于 styles.css 加载 (main.tsx 靠源码顺序定胜负), 上面这条 transition 会把
+   styles.css 里 prefers-reduced-motion 的复位盖掉, 所以在这里跟着复位一次 */
+@media (prefers-reduced-motion: reduce) {
+  :where([data-art~="plain"]) .lrc-ca-chev { transition: none; }
+}
+/* 成员行缩进 = 组行箭头宽 + 间距, 与组行状态点同一条竖线, 名字也对齐 */
+:where([data-art~="plain"]) .lrc-ca-row.member .lrc-ca-client { padding-left: 19px; }
+:where([data-art~="plain"]) .lrc-ca-row.off { color: var(--ink-4); }
+:where([data-art~="plain"]) .lrc-ca-time,
+:where([data-art~="plain"]) .lrc-ca-count,
+:where([data-art~="plain"]) .lrc-ca-count-head {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+:where([data-art~="plain"]) .lrc-ca-time { color: var(--ink-3); }
+/* 表头沿用行上的墨灰, 不被 .lrc-ca-time 自身颜色盖掉 */
+:where([data-art~="plain"]) .lrc-ca-row.head .lrc-ca-time { color: inherit; }
+:where([data-art~="plain"]) .lrc-ca-row.off .lrc-ca-time { color: var(--ink-4); }
+/* 状态点: 实心 = 保留期内接过流量, 空心环 = 没有。文案走 title / aria-label, 不占列 */
+:where([data-art~="plain"]) .lrc-ca-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-5);
+}
+:where([data-art~="plain"]) .lrc-ca-dot.on { background: var(--ok); }
+:where([data-art~="plain"]) .lrc-ca-empty { padding: 8px 0; font-size: 12px; color: var(--ink-4); }
+:where([data-art~="plain"]) .lrc-ca-foot {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+/* 上游 provider = 云朵。left/top 由 layoutUpstreams 算出后内联 —— 超过 6 家时
+ * 会分成左右交错两列, left 不再是常量。 */
+.lrc-rf-up { position: absolute; width: 132px; height: 53px; }
+.lrc-rf-up > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.lrc-rf-up-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  /* 云朵重心在下, 文字纯居中会偏高 */
+  padding-top: 9%;
+  line-height: 1.25;
+  pointer-events: none;
+}
+.lrc-rf-up-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--rf-up-ink);
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lrc-rf-up.err .lrc-rf-up-name { color: var(--rf-err-ink); }
+.lrc-rf-up-state { font-size: 9.5px; color: var(--rf-err-ink); }
+
+/* 接入信息 (只读值框 + 复制) */
+.lrc-access-fields { display: flex; flex-direction: column; gap: 11px; }
+.lrc-access-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-3);
+  margin-bottom: 5px;
+}
+.lrc-access-row { display: flex; align-items: center; gap: 8px; }
+.lrc-access-value {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lrc-access-copy {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  transition: background 0.12s, border-color 0.12s;
+}
+.lrc-access-copy:hover { background: var(--surface-2); border-color: var(--ink-4); }
+.lrc-access-hint { font-size: 11px; color: var(--ink-4); margin-top: 5px; line-height: 1.5; }
+.lrc-access-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* API 入口表 */
+.lrc-api-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.lrc-api-row:last-child { border-bottom: none; }
+.lrc-api-method {
+  justify-self: start;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.lrc-api-path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.lrc-api-desc { font-size: 11.5px; color: var(--ink-3); text-align: right; }
+
+.lrc-readonly-note {
+  margin-top: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lrc-readonly-note > svg { flex-shrink: 0; color: var(--ink-4); }
+.lrc-btn-dark {
+  background: var(--ink);
+  color: var(--surface);
+  border: none;
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.lrc-btn-dark:hover { background: var(--ink-2); }
+
+/* 虚拟模型映射 (三列)
+ * 三个区域块的配色由 --c-* 局部变量承担, 子元素只引用变量 ——
+ * 换一列的颜色只需改块上的 modifier, 不必逐个子选择器重写。 */
+.lrc-vm-map {
+  display: grid;
+  /* 中列定宽按最长的那条标题算: ja「cc-router 内部の仮想モデル」实测 149px,
+   * 加 .lrc-vm-map-head 的 22 内距 + 2 边框 + 余量 = 180。左右列是 1fr, 让得起。
+   * 三语标题都必须单行完整显示 —— 这列一换行就会顶破 34px 而错开所有数据行。 */
+  grid-template-columns: minmax(0, 1fr) 20px 180px 20px minmax(0, 1fr);
+  gap: 8px;
+}
+.lrc-vm-map-col {
+  --c-line: var(--line-2);
+  --c-bg: var(--surface-2);
+  --c-ink: var(--ink-3);
+  border: 1px dashed var(--c-line);
+  border-radius: 10px;
+  background: var(--c-bg);
+  overflow: hidden;
+  min-width: 0;
+}
+.lrc-vm-map-col.client {
+  --c-line: var(--rf-client-line);
+  --c-bg: var(--rf-client-bg);
+  --c-ink: var(--rf-client-ink);
+}
+.lrc-vm-map-col.router {
+  --c-line: var(--accent-line);
+  --c-bg: var(--rf-router-bg);
+  --c-ink: var(--accent-ink);
+}
+.lrc-vm-map-col.real {
+  --c-line: var(--rf-up-line);
+  --c-bg: var(--rf-up-bg);
+  --c-ink: var(--rf-up-ink);
+}
+/* 高度锁死 34px 是为了三列逐行对齐 —— 长译文必须退化成省略号,
+ * 一旦换行就会溢出到分隔线上并错开下面所有数据行 */
+.lrc-vm-map-head {
+  height: 34px;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--c-line);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--c-ink);
+}
+/* 不截断成省略号 —— 三语译文都按 150px 中列宽度控制在单行内;
+ * overflow:hidden 只是最后一道防线, 防止未来的超长文案顶破 34px 而错开三列 */
+.lrc-vm-map-head > span {
+  white-space: nowrap;
+  min-width: 0;
+}
+.lrc-vm-map-row {
+  height: 36px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+}
+.lrc-vm-map-row + .lrc-vm-map-row { border-top: 1px solid var(--c-line); }
+.lrc-vm-map-row.fallback { border-top: 1px dashed var(--line-2); }
+.lrc-vm-map-note { font-size: 11.5px; color: var(--c-ink); }
+/* 箭头列: padding-top 让第一格避开标题行, transparent 上边框补齐数据行的 1px 分隔 */
+.lrc-vm-map-arrows { display: flex; flex-direction: column; padding-top: 35px; }
+.lrc-vm-map-arrows > span {
+  height: 36px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ink-5);
+}
+.lrc-vm-map-arrows > span + span { border-top: 1px solid transparent; }
+
+.lrc-vm-chip {
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.lrc-vm-chip.primary { color: var(--ink); font-weight: 600; }
+.lrc-vm-pill {
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.lrc-vm-real {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 2px 7px 2px 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+.lrc-vm-real.err { border-color: var(--rf-err-line); }
+.lrc-vm-mode {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-4);
+  flex-shrink: 0;
+}
+.lrc-vm-map-goto {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--rf-up-line);
+  color: var(--rf-up-ink);
+  font-size: 10.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.lrc-vm-map-foot {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-4);
+}
+
+}
+
+/* === 层外: 与 styles.css 层外的暗色修补对位 (手绘改版前的原值) === */
+.dark:where([data-art~="plain"]) .cc-dialog-overlay { background: rgba(0,0,0,0.55); }
+.dark:where([data-art~="plain"]) .toggle::after { background: #e8e8ec; }
+.dark:where([data-art~="plain"]) .toggle.on { background: var(--accent); }
+.dark:where([data-art~="plain"]) .toggle.on::after { box-shadow: 0 1px 2px rgba(0,0,0,0.40); }
+.dark:where([data-art~="plain"]) .danger-card {
+  background: oklch(0.18 0.06 28);
+  border-color: oklch(0.30 0.10 28);
+}
+.dark:where([data-art~="plain"]) .alert.warn {
+  background: oklch(0.17 0.05 75);
+  border-color: oklch(0.30 0.08 75);
+  color: oklch(0.78 0.10 75);
+}
+.dark:where([data-art~="plain"]) .btn.accent:hover:not(:disabled),
+.dark:where([data-art~="plain"]) .btn.danger:hover:not(:disabled) { filter: brightness(1.08); }
+/* 暗色下选中导航项用深灰底, 避免浅色整条过于刺眼 */
+.dark:where([data-art~="plain"]) .nav-item.active {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.dark:where([data-art~="plain"]) .cm-editor .cm-activeLine { background: oklch(0.22 0.02 250); }
+.dark:where([data-art~="plain"]) .cm-editor .cm-selectionBackground,
+.dark:where([data-art~="plain"]) .cm-editor.cm-focused .cm-selectionBackground {
+  background: oklch(0.35 0.06 260) !important;
+}
+/* 聚焦环: 暗色下黑色阴影不可见 */
+.dark:where([data-art~="plain"]) .input:focus,
+.dark:where([data-art~="plain"]) .select:focus { box-shadow: 0 0 0 3px rgba(255,255,255,0.10); }
+.dark:where([data-art~="plain"]) .radio-group button.on { box-shadow: 0 1px 2px rgba(0,0,0,0.30); }
+.dark:where([data-art~="plain"]) .range-tab.active { box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+.dark:where([data-art~="plain"]) .stats-tooltip { box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
+.dark:where([data-art~="plain"]) .pill.warn {
+  background: oklch(0.18 0.05 75);
+  color: oklch(0.78 0.10 75);
+}
+/* 网页界面登录页: styles.css 里这组规则本就在层外 */
+:where([data-art~="plain"]) .web-login-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: none;
+}
+:where([data-art~="plain"]) .web-login-logo { align-self: auto; }

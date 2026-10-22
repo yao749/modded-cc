@@ -1,0 +1,96 @@
+id: zhipu
+display_name:
+  zh: "智谱 GLM"
+  en: "Zhipu GLM"
+  ja: "Zhipu GLM"
+icon: zhipu
+category: first_party
+description:
+  zh: "智谱 AI 官方 Anthropic 兼容端点"
+  en: "Official Zhipu AI Anthropic-compatible endpoint"
+  ja: "Zhipu AI 公式の Anthropic 互換エンドポイント"
+homepage: "https://open.bigmodel.cn"
+docs_url: "https://open.bigmodel.cn/dev/api"
+api_key_url: "https://open.bigmodel.cn/usercenter/apikeys"
+
+compatibility: untested
+
+endpoints:
+  - id: cn_endpoint_coding_plan
+    label:
+      zh: "国内版 · Coding Plan 订阅"
+      en: "China · Coding Plan subscription"
+      ja: "中国版 · Coding Plan サブスクリプション"
+    description: "GLM Coding Plan"
+    base_url: "https://open.bigmodel.cn/api"
+    messages_path: "/anthropic/v1/messages"
+    region: china
+    billing: subscription
+
+  - id: cn_endpoint
+    label:
+      zh: "国内版 · 按量付费 API"
+      en: "China · Pay-as-you-go API"
+      ja: "中国版 · 従量課金 API"
+    description:
+      zh: "智谱官方提供的 Anthropic Messages 兼容端点"
+      en: "Anthropic Messages-compatible endpoint provided by Zhipu"
+      ja: "Zhipu 公式が提供する Anthropic Messages 互換エンドポイント"
+    base_url: "https://open.bigmodel.cn/api"
+    messages_path: "/anthropic/v1/messages"
+    region: china
+    billing: pay_as_you_go
+
+  # 国际站 Z.ai: 独立账号体系, Key 与 bigmodel.cn 不通用 (核对 2026-09-27)
+  #   Claude Code 文档: https://docs.z.ai/devpack/tool/claude -> ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+  #   /models: https://api.z.ai/api/paas/v4/models (与国内 paas/v4 同形)
+  - id: intl_endpoint_coding_plan
+    label:
+      zh: "国际版 · Coding Plan 订阅"
+      en: "International · Coding Plan subscription"
+      ja: "国際版 · Coding Plan サブスクリプション"
+    description:
+      zh: "Z.ai GLM Coding Plan, 需使用 Z.ai 的 API Key"
+      en: "Z.ai GLM Coding Plan; requires a Z.ai API key"
+      ja: "Z.ai GLM Coding Plan。Z.ai の API Key が必要です"
+    base_url: "https://api.z.ai/api"
+    messages_path: "/anthropic/v1/messages"
+    region: global
+    billing: subscription
+
+  - id: intl_endpoint
+    label:
+      zh: "国际版 · 按量付费 API"
+      en: "International · Pay-as-you-go API"
+      ja: "国際版 · 従量課金 API"
+    description:
+      zh: "Z.ai 提供的 Anthropic Messages 兼容端点, 需使用 Z.ai 的 API Key"
+      en: "Anthropic Messages-compatible endpoint provided by Z.ai; requires a Z.ai API key"
+      ja: "Z.ai が提供する Anthropic Messages 互換エンドポイント。Z.ai の API Key が必要です"
+    base_url: "https://api.z.ai/api"
+    messages_path: "/anthropic/v1/messages"
+    region: global
+    billing: pay_as_you_go
+
+
+default_endpoint: cn_endpoint_coding_plan
+
+auth:
+  type: api_key
+  header_name: "Authorization"
+  header_format: bearer
+
+required_headers:
+  anthropic-version: "2023-06-01"
+
+forward_headers: []
+
+model_discovery:
+  enabled: true
+  # /models 在 paas/v4 下, 不在 Anthropic 兼容路径下。base_url 截到 /api 后用 path 拼,
+  # 国内 / 国际各自落到自己的域名 (不能写死 url: Z.ai 的 Key 查 bigmodel.cn 会 401)。
+  path: "/paas/v4/models"
+  cache_ttl_hours: 24
+  example_models:
+    - "glm-4.6"
+    - "glm-4-plus"

@@ -1,0 +1,28 @@
+---
+source: crates/cc-router-tui/tests/ui.rs
+expression: "render(&mut a, 80, 24)"
+---
+"╭ cc-router ──────────────────────────────────────────────── ● 已连接 · v9.9.9 ╮" Hidden by multi-width symbols: [(64, " "), (66, " "), (68, " ")]
+"│ 1 总览   2 订阅   3 虚拟模型   4 实时路由   5 日志                           │" Hidden by multi-width symbols: [(5, " "), (7, " "), (14, " "), (16, " "), (23, " "), (25, " "), (27, " "), (29, " "), (36, " "), (38, " "), (40, " "), (42, " "), (49, " "), (51, " ")]
+"╰─╭ 请求详情 ────────────────────────────────────────────────────────────────╮─╯" Hidden by multi-width symbols: [(5, " "), (7, " "), (9, " "), (11, " ")]
+"  │                                                                          ▲  "
+"  │  基本信息                                                                █  " Hidden by multi-width symbols: [(6, " "), (8, " "), (10, " "), (12, " ")]
+"  │  ID          req-12345                                                   █  "
+"  │  时间        2026-09-20 10:00:00                                         █  " Hidden by multi-width symbols: [(6, " "), (8, " ")]
+"╭ │  方法        POST                                                        █─╮" Hidden by multi-width symbols: [(6, " "), (8, " ")]
+"│ │  路径        /v1/messages                                                █ │" Hidden by multi-width symbols: [(6, " "), (8, " ")]
+"│ │  状态        200                                                         █ │" Hidden by multi-width symbols: [(6, " "), (8, " ")]
+"│ │  模型        model-sonnet                                                ║ │" Hidden by multi-width symbols: [(6, " "), (8, " ")]
+"╰─│  订阅        智谱主号                                                    ║─╯" Hidden by multi-width symbols: [(6, " "), (8, " "), (18, " "), (20, " "), (22, " "), (24, " ")]
+"╭ │  端点        https://open.bigmodel.cn/api/anthropic/v1/messages?stream=  ║─╮" Hidden by multi-width symbols: [(6, " "), (8, " ")]
+"│ │              true&client=cc-router-tui                                   ║ │"
+"│ │                                                                          ║ │"
+"│ │  错误信息                                                                ║ │" Hidden by multi-width symbols: [(6, " "), (8, " "), (10, " "), (12, " ")]
+"│ │  上游返回 429 Too Many Requests                                          ║ │" Hidden by multi-width symbols: [(6, " "), (8, " "), (10, " "), (12, " ")]
+"│ │  已达到本分钟请求数上限, 请稍后重试                                      ║ │" Hidden by multi-width symbols: [(6, " "), (8, " "), (10, " "), (12, " "), (14, " "), (16, " "), (18, " "), (20, " "), (22, " "), (24, " "), (26, " "), (30, " "), (32, " "), (34, " "), (36, " "), (38, " ")]
+"│ │                                                                          ║ │"
+"│ │  上游响应                                                                ║ │" Hidden by multi-width symbols: [(6, " "), (8, " "), (10, " "), (12, " ")]
+"│ │                                                                          ▼ │"
+"│ ╰────────────────────────────────────────────────────── ↑↓ 滚动   Esc 关闭 ╯ │" Hidden by multi-width symbols: [(62, " "), (64, " "), (73, " "), (75, " ")]
+"╰─────────────────────────────────────────────────────────────────────────── 4 ╯"
+" 1-5 切页   r 刷新                                              ? 帮助   q 退出 " Hidden by multi-width symbols: [(6, " "), (8, " "), (15, " "), (17, " "), (67, " "), (69, " "), (76, " "), (78, " ")]

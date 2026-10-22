@@ -1,0 +1,28 @@
+---
+source: crates/cc-router-tui/tests/ui.rs
+expression: "render(&mut live_fixture_app(false), 80, 24)"
+---
+"╭ cc-router ─────────────────────────────────────────────────── ⠻ Reconnecting ╮"
+"│ 1 Overview   2 Subscriptions   3 Virtual models   4 Live routing   5 Logs    │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"╭ Last 60 seconds ──────────────────────────────────────────────────── 5 total ╮"
+"│                           █         █   █               █         █          │"
+"│                           █         █   █               █         █          │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"╭ Live routing ────────────────────────────────────────────────────────────────╮"
+"│   06:12:30  model-sonnet    → 智谱主号                            ✓     1.8s │" Hidden by multi-width symbols: [(33, " "), (35, " "), (37, " "), (39, " ")]
+"│   06:12:40  model-opus      → Kimi 备用                           ✕    400ms │" Hidden by multi-width symbols: [(38, " "), (40, " ")]
+"│   06:12:44  model-haiku     → 示例中转                            ?  Aborted │" Hidden by multi-width symbols: [(33, " "), (35, " "), (37, " "), (39, " ")]
+"│   06:12:45                  Disconnected; events missed                      │"
+"│   06:13:00  model-fable     → 智谱主号                            ✓        — │" Hidden by multi-width symbols: [(33, " "), (35, " "), (37, " "), (39, " ")]
+"│   06:13:10  model-opus      → 示例中转                            ⠻        … │" Hidden by multi-width symbols: [(33, " "), (35, " "), (37, " "), (39, " ")]
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"╰────────────────────────────────────────────────── Following latest · 5 total ╯"
+" 1-5 Tabs   Space Pause   ↑↓ Select   ⏎ Logs   / Filter         ? Help   q Quit "

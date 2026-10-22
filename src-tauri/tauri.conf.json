@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "cc-router",
+  "version": "6.4.0",
+  "identifier": "com.cc-router.desktop",
+  "build": {
+    "beforeDevCommand": "node scripts/build-tui-sidecar.mjs && pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build && node scripts/build-tui-sidecar.mjs",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "cc-router",
+        "width": 1360,
+        "height": 840,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' data: ipc: http://ipc.localhost https://github.com https://*.githubusercontent.com https://d.cc-router.catonthe.top; img-src 'self' data: blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data: https://cdn.jsdelivr.net https://registry.npmmirror.com; script-src 'self'; object-src 'none'; base-uri 'self'"
+    },
+    "trayIcon": {
+      "id": "cc-router-tray",
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false,
+      "tooltip": "cc-router"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/cc-router-tui"
+    ],
+    "resources": [
+      "../LICENSE",
+      "../THIRD-PARTY-NOTICES.md"
+    ],
+    "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 finch-xu. MIT License.",
+    "shortDescription": "多订阅聚合代理",
+    "longDescription": "将多个大模型订阅的 API Key 聚合成一个 Anthropic 兼容端点，供 Claude Code 调用。"
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMyRDg1ODIyNjZDNEVGMjIKUldRaTc4Um1JbGpZTXZ1dSthSGFIVUpUVEFhczBDcWIvdUxyMG9FSjUzTzNlakQ3Z2oxN01PSloK",
+      "endpoints": [
+        "https://github.com/finch-xu/cc-router/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

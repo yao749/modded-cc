@@ -1,0 +1,69 @@
+id: xai
+display_name: "xAI Grok"
+icon: xai
+category: first_party
+description:
+  zh: "xAI Grok 官方 API · Anthropic 兼容端点"
+  en: "Official xAI Grok API · Anthropic-compatible endpoint"
+  ja: "xAI Grok 公式 API · Anthropic 互換エンドポイント"
+homepage: "https://x.ai"
+docs_url: "https://docs.x.ai"
+api_key_url: "https://console.x.ai"
+
+compatibility: untested
+compatibility_notes:
+  zh: |
+    Anthropic 兼容端点 (api.x.ai/v1/messages) 为官方半文档化状态: 旧版迁移指南明确支持
+    Anthropic SDK (base_url 设 https://api.x.ai), 新版 REST reference 未列出但端点实测存活
+    (2026-07 探测: 空 body 返回 Anthropic 风格 400 校验错误, x-api-key 与 Bearer 均可携带凭据)。
+    流式 SSE 字节格式 / tool_use / thinking 支持程度未实测, 待有 key 用户反馈。
+  en: |
+    The Anthropic-compatible endpoint (api.x.ai/v1/messages) is semi-documented: the old migration guide explicitly supports
+    the Anthropic SDK (base_url set to https://api.x.ai); the new REST reference doesn't list it, but the endpoint is alive
+    (probed 2026-07: an empty body returns an Anthropic-style 400 validation error; credentials work with either x-api-key or Bearer).
+    Streaming SSE byte format / tool_use / thinking support are untested; feedback from users with a key is welcome.
+  ja: |
+    Anthropic 互換エンドポイント（api.x.ai/v1/messages）は半ば公式にドキュメント化された状態です。旧版の移行ガイドでは
+    Anthropic SDK（base_url を https://api.x.ai に設定）を明示的にサポートしており、新版の REST リファレンスには載っていませんが、エンドポイントは実測で稼働しています
+    （2026-07 の調査: 空の body で Anthropic 形式の 400 検証エラーが返り、認証情報は x-api-key と Bearer のどちらでも渡せます）。
+    ストリーミング SSE のバイト形式 / tool_use / thinking の対応状況は未検証です。Key をお持ちの方のフィードバックをお待ちしています。
+
+endpoints:
+  - id: anthropic_endpoint
+    label:
+      zh: "国际版 · 按量付费 API"
+      en: "International · Pay-as-you-go API"
+      ja: "国際版 · 従量課金 API"
+    description:
+      zh: "xAI 官方 Anthropic Messages 兼容端点"
+      en: "Official xAI Anthropic Messages-compatible endpoint"
+      ja: "xAI 公式の Anthropic Messages 互換エンドポイント"
+    base_url: "https://api.x.ai"
+    messages_path: "/v1/messages"
+    region: global
+    billing: pay_as_you_go
+
+default_endpoint: anthropic_endpoint
+
+auth:
+  type: api_key
+  header_name: "Authorization"
+  # 实测 x-api-key 和 Authorization: Bearer 都接受, 选 bearer 与其他第三方厂商保持一致
+  header_format: bearer
+
+required_headers:
+  anthropic-version: "2023-06-01"
+
+forward_headers: []
+
+model_discovery:
+  enabled: true
+  # GET https://api.x.ai/v1/models 与 messages 同域, OpenAI 风格 {data:[{id,...}]}
+  path: "/v1/models"
+  cache_ttl_hours: 24
+  # 来源: https://docs.x.ai/developers/models (2026-07 核对)
+  example_models:
+    - "grok-4.5"
+    - "grok-4.3"
+    - "grok-4.20-0309-reasoning"
+    - "grok-build-0.1"

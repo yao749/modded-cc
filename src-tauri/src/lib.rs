@@ -1,0 +1,360 @@
+//! cc-router 桌面 app 入口。
+//!
+//! 这里的 `run()` 是 Tauri 生命周期起点；桌面壳和代理服务、SQLite、Provider 加载
+//! 全部在 `setup()` 中完成初始化。模块粒度见 plan §2。
+
+pub mod backup;
+pub mod commands;
+pub mod db;
+pub mod error;
+pub mod integrations;
+pub mod oauth;
+pub mod observability;
+pub mod provider;
+pub mod proxy;
+pub mod release_notes;
+pub mod runtime_file;
+pub mod settings;
+pub mod state;
+pub mod subscription;
+pub mod tls;
+pub mod tray;
+#[cfg(test)]
+mod tui_contract;
+pub mod tui_install;
+pub mod updater_source;
+pub mod virtual_model;
+pub mod window;
+
+use std::sync::Arc;
+
+use tauri::Manager;
+use tokio::sync::{mpsc, RwLock};
+use tracing::{error, info};
+
+use crate::state::AppState;
+
+/// macOS: 用户从 Dock / Spotlight / Launchpad / Finder 再次打开 cc-router 时,
+/// LaunchServices 不会起新进程, 只给已有实例发 applicationShouldHandleReopen
+/// (→ `RunEvent::Reopen`). 主窗口此时通常是 hide 状态 (关闭窗口 = 隐藏到托盘),
+/// 必须主动呼出, 否则用户会觉得"点了没反应". cc-router 在 Dock 里没有图标,
+/// 这是除菜单栏托盘外唯一的找回入口.
+///
+/// 不判 `has_visible_windows`: 窗口被 hide 之后 AppKit 认不认它是 "visible window"
+/// 不可靠, 而 `reveal_window` 对已可见窗口是幂等的, 无脑呼出更稳.
+#[cfg(target_os = "macos")]
+fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
+    if matches!(event, tauri::RunEvent::Reopen { .. }) {
+        if let Some(win) = app.get_webview_window("main") {
+            tray::reveal_window(&win);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn on_run_event(_app: &tauri::AppHandle, _event: &tauri::RunEvent) {}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let builder = tauri::Builder::default();
+
+    // 单实例: 再次启动时不起新进程, 把已有窗口唤回前台。必须是第一个注册的插件 (官方要求)。
+    // 没有它, 第二个进程会绑到下一个端口、生成自己的密钥并覆盖 runtime.json, cc-router-tui 从此连错实例;
+    // 两个代理还会共用同一个数据库而内存状态各一份。
+    //
+    // 只在 release 下注册: 日常开发时生产版 app 通常正开着给 Claude Code 当代理, 而 dev 构建与它
+    // identifier 相同 —— dev 下也生效的话 `pnpm tauri dev` 会一启动就退出。
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        if let Some(win) = app.get_webview_window("main") {
+            tray::reveal_window(&win);
+        }
+    }));
+
+    let app = builder
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_os::init())
+        .setup(|app| {
+            // 日志初始化
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("无法解析 app_data_dir");
+            observability::logger::init(&app_data_dir)?;
+            info!(?app_data_dir, "cc-router starting");
+
+            // 窗口几何自适应 —— 必须先于 bootstrap: 几何计算是同步且极快的, 而
+            // bootstrap 要跑 DB migration / provider 加载 / TLS。配合
+            // tauri.conf.json 的 visible=false, 用户看到的第一帧就是正确尺寸。
+            window::apply_startup_geometry(app.handle());
+
+            // 异步初始化：数据库 + providers + 订阅运行时 + 代理。
+            // 顺便把语言偏好带出来给托盘菜单用 —— settings 只在这里加载过一次,
+            // 让 block_on 直接返回省得为托盘再开一次 block_on。
+            let handle = app.handle().clone();
+            let lang_pref = tauri::async_runtime::block_on(async move {
+                match bootstrap(handle.clone(), app_data_dir).await {
+                    Ok(state) => {
+                        let pref = state.settings.read().await.preferred_language.clone();
+                        handle.manage(state);
+                        pref
+                    }
+                    Err(e) => {
+                        error!(?e, "bootstrap failed");
+                        std::process::exit(1);
+                    }
+                }
+            });
+
+            // 系统托盘
+            if let Err(e) = tray::setup(app, tray::TrayLocale::from_pref(&lang_pref)) {
+                error!(?e, "tray setup failed");
+            }
+
+            Ok(())
+        })
+        .on_window_event(tray::on_window_event)
+        .invoke_handler(tauri::generate_handler![
+            commands::providers::list_providers,
+            commands::subscriptions::list_subscriptions,
+            commands::subscriptions::get_subscription,
+            commands::subscriptions::create_subscription,
+            commands::subscriptions::update_subscription,
+            commands::subscriptions::update_subscription_key,
+            commands::subscriptions::delete_subscription,
+            commands::subscriptions::set_subscription_enabled,
+            commands::subscriptions::test_connection,
+            commands::subscriptions::refresh_model_list,
+            commands::subscriptions::probe_custom_models,
+            commands::subscriptions::refresh_subscription_balance,
+            commands::subscriptions::update_token_quotas,
+            commands::subscriptions::reset_total_quota_usage,
+            commands::virtual_models::list_virtual_models,
+            commands::virtual_models::update_virtual_model,
+            commands::requests::list_requests,
+            commands::requests::export_requests_csv,
+            commands::requests::export_requests_csv_text,
+            commands::requests::list_supported_client_tools,
+            commands::requests::get_client_activity,
+            commands::statistics::get_overall_stats,
+            commands::statistics::get_daily_series,
+            commands::statistics::get_breakdown,
+            commands::statistics::get_token_heatmap,
+            commands::statistics::get_tool_breakdown,
+            commands::receipts::get_receipt_summary,
+            commands::events::list_events,
+            commands::settings::get_settings,
+            commands::settings::update_settings,
+            commands::settings::generate_new_token,
+            commands::release_notes::get_release_notes,
+            commands::release_notes::mark_release_notes_seen,
+            commands::proxy::proxy_status,
+            commands::proxy::restart_proxy,
+            commands::proxy::env_snippet,
+            commands::proxy::list_lan_addresses,
+            commands::onboarding::get_onboarding_state,
+            commands::onboarding::complete_onboarding,
+            commands::app::factory_reset,
+            commands::app::is_appimage_runtime,
+            commands::app::relaunch_app,
+            commands::app::get_storage_stats,
+            commands::backup::export_config,
+            commands::backup::export_config_text,
+            commands::backup::preview_config_import,
+            commands::backup::apply_config_import,
+            commands::updater::check_for_update,
+            commands::updater::download_install_update,
+            commands::debug::open_debug_dump_dir,
+            commands::debug::clear_debug_dumps,
+            commands::oauth::start_chatgpt_device_flow,
+            commands::oauth::poll_chatgpt_device_code,
+            commands::oauth::create_chatgpt_oauth_subscription,
+            commands::oauth::forget_chatgpt_oauth_cache,
+            commands::oauth::get_chatgpt_oauth_usage,
+            commands::oauth::import_kiro_credentials_from_file,
+            commands::oauth::import_kiro_credentials_from_text,
+            commands::oauth::start_kiro_device_flow,
+            commands::oauth::poll_kiro_device_code,
+            commands::oauth::create_kiro_subscription,
+            commands::oauth::forget_kiro_oauth_cache,
+            commands::oauth::update_kiro_disguise_fields,
+            commands::tls::tls_get_status,
+            commands::tls::tls_get_ca_pem_path,
+            commands::tls::tls_export_ca_pem,
+            commands::tls::tls_get_ca_pem_text,
+            commands::tls::tls_regenerate_leaf,
+            commands::tui::tui_launch_info,
+            commands::tui::install_tui_command,
+            commands::tui::uninstall_tui_command,
+            commands::tray::set_tray_update,
+            commands::integrations::read_claude_code_settings,
+            commands::integrations::inspect_claude_code_settings,
+            commands::integrations::write_claude_code_settings,
+        ])
+        .build(tauri::generate_context!())
+        .expect("构建 cc-router 时发生错误");
+
+    // macOS: 不再启动期固定 Accessory。app 以默认 Regular 启动 (启动时窗口
+    // 本来就显示, Dock 该有图标); 之后 Dock 图标随窗口显隐动态切换, 见
+    // tray.rs::reveal_window (升 Regular) 与 tray.rs::on_window_event (降 Accessory)。
+    // Accessory 状态下 Spotlight / Launchpad / `open -a` 重开 app 会发
+    // Reopen 事件, 由 on_run_event 唤回窗口 —— 该处理必须保留。
+    app.run(|handle, event| on_run_event(handle, &event));
+}
+
+async fn bootstrap(
+    handle: tauri::AppHandle,
+    app_data_dir: std::path::PathBuf,
+) -> anyhow::Result<AppState> {
+    // 1. DB
+    let db_path = app_data_dir.join("config.db");
+    let pool = db::init_pool(&db_path).await?;
+    db::run_migrations(&pool).await?;
+
+    // 2. Provider YAML 加载 (编译期内嵌, 见 build.rs)
+    let providers = provider::loader::load_all()?;
+    info!(provider_count = providers.len(), "providers loaded");
+
+    // 3. Settings
+    let mut settings = settings::load_or_default(&app_data_dir).await?;
+    // 首次启动或老用户升级时,auth_token 为空 → 生成并立即 save。
+    settings::ensure_auth_token(&app_data_dir, &mut settings).await?;
+
+    // 3b. autostart 反向同步: plugin 真实状态 (LaunchAgent / Registry / .desktop) 为真相源,
+    //     不一致就写回 settings.json. 用户从 macOS 系统设置「登录项」手动移除 cc-router 后,
+    //     settings 应跟随更新, 而不是被沉默地补回去.
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let plugin_enabled = handle.autolaunch().is_enabled().unwrap_or(false);
+        if settings.autostart != plugin_enabled {
+            info!(
+                settings_value = settings.autostart,
+                plugin_value = plugin_enabled,
+                "autostart drift detected, syncing settings.json to plugin truth"
+            );
+            settings.autostart = plugin_enabled;
+            settings::save(&app_data_dir, &settings).await?;
+        }
+    }
+
+    // 4. 订阅运行时状态初始化 (load_runtime 内部已装填 token 限额用量, 见 store.rs)
+    let subscription_map = subscription::store::load_runtime(&pool).await?;
+
+    // 5. 虚拟模型绑定
+    let virtual_models = virtual_model::store::load_all(&pool).await?;
+
+    let subscriptions_arc = Arc::new(RwLock::new(subscription_map));
+
+    // 6a. 事件流 channel (kind=subscription_state_change/system_error/quota_reached)
+    // 需先于请求日志 channel 建好: request_log consumer 复用同一个 event_tx 发 quota_reached 事件。
+    let (event_tx, event_rx) = mpsc::channel(1024);
+    let event_pool = pool.clone();
+    let event_handle = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        observability::events::run_consumer(event_pool, event_rx, event_handle).await;
+    });
+
+    // 6b. 请求日志 channel
+    let (log_tx, log_rx) = mpsc::channel(1024);
+    let log_pool = pool.clone();
+    let log_handle = handle.clone();
+    let log_subs = subscriptions_arc.clone();
+    let log_event_tx = event_tx.clone();
+    tauri::async_runtime::spawn(async move {
+        observability::request_log::run_consumer(
+            log_pool,
+            log_rx,
+            log_handle,
+            log_subs,
+            log_event_tx,
+        )
+        .await;
+    });
+
+    // 6c. 调试模式 body dump channel (调试模式开启时由 pipeline / sse 插桩点投递)
+    let (body_dump_tx, body_dump_rx) = mpsc::channel(256);
+    let dump_dir = observability::body_dump::dump_dir(&app_data_dir);
+    tauri::async_runtime::spawn(async move {
+        observability::body_dump::run_consumer(body_dump_rx, dump_dir).await;
+    });
+
+    // 7. HTTP client 单例: 600s 空闲超时 (不是总超时, 见 upstream::build_client)
+    let http_client = proxy::upstream::build_client(proxy::upstream::UPSTREAM_IDLE_TIMEOUT)?;
+
+    // probe_client: 仅 ping/测试连接用, 短超时, 与生产路径分离
+    let probe_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("cc-router-probe/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    let chatgpt_oauth = Arc::new(oauth::chatgpt::ChatGptOAuthManager::new(pool.clone()));
+    let kiro_oauth = Arc::new(oauth::kiro::KiroOAuthManager::new(pool.clone()));
+
+    let state = AppState {
+        db: pool,
+        providers: Arc::new(providers),
+        subscriptions: subscriptions_arc,
+        virtual_models: Arc::new(RwLock::new(virtual_models)),
+        settings: Arc::new(RwLock::new(settings)),
+        http_bound_port: Arc::new(RwLock::new(None)),
+        https_bound_port: Arc::new(RwLock::new(None)),
+        proxy: Arc::new(proxy::controller::ProxyController::new(
+            proxy::listeners::BindOpts::DEFAULT,
+        )),
+        request_log_tx: log_tx,
+        event_log_tx: event_tx,
+        body_dump_tx,
+        http_client,
+        probe_client,
+        chatgpt_oauth,
+        kiro_oauth,
+        app_handle: handle.clone(),
+        session_affinity: Arc::new(std::sync::Mutex::new(
+            virtual_model::affinity::AffinityTable::default(),
+        )),
+        web_sessions: Arc::new(std::sync::Mutex::new(
+            proxy::web::auth::SessionStore::new_default(),
+        )),
+        web_login_guard: Arc::new(std::sync::Mutex::new(
+            proxy::web::auth::LoginGuard::new_default(),
+        )),
+        ui_events: tokio::sync::broadcast::channel(proxy::web::events::UI_EVENT_CAPACITY).0,
+        local_secret: Arc::new(runtime_file::generate_secret()),
+    };
+
+    // 7b. 网页界面事件桥: Tauri emit → broadcast (SSE 订阅方在 proxy/web/events.rs)
+    proxy::web::events::install_bridge(&handle, state.ui_events.clone());
+
+    // 8. 启动代理. 失败不 fatal: 界面显示「未运行」与原因, 用户可点「启动代理服务」重试.
+    let proxy_state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        let hooks = proxy::server::AppHooks(proxy_state.clone());
+        let outcome = proxy_state.proxy.restart(hooks).await;
+        if outcome != proxy::controller::RestartOutcome::Applied {
+            error!(?outcome, "proxy failed to start");
+        }
+    });
+
+    // 9. 启动订阅巡检器:每 10min 扫描被虚拟模型引用且异常的订阅, ping 通过则复活
+    let recheck_state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        subscription::recheck_worker::run(recheck_state).await;
+    });
+
+    let cleanup_pool = state.db.clone();
+    let cleanup_settings = state.settings.clone();
+    let cleanup_event_tx = state.event_log_tx.clone();
+    tauri::async_runtime::spawn(async move {
+        observability::cleanup::run(cleanup_pool, cleanup_settings, cleanup_event_tx).await;
+    });
+
+    Ok(state)
+}

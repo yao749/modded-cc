@@ -1,0 +1,1340 @@
+//! 主循环: 把键盘、250ms 定时器、事件流、后台 HTTP 任务的结果汇成 [`Action`] 喂给 [`App`],
+//! 再把 `App` 吐出来的 [`Cmd`] 变成后台任务。界面从不等网络: 所有 HTTP 调用都 `spawn` 出去。
+//!
+//! **双档渲染**: 平时只在有事件时重画 (空闲 CPU 接近零); 有动效在播时每 16ms 画一帧, 播完自动回落。
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use futures_util::StreamExt;
+use ratatui::crossterm::event::{Event, EventStream};
+use serde_json::json;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+use crate::action::{Action, Cmd, Fetch, FetchData, FetchKind, Mutation, MutationOutcome, OverviewData, WizardCmd, WizardResult};
+use crate::app::App;
+use crate::client::dto::{
+    CreatedSubscription, ProbeModelsResult, Provider, RefreshBalanceResult, RefreshModelsResult, RequestPage, Subscription,
+    TestConnectionResult, VirtualModel,
+};
+use crate::client::{commands, Client, ClientError};
+use crate::i18n::{client_error, Strings};
+
+const TICK: Duration = Duration::from_millis(250);
+const FRAME: Duration = Duration::from_millis(16);
+/// 事件流连上住满这么久, 断线重连计数器才清零; 刚连上就断不算「恢复」, 不能让退避失效。
+const STABLE_AFTER: Duration = Duration::from_secs(10);
+/// 等 `events()` 建立连接 (拿到响应头) 的上限; 网络卡住不能让重连无限期挂起。
+const CONNECT_DEADLINE: Duration = Duration::from_secs(10);
+/// 后端每 15 秒发一次保活 (`src-tauri/src/proxy/web/events.rs::sse_handler`), 连续三次都没
+/// 收到才算断 (连接中途被黑洞时没有这个超时, 界面会一直显示「已连接」)。
+const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+pub fn unix_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// 事件流断线后的重连间隔: 1s → 2s → 5s, 之后一直 5s (spec §4.4)。
+pub fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs(match attempt {
+        0 => 1,
+        1 => 2,
+        _ => 5,
+    })
+}
+
+/// 断线重连计数器的下一个值: 这一轮连接住满 `STABLE_AFTER` 才清零 (真的恢复了才重置退避),
+/// 否则接着累加 —— 刚连上就断的抖动连接不会让退避一直停在 1s。
+fn next_attempt(attempt: u32, stream_lived: Duration) -> u32 {
+    if stream_lived >= STABLE_AFTER {
+        0
+    } else {
+        attempt + 1
+    }
+}
+
+async fn fetch_overview(client: &Client) -> Result<OverviewData, ClientError> {
+    let today = json!({ "range": "today" });
+    let (status, settings, stats, series, subscriptions) = tokio::try_join!(
+        client.call(commands::PROXY_STATUS, json!({})),
+        client.call(commands::GET_SETTINGS, json!({})),
+        client.call(commands::GET_OVERALL_STATS, today.clone()),
+        client.call(commands::GET_DAILY_SERIES, today.clone()),
+        client.call(commands::LIST_SUBSCRIPTIONS, json!({})),
+    )?;
+    Ok(OverviewData { status, settings, stats, series, subscriptions })
+}
+
+fn spawn_fetch(client: Arc<Client>, tx: UnboundedSender<Action>, fetch: Fetch, issued: u64, s: &'static Strings) {
+    tokio::spawn(async move {
+        // 按引用匹配: `Fetch::Requests` 带的 `RequestQuery` 不是 `Copy`, `to_args()` 只需要 `&self`,
+        // 借一下就够——`fetch` 本身留到匹配结束之后原样送回 `Action::FetchDone`, 不需要为了送回去
+        // 而克隆一份。
+        let result = match &fetch {
+            Fetch::Overview => fetch_overview(&client).await.map(|d| FetchData::Overview(Box::new(d))),
+            Fetch::Subscriptions => client
+                .call::<Vec<Subscription>>(commands::LIST_SUBSCRIPTIONS, json!({}))
+                .await
+                .map(FetchData::Subscriptions),
+            Fetch::VirtualModels => client
+                .call::<Vec<VirtualModel>>(commands::LIST_VIRTUAL_MODELS, json!({}))
+                .await
+                .map(FetchData::VirtualModels),
+            Fetch::Requests(q) => client.call::<RequestPage>(commands::LIST_REQUESTS, q.to_args()).await.map(FetchData::Requests),
+        };
+        let result = result.map_err(|e: ClientError| client_error(s, &e));
+        let _ = tx.send(Action::FetchDone { fetch, issued, result });
+    });
+}
+
+/// 测试连接要真的打一次上游, 60 秒超时; 刷新模型 / 余额各给 30 秒。
+const TEST_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 真正发出一次就地操作对应的 HTTP 调用, 按 [`Mutation`] 的种类分派到对应 command。
+async fn call_mutation(client: &Client, mutation: &Mutation) -> Result<MutationOutcome, ClientError> {
+    match mutation {
+        Mutation::SetEnabled { id, enabled } => {
+            client.call::<()>(commands::SET_SUBSCRIPTION_ENABLED, json!({ "id": id, "enabled": enabled })).await?;
+            Ok(MutationOutcome::EnabledSet)
+        }
+        Mutation::TestConnection { id } => {
+            let r: TestConnectionResult =
+                client.call_with_timeout(commands::TEST_CONNECTION, json!({ "id": id }), TEST_CONNECTION_TIMEOUT).await?;
+            Ok(MutationOutcome::Tested(r))
+        }
+        Mutation::RefreshModels { id } => {
+            let r: RefreshModelsResult =
+                client.call_with_timeout(commands::REFRESH_MODEL_LIST, json!({ "id": id }), REFRESH_TIMEOUT).await?;
+            Ok(MutationOutcome::Models(r))
+        }
+        Mutation::RefreshBalance { id } => {
+            let r: RefreshBalanceResult =
+                client.call_with_timeout(commands::REFRESH_SUBSCRIPTION_BALANCE, json!({ "id": id }), REFRESH_TIMEOUT).await?;
+            Ok(MutationOutcome::Balance(r))
+        }
+        Mutation::UpdateSlots { id, model_slots, slot_efforts } => {
+            // 两块都整块替换 (与后端 `SubscriptionPatch` 的语义一致); 返回值是完整 `SubscriptionDto`,
+            // 丢弃它——保存成功后 `refetch()` 会重拉订阅列表, 权威值来自那份结果。
+            let patch = json!({ "model_slots": model_slots, "slot_efforts": slot_efforts });
+            client.call::<serde_json::Value>(commands::UPDATE_SUBSCRIPTION, json!({ "id": id, "patch": patch })).await?;
+            Ok(MutationOutcome::SlotsSaved)
+        }
+        Mutation::UpdateVirtualModel { name, mode, subscription_ids } => {
+            // `mode.as_wire()` 而不是 `Serialize`: 这就是 `tui_contract.rs::routing_mode_wire_names_round_trip`
+            // 与「咬合检查」盯着的那个字符串, 改错了应该在这里就炸, 不是在某个隐藏的 serde 派生里。
+            let input = json!({ "mode": mode.as_wire(), "subscription_ids": subscription_ids });
+            client.call::<()>(commands::UPDATE_VIRTUAL_MODEL, json!({ "name": name, "input": input })).await?;
+            Ok(MutationOutcome::VirtualModelSaved)
+        }
+        Mutation::Delete { id } => {
+            client.call::<()>(commands::DELETE_SUBSCRIPTION, json!({ "id": id })).await?;
+            Ok(MutationOutcome::Deleted)
+        }
+    }
+}
+
+/// **不去重、不补跑**: 每一个 `Cmd::Mutate` 都直接 `spawn` 一次 HTTP 调用, 不经过 [`Fetches`] ——
+/// 与就地操作「同一订阅同时只跑一个」的语义完全由 `App` 的忙碌表在更上游把关, 这里只管发送。
+/// 退出时仍在进行的变更不等待 (与加载一致, 任务被主循环结束时一并丢弃)。
+fn spawn_mutation(client: Arc<Client>, tx: UnboundedSender<Action>, mutation: Mutation, s: &'static Strings) {
+    tokio::spawn(async move {
+        let result = call_mutation(&client, &mutation).await.map_err(|e: ClientError| client_error(s, &e));
+        // `barrier: 0` 只是占位符: 真正的值由 `process_action`/`stamp_barrier` 在主循环收到这条
+        // 消息的那一刻补盖, 用的是那一刻的发起计数器, 不是 spawn 这一刻的 (两者之间可能已经又issued
+        // 出去好几次加载, 全都得算进屏障)。
+        let _ = tx.send(Action::MutationDone { mutation, barrier: 0, result });
+    });
+}
+
+/// 按 [`WizardCmd`] 分派到对应 command。`LoadModels`/`Probe` 复用刷新模型的 30 秒超时
+/// ([`REFRESH_TIMEOUT`]): 拉候选模型 / 探测自定义厂商都可能要真的打一次上游, 与订阅页「刷新模型」
+/// 同一档超时。`Create`/`SaveSlots` 用默认超时 (`Client::call`, 不单独指定)。
+async fn call_wizard(client: &Client, cmd: &WizardCmd, s: &'static Strings) -> WizardResult {
+    match cmd {
+        WizardCmd::LoadProviders => {
+            let result = client.call::<Vec<Provider>>(commands::LIST_PROVIDERS, json!({})).await;
+            // 连接时解析出的语言一路用到底: 在这里一次换好, 向导里拿到的就是本地化后的名字。
+            let result = result.map(|ps| ps.into_iter().map(|p| p.localized(s.lang)).collect());
+            WizardResult::Providers(result.map_err(|e: ClientError| client_error(s, &e)))
+        }
+        WizardCmd::Create(input) => {
+            let result = client.call::<CreatedSubscription>(commands::CREATE_SUBSCRIPTION, input.to_args()).await;
+            WizardResult::Created(result.map_err(|e: ClientError| client_error(s, &e)))
+        }
+        WizardCmd::LoadModels { id } => {
+            let result =
+                client.call_with_timeout::<RefreshModelsResult>(commands::REFRESH_MODEL_LIST, json!({ "id": id }), REFRESH_TIMEOUT).await;
+            // `id` 原样带回去: 代次之外的纵深防御, 向导据此核对结果是不是这次请求的 (见 `WizardResult`)。
+            WizardResult::Models { id: id.clone(), result: result.map_err(|e: ClientError| client_error(s, &e)) }
+        }
+        WizardCmd::Probe(input) => {
+            let result =
+                client.call_with_timeout::<ProbeModelsResult>(commands::PROBE_CUSTOM_MODELS, input.to_args(), REFRESH_TIMEOUT).await;
+            // `input.base_url` 在 `submit_probe` 打包 `ProbeInput` 时已经 trim 过, 原样带回去。
+            WizardResult::Probed { base_url: input.base_url.clone(), result: result.map_err(|e: ClientError| client_error(s, &e)) }
+        }
+        WizardCmd::SaveSlots { id, model_slots } => {
+            // 只带 `model_slots` 这一块 patch (不带 `slot_efforts`): 向导不设置思考档位, 少发一个
+            // 字段就不会把已有值清掉 (与 `call_mutation` 的 `Mutation::UpdateSlots` 分支整块替换两个
+            // 字段不同, 这里刻意只发一个)。
+            let patch = json!({ "model_slots": model_slots });
+            let result = client.call::<serde_json::Value>(commands::UPDATE_SUBSCRIPTION, json!({ "id": id, "patch": patch })).await;
+            WizardResult::SlotsSaved(result.map(|_| ()).map_err(|e: ClientError| client_error(s, &e)))
+        }
+    }
+}
+
+/// 向导的请求。与 `spawn_mutation` 一样**不去重、不补跑**: 向导同一时刻最多一个请求在飞, 由它
+/// 自己的阶段保证。`epoch` 原样带回, `App` 据此丢弃已经关掉的向导实例的结果。
+fn spawn_wizard(client: Arc<Client>, tx: UnboundedSender<Action>, epoch: u64, cmd: WizardCmd, s: &'static Strings) {
+    tokio::spawn(async move {
+        let result = call_wizard(&client, &cmd, s).await;
+        let _ = tx.send(Action::WizardDone { epoch, result: Box::new(result) });
+    });
+}
+
+/// 主循环发起加载时盖的单调递增序号 (从 1 开始)。抽成独立结构体, 方便单测「递增」这一件事本身。
+#[derive(Default)]
+struct Issued(u64);
+
+impl Issued {
+    fn next(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+
+    /// 当前已经发起过的加载总数, 不推进计数器。`process_action` 在收到 `Action::MutationDone` 时
+    /// 读它当 `barrier`——此后 `issued <= barrier` 的加载结果一律丢弃, 而这次变更自己触发的补跑
+    /// (发生在读到这个值**之后**) 会拿到一个严格更大的号, 不会把自己挡住。
+    fn current(&self) -> u64 {
+        self.0
+    }
+}
+
+/// `Action::MutationDone` 收到时把它的 `barrier` 字段补盖成当前的发起计数器值; 其它 `Action`
+/// 不动。抽成独立函数, 方便单独测「补盖用的是接收那一刻的计数器值」这件事本身, 不用驱动完整的
+/// `process_action` (含真实的 `Fetches` / `App` 状态机)。
+fn stamp_barrier(action: &mut Action, issued: &Issued) {
+    if let Action::MutationDone { barrier, .. } = action {
+        *barrier = issued.current();
+    }
+}
+
+/// 跑一轮「连上事件流 → 转发事件, 直到断线」。返回值是这一轮事件流**实际存活了多久**——
+/// 连接失败 / 超时是 `Duration::ZERO` (绝不会被当成「稳定过」), 连上了才从 `events()` 成功的
+/// 那一刻开始计时到断线为止。`connect_deadline` 独立传参而不是直接读 `CONNECT_DEADLINE`,
+/// 方便测试用一个远小于生产值的超时去戳一个卡住不响应的 mock, 不用真等 10 秒。
+///
+/// `ever_connected` 只有真的连上过一次才置 true: 调用方靠它判断「从没连上时不发
+/// `ConnectionLost`」, 免得「从未连接」被 `App` 当成「掉线重连」。
+///
+/// `idle` 独立传参而不是直接读 `IDLE_TIMEOUT`, 与 `connect_deadline` 同理: 测试传一个远小于
+/// 生产值的超时, 不用真等 45 秒去戳一个中途沉默的 mock。
+async fn run_once(
+    client: &Client,
+    tx: &UnboundedSender<Action>,
+    ever_connected: &mut bool,
+    connect_deadline: Duration,
+    idle: Duration,
+) -> Duration {
+    // 建立连接本身也要有超时, 否则一个卡住不响应的上游会让这个任务永久挂起。
+    let Ok(Ok(stream)) = tokio::time::timeout(connect_deadline, client.events()).await else {
+        return Duration::ZERO;
+    };
+    // 两次收到任何字节 (含保活) 之间最多等 idle, 否则视为黑洞——不这样做, 中途被黑洞的连接会
+    // 让 `stream.next()` 永远卡住, 界面上「已连接」再也不会变化。
+    let mut stream = stream.with_idle_timeout(idle);
+    *ever_connected = true;
+    // 从连上的这一刻开始计时, 而不是从这一轮循环 (含连接排队 / 后面的退避 sleep) 开始算,
+    // 否则「流活了多久」会把连接耗时和断线后的等待都算进去, next_attempt 判断全乱。
+    let up = tokio::time::Instant::now();
+    let app_version = client.runtime().await.app_version;
+    if tx.send(Action::Connected { app_version }).is_err() {
+        return up.elapsed();
+    }
+    while let Ok(Some(ev)) = stream.next().await {
+        if tx.send(Action::Sse { name: ev.name, data: ev.data, at_ms: unix_ms() }).is_err() {
+            break;
+        }
+    }
+    up.elapsed()
+}
+
+/// 常驻任务: 连事件流 → 转发事件 → 断了就退避重连。`Client` 在失败时会自己重读 runtime.json,
+/// 所以 app 重启换了端口 / 密钥也能接上。
+async fn sse_loop(client: Arc<Client>, tx: UnboundedSender<Action>) {
+    let mut attempt = 0;
+    let mut ever_connected = false;
+    loop {
+        let lived = run_once(&client, &tx, &mut ever_connected, CONNECT_DEADLINE, IDLE_TIMEOUT).await;
+        if ever_connected && tx.send(Action::ConnectionLost).is_err() {
+            return;
+        }
+        tokio::time::sleep(backoff(attempt)).await;
+        attempt = next_attempt(attempt, lived);
+    }
+}
+
+/// 同一种加载同时只跑一个; 进行中又来了同种请求, 记一笔, 等这次回来后补跑一次 (否则会
+/// 静默丢掉一次刷新请求, 比如断线重连期间某订阅状态变了, 要等下一次 5s 轮询才补上)。
+///
+/// 去重按 [`FetchKind`], 不按整个 [`Fetch`] 值——`Fetch::Requests` 带查询参数, 两个页码
+/// 不同的请求仍然是「同一种」加载。进行中又来了同种请求, 只记最新那一笔 (`rerun` 是
+/// `HashMap<FetchKind, Fetch>` 而不是集合, 覆盖写入天然就是「最新为准」), 更早记下的那笔直接丢弃
+/// ——它对应的查询参数已经过时了, 没有必要为了它专门再跑一次。
+#[derive(Default)]
+struct Fetches {
+    in_flight: HashSet<FetchKind>,
+    rerun: HashMap<FetchKind, Fetch>,
+}
+
+impl Fetches {
+    /// 要不要现在就发起? (false = 已有同种请求在跑, 已记下待补跑——覆盖更早记下的同种请求)
+    fn request(&mut self, fetch: &Fetch) -> bool {
+        if self.in_flight.insert(fetch.kind()) {
+            true
+        } else {
+            self.rerun.insert(fetch.kind(), fetch.clone());
+            false
+        }
+    }
+
+    /// 这一种的一次加载回来了。有记下的待补跑请求 → 返回它 (调用方立刻以新序号发起, 这一种仍然
+    /// 算在跑); 没有 → `None`。
+    fn finished(&mut self, kind: FetchKind) -> Option<Fetch> {
+        self.in_flight.remove(&kind);
+        if let Some(fetch) = self.rerun.remove(&kind) {
+            self.in_flight.insert(kind);
+            Some(fetch)
+        } else {
+            None
+        }
+    }
+}
+
+pub async fn run(client: Arc<Client>, mut app: App) -> std::io::Result<()> {
+    // `App` 是唯一持有 `&'static Strings` 的地方 (由 main.rs 按连接后的界面语言算出来传给它);
+    // 主循环拿一份引用往下传, 不用重新解析语言, 也不需要自己再存一份。
+    let s = app.strings();
+    // try_init() 进入备用屏幕 + raw mode, 并装好 panic 钩子 (panic 时先恢复终端再打印)。
+    // 用 try_init 而不是 init(): 没有可用终端 (无 tty, 比如 stdin/stdout 都不是终端) 时返回
+    // Err 而不是 panic, 这样 main.rs 能走统一的「一行提示 + exit 1」路径, 而不是 panic 的
+    // exit 101 + backtrace。
+    let mut terminal = ratatui::try_init()?;
+    let result = event_loop(&mut terminal, client, &mut app, s).await;
+    ratatui::restore();
+    result
+}
+
+/// 处理单个 [`Action`]: 先用它做 `Fetches` / `Issued` 的记账 (清「进行中」标记, 要补跑就以新的
+/// 序号重新 spawn), 再喂给 `App::update` 把结果 `Cmd` 变成真正的副作用 (spawn 新加载 / 退出)。
+/// 单个 action 的处理逻辑抽成这个函数, 供 `select!` 拿到的那一个和抽干队列时的每一个共用。
+/// 返回 `true` 表示主循环该退出 (`Cmd::Quit`)。
+fn process_action(
+    mut action: Action,
+    client: &Arc<Client>,
+    tx: &UnboundedSender<Action>,
+    fetches: &mut Fetches,
+    issued: &mut Issued,
+    app: &mut App,
+    s: &'static Strings,
+) -> bool {
+    // 必须排在下面的 `issued.next()` 之前: `MutationDone` 的 barrier 要反映「变更完成那一刻」
+    // 已经发起过的所有加载, 这次消息自己触发的补跑 (在 `app.update` 之后才会真正 issue) 不该算
+    // 在内, 否则会把自己刚发出去的补跑也挡住。
+    stamp_barrier(&mut action, issued);
+    if let Action::FetchDone { fetch, .. } = &action {
+        if let Some(rerun) = fetches.finished(fetch.kind()) {
+            spawn_fetch(client.clone(), tx.clone(), rerun, issued.next(), s);
+        }
+    }
+    for cmd in app.update(action) {
+        match cmd {
+            Cmd::Quit => return true,
+            Cmd::Fetch(fetch) => {
+                if fetches.request(&fetch) {
+                    spawn_fetch(client.clone(), tx.clone(), fetch, issued.next(), s);
+                }
+            }
+            // `Cmd::Mutate` 的负载是 `Box<Mutation>` (消掉 clippy 的 `large_enum_variant`); `spawn_mutation` 本身不需要跟着改签名, 这里解引用一次拿回
+            // 所有权就够了。
+            Cmd::Mutate(mutation) => spawn_mutation(client.clone(), tx.clone(), *mutation, s),
+            // 同上, `Cmd::Wizard` 的负载也是 `Box`, 同样只是为了避免 `Vec<Cmd>` 的
+            // 每个元素都按最大变体分配, 不需要 `spawn_wizard` 跟着收 `Box`。
+            Cmd::Wizard { epoch, cmd } => spawn_wizard(client.clone(), tx.clone(), epoch, *cmd, s),
+        }
+    }
+    false
+}
+
+/// `keys.next()` 的结果 → 要喂给 `App::update` 的 `Action` (`None` = 这一轮不产生动作, 比如
+/// Resize 事件)。真正的按键交给 `app.handle_key` (有状态, 不是纯函数), 但「流终结了该怎么办」这
+/// 条规则单独抽出来, 不用真的驱动一整个 `event_loop` 就能测。
+///
+/// **`None`/`Err` 必须映射到 [`Action::ForceQuit`], 不能是 [`Action::Quit`]**: `EventStream`
+/// 返回 `None`/`Err` 说明键盘流已经终结 (典型场景是 tty 被关掉), 循环还在空转——`keys.next()`
+/// 立刻又会返回同一个终结结果。如果映射成会先弹确认框的 `Quit`, 一旦当前页面 dirty, 就会弹出一个
+/// 没有终端可以回答的确认弹窗, 而 `select!` 那一分支从此永远就绪, 主循环 100% CPU 空转, 永远退不
+/// 出去。`ForceQuit` 跳过确认, 直接退出, 才是安全的。
+fn key_action(ev: Option<Result<Event, std::io::Error>>, app: &mut App) -> Option<Action> {
+    match ev {
+        Some(Ok(Event::Key(key))) => app.handle_key(key),
+        Some(Ok(_)) => None, // Resize 等: 回到循环顶部重画即可
+        Some(Err(_)) | None => Some(Action::ForceQuit),
+    }
+}
+
+async fn event_loop(terminal: &mut ratatui::DefaultTerminal, client: Arc<Client>, app: &mut App, s: &'static Strings) -> std::io::Result<()> {
+    let (tx, mut rx) = unbounded_channel::<Action>();
+    let mut sse = tokio::spawn(sse_loop(client.clone(), tx.clone()));
+    // sse_loop 正常情况下永远不返回; 它结束了 (panic 或者提前 return) 说明事件流彻底死了,
+    // 得让界面知道, 不然「已连接」会永远挂在那。一个已经 ready 过的 JoinHandle 不能
+    // 再被 poll, 所以用这个 bool 守卫 select! 分支, 命中一次之后就不再选它。
+    let mut sse_alive = true;
+
+    let mut keys = EventStream::new();
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 同一种加载同时只跑一个: 后端慢的时候轮询不会越积越多。
+    let mut fetches = Fetches::default();
+    // 每次真正 spawn 一个加载 (含补跑) 时盖的单调递增序号, 带进 `Action::FetchDone` 给 `Store`
+    // 判断新旧。
+    let mut issued = Issued::default();
+    let mut last_frame = Instant::now();
+
+    'outer: loop {
+        let now = Instant::now();
+        let elapsed = now - last_frame;
+        last_frame = now;
+        terminal.draw(|frame| app.draw(frame, elapsed))?;
+
+        let fast = app.wants_fast_frames();
+        let action = tokio::select! {
+            ev = keys.next() => key_action(ev, app),
+            _ = tick.tick() => Some(Action::Tick { now_ms: unix_ms() }),
+            Some(action) = rx.recv() => Some(action),
+            res = &mut sse, if sse_alive => {
+                sse_alive = false;
+                let _ = res; // Ok(()) 正常退出 (理论上不会发生) 或 Err(JoinError) panic 了, 两种都当断线处理
+                Some(Action::ConnectionLost)
+            }
+            _ = tokio::time::sleep(FRAME), if fast => None,
+        };
+
+        let Some(action) = action else { continue };
+        if process_action(action, &client, &tx, &mut fetches, &mut issued, app, s) {
+            break 'outer;
+        }
+        // 抽干再画: select! 那一个处理完之后, 把这时已经排在队列里的 action 一并处理掉,
+        // 再回到循环顶部画一帧 (为事件洪峰准备; 键盘与 tick 走 select! 的常规分支, 不受影响)。
+        // **有界**: 只抽干「进入这段代码那一刻已经排队的那些」(`rx.len()` 那一刻的快照),
+        // 不是无条件 `while let` —— 否则一个持续produce的生产者 (比如密集 SSE) 会让抽干永远
+        // 抽不完, 一直不回到循环顶部, 键盘响应和下一帧重绘都被无限期推迟。
+        // 抽干过程中 `process_action` 触发的新 fetch 结果晚一点由下一轮循环处理, 不会丢。
+        for _ in 0..rx.len() {
+            match rx.try_recv() {
+                Ok(a) => {
+                    if process_action(a, &client, &tx, &mut fetches, &mut issued, app, s) {
+                        break 'outer;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    sse.abort();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::discovery::RUNTIME_FILE;
+    use crate::client::dto::{ModelInfo, ModelSlots, RoutingMode, Slot, SlotEfforts};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn backoff_is_1_2_5_then_flat() {
+        let secs: Vec<u64> = (0..6).map(|a| backoff(a).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 5, 5, 5, 5]);
+    }
+
+    fn test_app() -> App {
+        App::new(crate::app::AppOptions {
+            strings: &crate::i18n::ZH,
+            theme: crate::theme::Theme::new(crate::theme::ColorMode::TrueColor),
+            fx_enabled: false,
+            now_ms: 0,
+            tui_version: "9.9.9-test",
+            tz: crate::format::Tz::Fixed(8 * 3600),
+        })
+    }
+
+    /// 键盘流终结 (`None`/`Err`, 典型场景是 tty 被关掉) 必须映射到 `ForceQuit`,
+    /// 不能是会先弹确认框的 `Quit`——否则一旦有页面 dirty, 会弹出一个没有终端能回答的确认弹窗,
+    /// 而 `keys.next()` 立刻又会返回同一个终结结果, 主循环从此 100% CPU 空转、永远退不出去。
+    #[test]
+    fn key_stream_ending_forces_quit_not_quit() {
+        let mut app = test_app();
+        assert_eq!(key_action(None, &mut app), Some(Action::ForceQuit), "流结束 (None) 应该强制退出");
+
+        let mut app = test_app();
+        let io_err = std::io::Error::other("boom");
+        assert_eq!(key_action(Some(Err(io_err)), &mut app), Some(Action::ForceQuit), "读键盘出错应该强制退出");
+    }
+
+    /// `key_action` 对正常的按键 / 非按键事件不该干预, 分别交给 `app.handle_key` 或原样吞掉——
+    /// 只有「流终结」这一种情况被这个函数特殊处理 (与上面那条测试对照, 确认没有过度拦截)。
+    #[test]
+    fn key_action_passes_real_key_events_through_to_the_app() {
+        let mut app = test_app();
+        let key = ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('q'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        );
+        assert_eq!(key_action(Some(Ok(Event::Key(key))), &mut app), Some(Action::Quit), "正常按键应该照常交给 app.handle_key");
+        assert_eq!(key_action(Some(Ok(Event::FocusGained)), &mut app), None, "非按键事件不该产生动作");
+    }
+
+    #[test]
+    fn issued_numbers_are_strictly_increasing() {
+        let mut issued = Issued::default();
+        assert_eq!(issued.next(), 1);
+        assert_eq!(issued.next(), 2);
+        assert_eq!(issued.next(), 3);
+    }
+
+    #[test]
+    fn next_attempt_resets_only_after_a_stable_connection() {
+        // 刚连上就断 (远小于 STABLE_AFTER): 接着累加, 不清零。
+        assert_eq!(next_attempt(0, Duration::from_millis(1)), 1);
+        assert_eq!(next_attempt(3, Duration::from_secs(1)), 4);
+        assert_eq!(next_attempt(3, STABLE_AFTER - Duration::from_millis(1)), 4);
+        // 住满 STABLE_AFTER (含边界) 才算真的恢复了。
+        assert_eq!(next_attempt(3, STABLE_AFTER), 0);
+        assert_eq!(next_attempt(5, Duration::from_secs(20)), 0);
+    }
+
+    /// 连续几轮「连上即断」(`lived` 都是 `Duration::ZERO`, 对应连接失败 /
+    /// 超时) 必须让退避一档一档往上走 (1s → 2s → 5s), 而不是每轮都被误判成「稳定过」而清零 ——
+    /// 把「连接耗时 + 退避 sleep 时长」算进 `stream_lived` 会让 `next_attempt` 提前判定为已恢复。
+    #[test]
+    fn consecutive_failures_back_off_1_2_5_via_next_attempt_wiring() {
+        let mut attempt = 0;
+        let mut backoffs = Vec::new();
+        for lived in [Duration::ZERO, Duration::ZERO, Duration::ZERO] {
+            backoffs.push(backoff(attempt).as_secs());
+            attempt = next_attempt(attempt, lived);
+        }
+        assert_eq!(backoffs, [1, 2, 5]);
+        assert_eq!(attempt, 3);
+        // 这次流真住满了 STABLE_AFTER: 清零, 下一次断线又是从 1s 开始。
+        attempt = next_attempt(attempt, STABLE_AFTER);
+        assert_eq!(attempt, 0);
+    }
+
+    #[test]
+    fn fetches_coalesces_concurrent_requests_of_the_same_kind() {
+        let mut f = Fetches::default();
+        assert!(f.request(&Fetch::Overview)); // 第一次: 发起
+        assert!(!f.request(&Fetch::Overview)); // 还在跑: 只记一笔待补跑
+        assert_eq!(f.finished(FetchKind::Overview), Some(Fetch::Overview)); // 回来了: 之前记的那笔要补跑
+        assert_eq!(f.finished(FetchKind::Overview), None); // 这次是补跑的结果, 没有再记新的待补跑
+    }
+
+    #[test]
+    fn fetches_unrelated_kinds_do_not_interfere() {
+        let mut f = Fetches::default();
+        assert!(f.request(&Fetch::Overview));
+        assert!(f.request(&Fetch::Subscriptions)); // 不同种类互不影响
+        assert_eq!(f.finished(FetchKind::Subscriptions), None); // 没有同种的待补跑
+        assert_eq!(f.finished(FetchKind::Overview), None);
+    }
+
+    /// `Fetch::Requests` 带查询参数, 去重按 `FetchKind` 不按整个值——进行中又来了两次同种
+    /// 请求, 只应该补跑最新那一次 (page 3), page 2 那次被直接丢弃, 不会「先补 page 2 再补 page 3」。
+    /// 另附带验证其它 kind 与这条链路互不影响。
+    #[test]
+    fn fetches_rerun_only_the_latest_request_of_a_kind() {
+        let mut f = Fetches::default();
+        let page = |page: u32| Fetch::Requests(crate::client::dto::RequestQuery { page, filters: Default::default() });
+        let p1 = page(1);
+        let p2 = page(2);
+        let p3 = page(3);
+
+        assert!(f.request(&p1)); // 第一次: 发起
+        // 另一种 kind 与此互不影响: 交叉操作不会串到 Requests 的去重状态里。
+        assert!(f.request(&Fetch::Overview));
+        assert!(!f.request(&p2)); // 还在跑: 记一笔待补跑 (page 2)
+        assert!(!f.request(&p3)); // 又来一次: 覆盖成 page 3, page 2 被丢弃
+
+        assert_eq!(f.finished(FetchKind::Requests), Some(p3), "应该补跑最新记下的那一笔 (page 3)");
+        assert_eq!(f.finished(FetchKind::Requests), None, "这次是补跑的结果, 没有再记新的待补跑");
+        // Overview 只 request 过一次 (没有第二次挤进来记待补跑), 它的加载回来时不该受 Requests
+        // 那条链路的去重状态影响, 照常是「没有待补跑」。
+        assert_eq!(f.finished(FetchKind::Overview), None, "Overview 的去重状态不受 Requests 影响");
+    }
+
+    fn write_runtime(dir: &std::path::Path, port: u16, secret: &str, app_version: &str) {
+        let body = serde_json::json!({
+            "pid": 1,
+            "app_version": app_version,
+            "http_port": port,
+            "https_port": null,
+            "ca_pem_path": null,
+            "local_secret": secret,
+        });
+        std::fs::write(dir.join(RUNTIME_FILE), body.to_string()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sse_loop_reports_connected_then_events_then_lost() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ui/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"event: subscription_state_changed\ndata: \"1\"\n\n".to_vec(),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+
+        let (tx, mut rx) = unbounded_channel::<Action>();
+        let task = tokio::spawn(sse_loop(client, tx));
+
+        assert_eq!(rx.recv().await, Some(Action::Connected { app_version: "9.9.9-test".into() }));
+        let sse = rx.recv().await.expect("channel 关闭了");
+        let Action::Sse { name, data, at_ms } = sse else { panic!("{sse:?}") };
+        assert_eq!(name, "subscription_state_changed");
+        assert_eq!(data, "\"1\"");
+        assert!(at_ms > 0, "at_ms 应该是 run_once 收到事件那一刻盖的 unix 毫秒时间戳");
+        // 上游发完这一条就关闭了连接 (set_body_raw 是有限响应体) → 下一次 next() 读到 EOF。
+        assert_eq!(rx.recv().await, Some(Action::ConnectionLost));
+
+        task.abort();
+    }
+
+    /// 从没连上过时不该报「掉线」——那会让 `App` 把「从未连接」误判成「重连中」,
+    /// 首次连上瞬间弹出不存在的「已重新连接」 toast。
+    #[tokio::test]
+    async fn never_connected_does_not_report_a_lost_connection() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/ui/api/events")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+
+        let (tx, mut rx) = unbounded_channel::<Action>();
+        let task = tokio::spawn(sse_loop(client, tx));
+
+        // 等过至少一轮 backoff (第一档 1s) 之后仍然没有任何 action —— 既没有 Connected,
+        // 也没有 ConnectionLost。
+        let seen = tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await;
+        assert!(seen.is_err(), "从未连上不该发出任何 action, 实际收到 {seen:?}");
+
+        task.abort();
+    }
+
+    /// 直接测 `sse_loop` 内部真正喂给 `next_attempt` 的那个值, 而不只是 `next_attempt` 这个纯函数
+    /// 本身——纯函数对了, 喂给它的区间量错了, 同样会让退避失效。
+    #[tokio::test]
+    async fn run_once_returns_zero_lived_duration_when_connect_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/ui/api/events")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Client::connect(dir.path()).unwrap();
+        let (tx, _rx) = unbounded_channel::<Action>();
+        let mut ever_connected = false;
+
+        let lived = run_once(&client, &tx, &mut ever_connected, Duration::from_secs(1), IDLE_TIMEOUT).await;
+
+        assert_eq!(lived, Duration::ZERO);
+        assert!(!ever_connected);
+    }
+
+    #[tokio::test]
+    async fn run_once_returns_a_small_nonzero_lived_duration_for_a_finite_stream() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ui/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                b"event: subscription_state_changed\ndata: \"1\"\n\n".to_vec(),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Client::connect(dir.path()).unwrap();
+        let (tx, mut rx) = unbounded_channel::<Action>();
+        let mut ever_connected = false;
+
+        let lived = run_once(&client, &tx, &mut ever_connected, Duration::from_secs(1), IDLE_TIMEOUT).await;
+
+        assert!(ever_connected);
+        assert!(lived < STABLE_AFTER, "一次快速的连上又断不该被算成「稳定过」, 实际 {lived:?}");
+        assert_eq!(rx.recv().await, Some(Action::Connected { app_version: "9.9.9-test".into() }));
+        let sse = rx.recv().await.expect("channel 关闭了");
+        let Action::Sse { name, data, at_ms } = sse else { panic!("{sse:?}") };
+        assert_eq!(name, "subscription_state_changed");
+        assert_eq!(data, "\"1\"");
+        assert!(at_ms > 0, "at_ms 应该是 run_once 收到事件那一刻盖的 unix 毫秒时间戳");
+    }
+
+    /// 上游卡住不响应 (mock 延迟 2s) 时, `run_once` 必须按传入的 `connect_deadline` (这里给
+    /// 200ms, 远小于生产的 10s) 及时放弃, 而不是真的等满 mock 的延迟——否则建立连接的超时保护就是
+    /// 摆设。外层再包一层 800ms 的 timeout 当安全网: 如果 `run_once` 真的没有遵守
+    /// `connect_deadline`, 测试会在 800ms 处失败, 而不是真的挂等 2 秒。
+    #[tokio::test]
+    async fn run_once_treats_a_hanging_connect_as_zero_lived_once_the_deadline_hits() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ui/api/events"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Client::connect(dir.path()).unwrap();
+        let (tx, _rx) = unbounded_channel::<Action>();
+        let mut ever_connected = false;
+
+        let lived = tokio::time::timeout(
+            Duration::from_millis(800),
+            run_once(&client, &tx, &mut ever_connected, Duration::from_millis(200), IDLE_TIMEOUT),
+        )
+        .await
+        .expect("run_once 应该在 connect_deadline (200ms) 附近就返回, 不该等满 mock 的 2s 延迟");
+
+        assert_eq!(lived, Duration::ZERO);
+        assert!(!ever_connected);
+    }
+
+    /// 事件流连上之后上游彻底沉默 (黑洞, 连保活都不再发), `run_once` 必须在 `idle`
+    /// 超时后主动放弃这一轮连接, 而不是永远卡在 `stream.next()` 里——这样上层 `sse_loop` 才能
+    /// 照常退避重连, 而不是让界面永远停在「已连接」。用 `trickle_server` 只发一次保活就沉默
+    /// (握住连接 10 秒模拟黑洞), 200ms 的 idle 应该远早于黑洞期结束就触发; 外层 1.5 秒的
+    /// timeout 当安全网。
+    #[tokio::test]
+    async fn run_once_gives_up_on_a_silent_stream() {
+        let script = vec![(Duration::from_millis(0), b": keepalive\n\n".as_slice())];
+        let addr = crate::client::test_support::trickle_server(script).await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), addr.port(), "s", "9.9.9-test");
+        let client = Client::connect(dir.path()).unwrap();
+        let (tx, mut rx) = unbounded_channel::<Action>();
+        let mut ever_connected = false;
+
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            run_once(&client, &tx, &mut ever_connected, Duration::from_secs(1), Duration::from_millis(200)),
+        )
+        .await
+        .expect("run_once 应该在 idle (200ms) 附近就放弃, 不该等满黑洞的 10 秒");
+
+        assert!(ever_connected);
+        assert_eq!(rx.recv().await, Some(Action::Connected { app_version: "9.9.9-test".into() }));
+    }
+
+    /// 五种就地操作 (含删除) 各自打对了 command、带对了 JSON 键名 (`id` / `enabled`,
+    /// 与后端 `#[tauri::command]` 的参数名同名, camelCase 下与蛇形写法一致), 并且把响应体正确包进
+    /// 对应的 `MutationOutcome`。删除的真后端签名是 `AppResult<()>`, 响应体是 JSON `null`
+    /// (与 `set_subscription_enabled` 同一套约定)。
+    #[tokio::test]
+    async fn a_mutation_calls_the_right_command_and_reports_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/set_subscription_enabled"))
+            .and(body_json(json!({"id": "1", "enabled": false})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!(null)))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/test_connection"))
+            .and(body_json(json!({"id": "1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"ok": true, "message": "连接正常", "http_status": 200, "model_used": "glm-4.6", "state_reset": true}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/refresh_model_list"))
+            .and(body_json(json!({"id": "1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "auto", "models": [], "fetched_at": 1})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/refresh_subscription_balance"))
+            .and(body_json(json!({"id": "1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "unsupported"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/delete_subscription"))
+            .and(body_json(json!({"id": "1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!(null)))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_mutation(client.clone(), tx.clone(), Mutation::SetEnabled { id: "1".into(), enabled: false }, &crate::i18n::ZH);
+        assert_eq!(
+            rx.recv().await,
+            Some(Action::MutationDone {
+                mutation: Mutation::SetEnabled { id: "1".into(), enabled: false },
+                barrier: 0,
+                result: Ok(MutationOutcome::EnabledSet),
+            })
+        );
+
+        spawn_mutation(client.clone(), tx.clone(), Mutation::TestConnection { id: "1".into() }, &crate::i18n::ZH);
+        assert_eq!(
+            rx.recv().await,
+            Some(Action::MutationDone {
+                mutation: Mutation::TestConnection { id: "1".into() },
+                barrier: 0,
+                result: Ok(MutationOutcome::Tested(TestConnectionResult {
+                    ok: true,
+                    message: "连接正常".into(),
+                    http_status: Some(200),
+                    model_used: Some("glm-4.6".into()),
+                    state_reset: true,
+                })),
+            })
+        );
+
+        spawn_mutation(client.clone(), tx.clone(), Mutation::RefreshModels { id: "1".into() }, &crate::i18n::ZH);
+        assert_eq!(
+            rx.recv().await,
+            Some(Action::MutationDone {
+                mutation: Mutation::RefreshModels { id: "1".into() },
+                barrier: 0,
+                result: Ok(MutationOutcome::Models(RefreshModelsResult::Auto { models: vec![], fetched_at: 1 })),
+            })
+        );
+
+        spawn_mutation(client.clone(), tx.clone(), Mutation::RefreshBalance { id: "1".into() }, &crate::i18n::ZH);
+        assert_eq!(
+            rx.recv().await,
+            Some(Action::MutationDone {
+                mutation: Mutation::RefreshBalance { id: "1".into() },
+                barrier: 0,
+                result: Ok(MutationOutcome::Balance(RefreshBalanceResult::Unsupported)),
+            })
+        );
+
+        spawn_mutation(client, tx, Mutation::Delete { id: "1".into() }, &crate::i18n::ZH);
+        assert_eq!(
+            rx.recv().await,
+            Some(Action::MutationDone {
+                mutation: Mutation::Delete { id: "1".into() },
+                barrier: 0,
+                result: Ok(MutationOutcome::Deleted),
+            })
+        );
+    }
+
+    /// `spawn_mutation` 发出的 `MutationDone.barrier` 只是占位符 `0`; 真正的值由
+    /// `stamp_barrier` 在主循环收到这条消息那一刻补盖成当时的发起计数器值。用 wiremock 真的跑一次
+    /// 变更走完 `spawn_mutation` 这条真实路径, 确认占位符是 0, 再验证 `stamp_barrier` 补盖出来的值
+    /// 就是调用那一刻 `Issued` 的当前值 (即 "变更完成那一刻已经发起过的所有加载的序号")——不多不少。
+    #[tokio::test]
+    async fn mutation_done_carries_a_barrier_not_smaller_than_any_issued_fetch() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/test_connection"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"ok": true, "message": "ok", "http_status": 200, "model_used": null, "state_reset": false}),
+            ))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_mutation(client, tx, Mutation::TestConnection { id: "1".into() }, &crate::i18n::ZH);
+        let mut done = rx.recv().await.expect("channel 关闭了");
+        let Action::MutationDone { barrier, .. } = &done else { panic!("{done:?}") };
+        assert_eq!(*barrier, 0, "spawn_mutation 发出时应该只是占位符, 真正的值由主循环收到时补盖");
+
+        // 模拟「此刻之前已经发起过 3 次加载」——不管它们是否已经跑完, 都已经计入发起计数器。
+        let mut issued = Issued::default();
+        issued.next();
+        issued.next();
+        issued.next();
+
+        stamp_barrier(&mut done, &issued);
+        let Action::MutationDone { barrier, .. } = &done else { panic!("{done:?}") };
+        assert_eq!(*barrier, 3, "补盖后的 barrier 应该等于此刻发起计数器的值, 覆盖此前发起过的全部 3 次加载");
+    }
+
+    /// `process_action` 是主循环真正的路由——`mutations_are_never_coalesced` 只调了
+    /// `spawn_mutation` 本身, 哪怕以后有人手滑把 `Cmd::Mutate` 也接进 `Fetches` 的去重表, 那个测试
+    /// 照样会通过, 咬不住这个回归。这里直接驱动 `process_action`:
+    /// 1. 两次会各自让 `App::update` 产出 `Cmd::Fetch(Subscriptions)` 的 action → 只有一次真正的
+    ///    HTTP 请求 (第二次被 `Fetches` 记成待补跑, 不再发)。
+    /// 2. 那次请求的结果 (`Action::FetchDone`) 送进来 → `process_action` 内部的补跑逻辑再发一次,
+    ///    带一个更大的 `issued`。
+    /// 3. 三次 `Cmd::Mutate` (两条不同订阅 + 第三条对其中一条订阅再来一次同类操作但换成第三条
+    ///    订阅) → 三次都应该真的发出 POST, 不经过 `Fetches` 的去重。
+    /// 全程不 `sleep` 固定时长, 用「等 mock 收到的请求数到达预期」的轮询 + 3 秒超时兜底, 避免抖动。
+    #[tokio::test]
+    async fn process_action_dedupes_fetches_and_reruns_after_completion() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/list_subscriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/set_subscription_enabled"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!(null)))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+        let mut fetches = Fetches::default();
+        let mut issued = Issued::default();
+        let mut app = App::new(crate::app::AppOptions {
+            strings: &crate::i18n::ZH,
+            theme: crate::theme::Theme::new(crate::theme::ColorMode::TrueColor),
+            fx_enabled: false,
+            now_ms: 0,
+            tui_version: "9.9.9-test",
+            tz: crate::format::Tz::Fixed(8 * 3600),
+        });
+        app.update(crate::action::Action::SwitchTab(crate::action::Tab::Subscriptions));
+
+        // 1) 两次都会产出 Cmd::Fetch(Subscriptions): `Connected` 与 `Refresh` 各自在订阅页的
+        //    `update()` 里映射成一次 Fetch。第一次真的发; 这次请求还没回来时第二次应该被去重。
+        assert!(!process_action(Action::Connected { app_version: "9.9.9-test".into() }, &client, &tx, &mut fetches, &mut issued, &mut app, &crate::i18n::ZH));
+        assert!(!process_action(Action::Refresh, &client, &tx, &mut fetches, &mut issued, &mut app, &crate::i18n::ZH));
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while count_requests(&server, "list_subscriptions").await < 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("第一次请求应该很快发出去");
+        // 给「第二次会不会也发一次」留一点时间观察, 而不是立刻断言——去重发生在 `Fetches::request`
+        // 同步返回的那一刻 (上面第二个 `process_action` 调用里), 这里只是确认没有多余的请求跟上来。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(count_requests(&server, "list_subscriptions").await, 1, "第二次 Cmd::Fetch 应该被去重, 不是真的再发一次请求");
+
+        // 2) 第一次的结果回来了: `process_action` 应该按上面记的那笔待补跑, 立刻用更大的 issued
+        //    再发一次。
+        let first_done = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.expect("等第一次 FetchDone 超时").expect("channel 关闭了");
+        let Action::FetchDone { issued: first_issued, .. } = &first_done else { panic!("{first_done:?}") };
+        let first_issued = *first_issued;
+        assert!(!process_action(first_done, &client, &tx, &mut fetches, &mut issued, &mut app, &crate::i18n::ZH));
+
+        let rerun_done = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.expect("等补跑的 FetchDone 超时").expect("channel 关闭了");
+        let Action::FetchDone { issued: rerun_issued, .. } = &rerun_done else { panic!("{rerun_done:?}") };
+        assert!(*rerun_issued > first_issued, "补跑应该带一个比第一次更大的 issued");
+        assert!(!process_action(rerun_done, &client, &tx, &mut fetches, &mut issued, &mut app, &crate::i18n::ZH));
+
+        assert_eq!(count_requests(&server, "list_subscriptions").await, 2, "总共应该只发生过两次 list_subscriptions 请求: 第一次 + 补跑");
+
+        // 3) 三次 Cmd::Mutate (两条不同订阅 + 第三条订阅上同一种操作) 都应该真的发出去, 不经过
+        //    `Fetches` 的去重——就地操作永不去重、永不补跑 (与 `Fetch` 相反)。
+        assert!(!process_action(
+            Action::Mutate(Mutation::SetEnabled { id: "a".into(), enabled: false }),
+            &client,
+            &tx,
+            &mut fetches,
+            &mut issued,
+            &mut app,
+            &crate::i18n::ZH
+        ));
+        assert!(!process_action(
+            Action::Mutate(Mutation::SetEnabled { id: "b".into(), enabled: false }),
+            &client,
+            &tx,
+            &mut fetches,
+            &mut issued,
+            &mut app,
+            &crate::i18n::ZH
+        ));
+        assert!(!process_action(
+            Action::Mutate(Mutation::SetEnabled { id: "c".into(), enabled: false }),
+            &client,
+            &tx,
+            &mut fetches,
+            &mut issued,
+            &mut app,
+            &crate::i18n::ZH
+        ));
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while count_requests(&server, "set_subscription_enabled").await < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("三次 Cmd::Mutate 都应该真的各自发出一次 POST");
+    }
+
+    /// 数 mock server 收到的、路径以 `suffix` 结尾的请求条数 (供上面这条测试轮询用, 不固定
+    /// `sleep` 时长)。
+    async fn count_requests(server: &MockServer, suffix: &str) -> usize {
+        server.received_requests().await.unwrap().iter().filter(|r| r.url.path().ends_with(suffix)).count()
+    }
+
+    /// 就地操作绝不经过 `Fetches` 的「同类只跑一个」去重: 同一个 `Cmd::Mutate` 连发两次必须真的
+    /// 打两次上游 (`.expect(2)` 在 `MockServer` drop 时校验)。忙碌表「同一订阅同时只跑一个」的
+    /// 语义是 `App` 更上游的把关, 与这里「runtime 层不去重」是两回事。
+    #[tokio::test]
+    async fn mutations_are_never_coalesced() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/test_connection"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"ok": true, "message": "ok", "http_status": 200, "model_used": null, "state_reset": false}),
+            ))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        let mutation = Mutation::TestConnection { id: "1".into() };
+        spawn_mutation(client.clone(), tx.clone(), mutation.clone(), &crate::i18n::ZH);
+        spawn_mutation(client, tx, mutation, &crate::i18n::ZH);
+
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_some());
+    }
+
+    /// `update_subscription` 的 patch 里 `model_slots` 整块发全 (含空 `fallback`),
+    /// `slot_efforts` 只带非 auto 的槽位——`body_json` 精确断言请求体, 而不只是响应内容, 这是唯一
+    /// 能咬住「auto 槽位漏发了 `null`」这类回归的地方。
+    #[tokio::test]
+    async fn update_slots_sends_the_whole_patch_and_omits_auto_efforts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/update_subscription"))
+            .and(body_json(json!({
+                "id": "1",
+                "patch": {
+                    "model_slots": {"fable": "f", "opus": "o", "sonnet": "s", "haiku": "h", "fallback": "", "jev": ""},
+                    "slot_efforts": {"opus": "high"}
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "1", "display_name": "n"})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        let model_slots = ModelSlots { fable: "f".into(), opus: "o".into(), sonnet: "s".into(), haiku: "h".into(), fallback: String::new(), jev: String::new() };
+        let mut slot_efforts = SlotEfforts::default();
+        slot_efforts.set(Slot::Opus, Some("high".into()));
+        spawn_mutation(client, tx, Mutation::UpdateSlots { id: "1".into(), model_slots, slot_efforts }, &crate::i18n::ZH);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        assert!(matches!(done, Action::MutationDone { result: Ok(MutationOutcome::SlotsSaved), .. }), "{done:?}");
+    }
+
+    /// `update_virtual_model` 带 `name` + `input{mode, subscription_ids}`, `mode` 用
+    /// `as_wire()` 的线上名字 (`round_robin`, 不是 Rust 变体名 `RoundRobin`)。
+    #[tokio::test]
+    async fn update_virtual_model_sends_name_and_input() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/update_virtual_model"))
+            .and(body_json(json!({
+                "name": "model-sonnet",
+                "input": {"mode": "round_robin", "subscription_ids": ["1", "2"]}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!(null)))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_mutation(
+            client,
+            tx,
+            Mutation::UpdateVirtualModel {
+                name: "model-sonnet".into(),
+                mode: RoutingMode::RoundRobin,
+                subscription_ids: vec!["1".into(), "2".into()],
+            },
+            &crate::i18n::ZH,
+        );
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        assert!(matches!(done, Action::MutationDone { result: Ok(MutationOutcome::VirtualModelSaved), .. }), "{done:?}");
+    }
+
+    /// `Fetch::VirtualModels` 打对了 command, 把响应体正确包进 `FetchData::VirtualModels`,
+    /// 且 `mode` 按后端线上名字 (`round_robin`) 正确解析回 `RoutingMode::RoundRobin`。
+    #[tokio::test]
+    async fn fetch_virtual_models_reports_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/list_virtual_models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"name": "model-fable", "mode": "sequential", "subscription_ids": []},
+                {"name": "model-sonnet", "mode": "round_robin", "subscription_ids": ["1"]},
+            ])))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_fetch(client, tx, Fetch::VirtualModels, 1, &crate::i18n::ZH);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::FetchDone { fetch, issued, result } = done else { panic!("{done:?}") };
+        assert_eq!(fetch, Fetch::VirtualModels);
+        assert_eq!(issued, 1);
+        let vms = match result.expect("应该成功") {
+            FetchData::VirtualModels(v) => v,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(vms.len(), 2);
+        assert_eq!(vms[1].name, "model-sonnet");
+        assert_eq!(vms[1].mode, RoutingMode::RoundRobin);
+        assert_eq!(vms[1].subscription_ids, vec!["1".to_string()]);
+    }
+
+    /// `WizardCmd::LoadProviders` 打对了 `list_providers`, 把响应体正确解析进
+    /// `WizardResult::Providers(Ok(..))`——尤其是 `auth` 的键名 (`type`, 不是 `auth_type`) 与
+    /// `Provider` 声明的字段形状对得上; 并且已经按界面语言 (这里是英文) 换好了上屏文字。
+    #[tokio::test]
+    async fn wizard_load_providers_reports_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/list_providers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": "zhipu",
+                "display_name": "智谱",
+                "description": null,
+                "endpoints": [{"id": "default", "label": "默认", "base_url": "https://open.bigmodel.cn/api/anthropic"}],
+                "default_endpoint": "default",
+                "auth": {"type": "api_key"},
+                "model_discovery": {"enabled": true, "example_models": ["glm-4.6"]},
+                "translations": {
+                    "en": {"display_name": "Zhipu GLM", "description": null, "endpoints": {"default": {"label": "Default"}}},
+                    "ja": {"display_name": "Zhipu GLM", "description": null, "endpoints": {"default": {"label": "デフォルト"}}},
+                },
+            }])))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_wizard(client, tx, 7, WizardCmd::LoadProviders, &crate::i18n::EN);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::WizardDone { epoch, result } = done else { panic!("{done:?}") };
+        assert_eq!(epoch, 7, "代次应该原样带回");
+        let WizardResult::Providers(providers) = *result else { panic!("{result:?}") };
+        let providers = providers.expect("应该成功");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "zhipu");
+        assert_eq!(providers[0].display_name, "Zhipu GLM", "英文界面应该拿到英文名");
+        assert_eq!(providers[0].endpoints[0].label, "Default");
+        assert_eq!(providers[0].auth.auth_type, "api_key");
+        assert_eq!(providers[0].endpoints[0].base_url, "https://open.bigmodel.cn/api/anthropic");
+        assert_eq!(providers[0].model_discovery.example_models, vec!["glm-4.6".to_string()]);
+    }
+
+    /// 请求失败时 (这里让 `list_providers` 直接 404) 应该落进 `WizardResult::Providers(Err(..))`,
+    /// 而不是让整个 `spawn_wizard` 任务 panic——与 `call_mutation`/`call_wizard` 其它分支同一条
+    /// 「上游/网络错误都转成 `String` 装进结果」的约定。
+    #[tokio::test]
+    async fn wizard_load_providers_reports_the_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/ui/api/cmd/list_providers")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_wizard(client, tx, 7, WizardCmd::LoadProviders, &crate::i18n::ZH);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::WizardDone { epoch, result } = done else { panic!("{done:?}") };
+        assert_eq!(epoch, 7, "代次应该原样带回");
+        let WizardResult::Providers(providers) = *result else { panic!("{result:?}") };
+        assert!(providers.is_err(), "{providers:?}");
+    }
+
+    /// **锁住「一律经 `client_error` 格式化, 不直接用 `ClientError` 的 `Display`」这条纪律**:
+    /// 持续 404 (与 `client/http.rs::persistent_404_or_401_means_disabled` 同一套 mock 手法) 落成
+    /// `ClientError::Disabled`, 它的 `Display` 现在是英文开发者文字 ("terminal UI is disabled"),
+    /// 但 `call_wizard` 交给 `WizardResult` 的必须是 `client_error(&ZH, ..)` 那句中文——如果哪天有人
+    /// 手滑把 `call_wizard` 的某个分支改回 `e.to_string()`, 这条测试会红 (断言的是中文, 不是英文子串)。
+    #[tokio::test]
+    async fn wizard_load_providers_localizes_the_error_via_strings() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/list_providers"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_wizard(client, tx, 7, WizardCmd::LoadProviders, &crate::i18n::ZH);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::WizardDone { result, .. } = done else { panic!("{done:?}") };
+        let WizardResult::Providers(providers) = *result else { panic!("{result:?}") };
+        // 写死中文, 不通过 `client_error` 反算期望值——否则 `client_error` 本身被改坏 (比如退回
+        // `e.to_string()`) 时, 断言的两边会一起坏掉, 谁也捉不住谁。
+        assert_eq!(providers, Err("终端界面未启用".to_string()));
+    }
+
+    /// `call_wizard` 里手写 patch 的 `SaveSlots` 分支, 与 `call_mutation` 的每个分支一样要有
+    /// `body_json` 精确断言——`SubscriptionPatch` 全是 `Option` 且不拒绝未知键,
+    /// 键名写错时后端会回 200 什么都没改, 向导显示保存成功, 订阅却停在 `(pending)`, 不会有任何测试
+    /// 失败提醒。`body_json` 做结构化比对 (不是子集匹配), 精确锁住 patch 里**只有** `model_slots`
+    /// 一个键, **没有** `slot_efforts`——向导不设置思考档位, 少发一个字段才不会把
+    /// 已有值清掉; 如果实现手滑把 `slot_efforts` 也塞进去, 这条 mock 不匹配, 请求会退化成 404,
+    /// 断言的 `Ok(())` 也就跟着失败。
+    #[tokio::test]
+    async fn wizard_save_slots_sends_only_model_slots() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/update_subscription"))
+            .and(body_json(json!({
+                "id": "1",
+                "patch": {
+                    "model_slots": {"fable": "glm-4.6", "opus": "glm-4.6", "sonnet": "glm-4.6", "haiku": "glm-4.6", "fallback": "", "jev": ""},
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "1", "display_name": "n"})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        let model_slots = ModelSlots {
+            fable: "glm-4.6".into(),
+            opus: "glm-4.6".into(),
+            sonnet: "glm-4.6".into(),
+            haiku: "glm-4.6".into(),
+            fallback: String::new(),
+            jev: String::new(),
+        };
+        spawn_wizard(client, tx, 7, WizardCmd::SaveSlots { id: "1".into(), model_slots }, &crate::i18n::ZH);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::WizardDone { epoch, result } = done else { panic!("{done:?}") };
+        assert_eq!(epoch, 7, "代次应该原样带回");
+        assert!(matches!(*result, WizardResult::SlotsSaved(Ok(()))), "{result:?}");
+    }
+
+    /// `WizardCmd::LoadModels` 打对了 `refresh_model_list`、带对了 `{"id": id}`, 把响应体正确解析进
+    /// `WizardResult::Models { result: Ok(..), .. }`, 并且带回去的 `id` 与发起请求时的 `id` 一致 (向导据此判断这份结果是不是自己发的那次)。
+    #[tokio::test]
+    async fn wizard_load_models_reports_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/refresh_model_list"))
+            .and(body_json(json!({"id": "1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"kind": "auto", "models": [{"id": "glm-4.6", "display_name": null}], "fetched_at": 1}),
+            ))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        spawn_wizard(client, tx, 7, WizardCmd::LoadModels { id: "1".into() }, &crate::i18n::ZH);
+
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::WizardDone { epoch, result } = done else { panic!("{done:?}") };
+        assert_eq!(epoch, 7, "代次应该原样带回");
+        let WizardResult::Models { id, result: models } = *result else { panic!("{result:?}") };
+        assert_eq!(id, "1", "带回去的 id 应该与发起请求时的 id 一致");
+        assert_eq!(
+            models.expect("应该成功"),
+            RefreshModelsResult::Auto { models: vec![ModelInfo { id: "glm-4.6".into(), display_name: None }], fetched_at: 1 }
+        );
+    }
+
+    /// `Fetch::Requests` 发出的请求体精确匹配 `RequestQuery::to_args()` 文档里的例子——
+    /// `body_json` 做结构化比对 (不是子集匹配), 咬得住「漏发一个过滤键」或者「拼错大小写」这类
+    /// 回归。默认查询 (无过滤) 时 `filters` 应该仍然是一个空对象, 不是被省略。
+    #[tokio::test]
+    async fn fetch_requests_sends_page_size_in_camel_case_and_filters_in_snake_case() {
+        use crate::client::dto::{RequestFilters, RequestQuery, RequestStatus};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/list_requests"))
+            .and(body_json(json!({
+                "page": 2,
+                "pageSize": 50,
+                "filters": {
+                    "subscription_id": "s1",
+                    "virtual_model_name": "model-sonnet",
+                    "status": "error",
+                },
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [], "total": 0})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ui/api/cmd/list_requests"))
+            .and(body_json(json!({"page": 1, "pageSize": 50, "filters": {}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": [], "total": 0})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        write_runtime(dir.path(), server.address().port(), "s", "9.9.9-test");
+        let client = Arc::new(Client::connect(dir.path()).unwrap());
+        let (tx, mut rx) = unbounded_channel::<Action>();
+
+        let filters = RequestFilters {
+            subscription_id: Some("s1".into()),
+            virtual_model_name: Some("model-sonnet".into()),
+            status: Some(RequestStatus::Error),
+        };
+        spawn_fetch(client.clone(), tx.clone(), Fetch::Requests(RequestQuery { page: 2, filters }), 1, &crate::i18n::ZH);
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::FetchDone { result, .. } = done else { panic!("{done:?}") };
+        assert!(matches!(result, Ok(FetchData::Requests(_))), "{result:?}");
+
+        spawn_fetch(client, tx, Fetch::Requests(RequestQuery::default()), 2, &crate::i18n::ZH);
+        let done = rx.recv().await.expect("channel 关闭了");
+        let Action::FetchDone { result, .. } = done else { panic!("{done:?}") };
+        assert!(matches!(result, Ok(FetchData::Requests(_))), "{result:?}");
+    }
+}

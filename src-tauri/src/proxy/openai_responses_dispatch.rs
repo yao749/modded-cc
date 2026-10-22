@@ -1,0 +1,803 @@
+//! OpenAI `/v1/responses` API key 订阅的请求 dispatch.
+//!
+//! 与默认 Anthropic 透传分离, 避免污染主路径. 由 [`crate::proxy::pipeline::dispatch`] 在
+//! 检测到 `row.auth_type == OpenaiResponsesApiKey` 时调用.
+//!
+//! 流程:
+//! 1. 解析客户端 `stream` 字段决定上游 stream 模式 (跟随客户端, 不强制)
+//! 2. [`crate::proxy::transform::openai::resolve_reasoning_effort`] 解析 reasoning_effort 优先级链
+//! 3. [`crate::proxy::transform::openai::anthropic_to_openai_responses`] 翻译 body
+//!    (Anthropic Messages → OpenAI Responses), 自动处理 max_tokens 映射 + reasoning include
+//! 4. 注入 `Authorization: Bearer <api_key>` (header_name/format 由 yaml 决定; openai.yaml 锁 Bearer)
+//! 5. 双路径 finalize:
+//!    - client stream=true → 上游 SSE → [`ResponsesSseConverter`] (config.emit_reasoning=true) → client SSE
+//!    - client stream=false → 上游 JSON → [`responses_json_to_anthropic`] → client JSON
+//!
+//! 与 codex (oauth_dispatch.rs) 关键差异:
+//! - 用 sk-... API key 而非 OAuth refresh_token
+//! - 无 chatgpt 风控 headers (无 build_codex_ua / originator / ChatGPT-Account-Id)
+//! - reasoning 默认暴露 (codex 默认 skip)
+//! - 真正的 stream=false 上游 JSON 路径 (codex 永远 stream=true 上游)
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::Response;
+use bytes::{Bytes, BytesMut};
+use chrono::Utc;
+use futures::stream::BoxStream;
+use futures::StreamExt;
+use reqwest::header::{
+    HeaderMap as ReqHeaderMap, HeaderName as ReqHeaderName, HeaderValue as ReqHeaderValue,
+};
+use serde_json::Value;
+use sqlx::SqlitePool;
+use tauri::AppHandle;
+use tokio::sync::{mpsc, RwLock};
+use tracing::warn;
+use uuid::Uuid;
+
+use crate::observability::events::EventEntry;
+use crate::observability::request_log::{RequestLogEntry, RequestStatus};
+use crate::provider::model::AuthHeaderFormat;
+use crate::proxy::client_fingerprint::ClientContext;
+use crate::proxy::tool_log::ToolUseTally;
+use crate::proxy::effort_log::EffortLog;
+use crate::proxy::handler::error_response;
+use crate::proxy::oauth_dispatch::{peek_responses_first_frame, OAuthDispatchError};
+use crate::proxy::sse_framing::find_sse_frame_boundary;
+use crate::proxy::transform::openai::{
+    anthropic_to_openai_responses, responses_json_to_anthropic, OpenAiResponsesExtras,
+};
+use crate::proxy::transform::responses_common::{
+    parse_sse_frame, ResponsesSseConverter, ResponsesTransformConfig,
+};
+use crate::proxy::upstream;
+use crate::subscription::model::SubscriptionRuntime;
+use crate::subscription::state_machine;
+use crate::virtual_model::VirtualModelName;
+
+/// 上游错误 body 最大保留长度。超过则截断 + 标注总字节数。
+/// 避免中转站抛 HTML 错误页 (KB-MB 级) 撑大 SQLite requests.error_message 列。
+const MAX_UPSTREAM_ERROR_BODY: usize = 4 * 1024;
+
+fn truncate_error_body(s: String) -> String {
+    if s.len() <= MAX_UPSTREAM_ERROR_BODY {
+        return s;
+    }
+    let total = s.len();
+    // Walk back to the nearest UTF-8 char boundary <= MAX. String::truncate panics
+    // if the cut lands mid-codepoint, common for upstream HTML error pages with
+    // Chinese / emoji (single char = 3-4 bytes).
+    let mut cutoff = MAX_UPSTREAM_ERROR_BODY;
+    while cutoff > 0 && !s.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    let mut head = s;
+    head.truncate(cutoff);
+    format!("{head} ...(truncated, total {total} bytes)")
+}
+
+/// dispatch_openai_responses_attempt 的成功返回, transform_config 在外层统一保管。
+pub struct OpenaiResponsesDispatchOk {
+    pub transform_config: ResponsesTransformConfig,
+    pub payload: OpenaiResponsesPayload,
+}
+
+pub enum OpenaiResponsesPayload {
+    Streaming(BoxStream<'static, Result<Bytes, reqwest::Error>>),
+    NonStreaming(Value),
+}
+
+/// 准备并发送 OpenAI Responses 请求, 同时把响应翻译成 Anthropic 形态返回给客户端.
+/// 不做 retry, 由调用方按返回结果决定。
+///
+/// 错误类型沿用 [`OAuthDispatchError`] (与 gemini/codex dispatch 共线)。
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_openai_responses_attempt(
+    http_client: &reqwest::Client,
+    api_key: String,
+    api_key_header_name: String,
+    api_key_header_format: AuthHeaderFormat,
+    url: String,
+    request_body: &Value,
+    client_wants_streaming: bool,
+    forward_headers: Vec<String>,
+    client_headers: HeaderMap,
+    required_headers: std::collections::BTreeMap<String, String>,
+    extras: OpenAiResponsesExtras,
+) -> Result<OpenaiResponsesDispatchOk, OAuthDispatchError> {
+    // 1. 翻译 body (跟随客户端 stream + 注入 reasoning_effort)
+    let mut translated_body = anthropic_to_openai_responses(request_body, &extras).map_err(|e| {
+        OAuthDispatchError::Upstream {
+            status: None,
+            message: format!("body 翻译失败: {e}"),
+        }
+    })?;
+    // 显式覆盖 stream 字段以匹配 client 意图 (build_responses_body 已设置, 这里 double-check)
+    translated_body["stream"] = Value::Bool(client_wants_streaming);
+
+    let body_bytes = serde_json::to_vec(&translated_body).map_err(|e| {
+        OAuthDispatchError::Upstream {
+            status: None,
+            message: format!("body 序列化失败: {e}"),
+        }
+    })?;
+
+    // 2. 组装 headers
+    let mut headers = ReqHeaderMap::new();
+    let header_name = if api_key_header_name.is_empty() {
+        "Authorization".to_string()
+    } else {
+        api_key_header_name
+    };
+    let auth_name = ReqHeaderName::try_from(header_name.as_str()).map_err(|_| {
+        OAuthDispatchError::Upstream {
+            status: None,
+            message: format!("auth header name {:?} 含非法字符", header_name),
+        }
+    })?;
+    let auth_value_str = api_key_header_format.apply(&api_key);
+    let auth_value = ReqHeaderValue::from_str(&auth_value_str).map_err(|_| {
+        OAuthDispatchError::Upstream {
+            status: None,
+            message: "无法构造 Authorization header (API key 含不允许的字符: 控制符 / 非可见 ASCII)".into(),
+        }
+    })?;
+    headers.insert(auth_name, auth_value);
+
+    for (k, v) in required_headers {
+        if let (Ok(name), Ok(value)) =
+            (ReqHeaderName::try_from(k.as_str()), ReqHeaderValue::from_str(&v))
+        {
+            headers.insert(name, value);
+        }
+    }
+    for fwd in forward_headers {
+        if let Some(val) = client_headers.get(fwd.as_str()) {
+            if let (Ok(name), Ok(value)) = (
+                ReqHeaderName::try_from(fwd.as_str()),
+                ReqHeaderValue::from_bytes(val.as_bytes()),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+    }
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        ReqHeaderValue::from_static("application/json"),
+    );
+    if client_wants_streaming {
+        headers.insert(
+            reqwest::header::ACCEPT,
+            ReqHeaderValue::from_static("text/event-stream"),
+        );
+    } else {
+        headers.insert(
+            reqwest::header::ACCEPT,
+            ReqHeaderValue::from_static("application/json"),
+        );
+    }
+
+    // 3. transform config: 与 anthropic_to_openai_responses 内部用同一份 (单一信息源在
+    // OpenAiResponsesExtras::transform_config, 按 extras.dialect 选工厂)，响应侧 SSE converter 复用此 config。
+    let transform_config = extras.transform_config();
+
+    // 4. 发送请求
+    let send_result =
+        upstream::send(http_client, &url, body_bytes, headers, client_wants_streaming).await;
+    let upstream_response = match send_result {
+        Ok(r) => r,
+        Err(upstream::UpstreamError::Reqwest(e)) => {
+            return Err(OAuthDispatchError::Upstream {
+                status: None,
+                message: format!("网络错误: {}", upstream::describe_error(&e)),
+            });
+        }
+    };
+
+    // 5. 按 client_wants_streaming 分支处理
+    match upstream_response {
+        upstream::UpstreamResponse::Streaming { status, stream, .. } => {
+            if !status.is_success() {
+                let mut buf = String::new();
+                let mut s = stream;
+                while let Some(c) = s.next().await {
+                    if let Ok(b) = c {
+                        if let Ok(t) = std::str::from_utf8(&b) {
+                            buf.push_str(t);
+                            if buf.len() >= MAX_UPSTREAM_ERROR_BODY * 2 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                return Err(OAuthDispatchError::Upstream {
+                    status: Some(status.as_u16()),
+                    message: truncate_error_body(buf),
+                });
+            }
+            // 流首 peek: HTTP 200 但首帧就是 response.failed → Err 让 pipeline failover (issue #38)
+            let stream = peek_responses_first_frame(stream)
+                .await
+                .map_err(|message| OAuthDispatchError::Upstream { status: None, message })?;
+            Ok(OpenaiResponsesDispatchOk {
+                transform_config,
+                payload: OpenaiResponsesPayload::Streaming(stream),
+            })
+        }
+        upstream::UpstreamResponse::NonStreaming {
+            status,
+            body,
+            body_text,
+            ..
+        } => {
+            if !status.is_success() {
+                return Err(OAuthDispatchError::Upstream {
+                    status: Some(status.as_u16()),
+                    message: truncate_error_body(body_text.unwrap_or_else(|| body.to_string())),
+                });
+            }
+            Ok(OpenaiResponsesDispatchOk {
+                transform_config,
+                payload: OpenaiResponsesPayload::NonStreaming(body),
+            })
+        }
+    }
+}
+
+/// 把 OpenAI Responses 上游响应翻译成给客户端的最终响应 (流式或非流式).
+/// 同时投递 RequestLogEntry / events / 状态机事件。
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_openai_responses(
+    ok: OpenaiResponsesDispatchOk,
+    vm_name: VirtualModelName,
+    attempt_id: Uuid,
+    sub_id: Uuid,
+    provider_id: String,
+    endpoint_id: String,
+    real_model: String,
+    display_name: String,
+    retry_count: u32,
+    log_tx: mpsc::Sender<RequestLogEntry>,
+    event_log_tx: mpsc::Sender<EventEntry>,
+    pool: SqlitePool,
+    app: AppHandle,
+    sub_rt: Arc<RwLock<SubscriptionRuntime>>,
+    ctx: ClientContext,
+    // 本次 attempt 的思考强度三格 (客户端 / 实际 / 来源), 只写请求日志; 拿不到就是 None。
+    effort_log: EffortLog,
+) -> Response {
+    let OpenaiResponsesDispatchOk { transform_config, payload } = ok;
+    match payload {
+        OpenaiResponsesPayload::Streaming(upstream_stream) => finalize_streaming(
+            upstream_stream,
+            transform_config,
+            vm_name,
+            attempt_id,
+            sub_id,
+            provider_id,
+            endpoint_id,
+            real_model,
+            display_name,
+            retry_count,
+            log_tx,
+            event_log_tx,
+            pool,
+            app,
+            sub_rt,
+            ctx,
+            effort_log,
+        ),
+        OpenaiResponsesPayload::NonStreaming(body) => finalize_non_streaming(
+            body,
+            transform_config,
+            vm_name,
+            attempt_id,
+            sub_id,
+            provider_id,
+            endpoint_id,
+            real_model,
+            display_name,
+            retry_count,
+            log_tx,
+            event_log_tx,
+            pool,
+            app,
+            sub_rt,
+            ctx,
+            effort_log,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_streaming(
+    upstream_stream: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    transform_config: ResponsesTransformConfig,
+    vm_name: VirtualModelName,
+    attempt_id: Uuid,
+    sub_id: Uuid,
+    provider_id: String,
+    endpoint_id: String,
+    real_model: String,
+    _display_name: String,
+    retry_count: u32,
+    log_tx: mpsc::Sender<RequestLogEntry>,
+    event_log_tx: mpsc::Sender<EventEntry>,
+    pool: SqlitePool,
+    app: AppHandle,
+    sub_rt: Arc<RwLock<SubscriptionRuntime>>,
+    ctx: ClientContext,
+    // 本次 attempt 的思考强度三格 (客户端 / 实际 / 来源), 只写请求日志; 拿不到就是 None。
+    effort_log: EffortLog,
+) -> Response {
+    let (client_tx, client_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let mut converter = ResponsesSseConverter::new_with_config(transform_config);
+        let mut buffer = BytesMut::with_capacity(8 * 1024);
+        let mut input_tokens: Option<u32> = None;
+        let mut output_tokens: Option<u32> = None;
+        let mut cache_read: Option<u32> = None;
+        let mut cache_creation: Option<u32> = None;
+        let mut response_model_observed: Option<String> = None;
+        let mut upstream_error: Option<String> = None;
+        let mut tool_tally = ToolUseTally::default();
+
+        let mut stream = upstream_stream;
+        'recv: while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(?e, "OpenAI Responses upstream stream error");
+                    let payload = serde_json::to_string(&serde_json::json!({"error": upstream::describe_error(&e)}))
+                        .unwrap_or_else(|_| r#"{"error":"unknown"}"#.into());
+                    let _ = client_tx
+                        .send(Ok(Bytes::from(format!("event: error\ndata: {}\n\n", payload))))
+                        .await;
+                    break;
+                }
+            };
+            buffer.extend_from_slice(&chunk);
+
+            loop {
+                let Some((idx, sep_len)) = find_sse_frame_boundary(&buffer) else {
+                    break;
+                };
+                let frame_bytes = buffer.split_to(idx + sep_len);
+                let frame_str = std::str::from_utf8(&frame_bytes[..frame_bytes.len() - sep_len])
+                    .unwrap_or("");
+                let Some((event_name, data)) = parse_sse_frame(frame_str) else {
+                    continue;
+                };
+                let anth_events = converter.feed(&event_name, &data);
+                if !anth_events.is_empty() {
+                    let mut buf = Vec::with_capacity(256);
+                    for evt in anth_events {
+                        tool_tally.observe_responses_event(&evt);
+                        buf.extend_from_slice(evt.to_sse_frame().as_bytes());
+                    }
+                    if client_tx.send(Ok(Bytes::from(buf))).await.is_err() {
+                        return;
+                    }
+                }
+
+                // 流中 response.failed / error: Anthropic error 帧已随上面转发,
+                // 终止消费并把失败带到日志/状态机 (issue #38)
+                if let Some(message) = converter.failure_message() {
+                    upstream_error = Some(message.to_string());
+                    break 'recv;
+                }
+            }
+        }
+
+        // 兜底 message_stop (若 response.completed 没收到)
+        let tail = converter.finalize_if_needed();
+        if !tail.is_empty() {
+            let mut buf = Vec::new();
+            for evt in tail {
+                tool_tally.observe_responses_event(&evt);
+                buf.extend_from_slice(evt.to_sse_frame().as_bytes());
+            }
+            let _ = client_tx.send(Ok(Bytes::from(buf))).await;
+        }
+
+        // 提取 usage / model (final_usage 是 pub(crate), 已过 responses_usage_to_anthropic 归一化)
+        if let Some(usage) = converter.final_usage.as_ref() {
+            input_tokens = usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            output_tokens = usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            cache_creation = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+        }
+        let response_model = converter.response_model();
+        if !response_model.is_empty() {
+            response_model_observed = Some(response_model.to_string());
+        }
+
+        // 上游 response 对象回显的 reasoning.effort (仅观测; 上游不回显 → None)
+        let upstream_effort_echo = converter.upstream_effort().map(str::to_string);
+
+        // 状态机 + 日志 — HTTP 200 但 SSE 内报错时按「上游 SSE 错误」处理 (对齐智谱前例)
+        let state_event = if upstream_error.is_some() {
+            state_machine::Event::UpstreamSseError {
+                is_quota_exhausted: false,
+            }
+        } else {
+            state_machine::Event::RequestSucceeded
+        };
+        let _ = state_machine::apply(&pool, &app, &event_log_tx, sub_rt.clone(), state_event).await;
+
+        let entry = RequestLogEntry {
+            id: attempt_id,
+            timestamp_ms: Utc::now().timestamp_millis(),
+            virtual_model_name: vm_name,
+            subscription_id: sub_id,
+            provider_id,
+            endpoint_id,
+            real_model_name: real_model.clone(),
+            response_model_name: response_model_observed,
+            is_streaming: true,
+            status: if upstream_error.is_some() {
+                RequestStatus::Error
+            } else {
+                RequestStatus::Success
+            },
+            // HTTP 层仍是 200, 语义层失败靠 status + error_message 区分
+            http_status: Some(200),
+            ttft_ms: None,
+            total_latency_ms: Some(start.elapsed().as_millis() as u64),
+            upstream_input_tokens: input_tokens,
+            upstream_output_tokens: output_tokens,
+            upstream_cache_creation: cache_creation,
+            upstream_cache_read: cache_read,
+            retry_count,
+            error_message: upstream_error.clone(),
+            upstream_response_body: None,
+            client_tool: ctx.info.tool,
+            client_user_agent: ctx.info.user_agent.clone(),
+            client_version: ctx.info.version.clone(),
+            client_ip: ctx.ip.clone(),
+            entry_kind: Some(ctx.entry_kind.as_str()),
+            downstream_http_version: ctx.http_version.clone(),
+            client_effort: effort_log.client.clone(),
+            effective_effort: effort_log.effective.clone(),
+            effort_source: effort_log.source,
+            upstream_effort: upstream_effort_echo,
+            tool_calls: tool_tally.fields(&ctx.tools),
+        };
+        let _ = log_tx.try_send(entry);
+    });
+
+    let stream = futures::stream::unfold(client_rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let body = Body::from_stream(stream);
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-cache"),
+    );
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_non_streaming(
+    upstream_body: Value,
+    transform_config: ResponsesTransformConfig,
+    vm_name: VirtualModelName,
+    attempt_id: Uuid,
+    sub_id: Uuid,
+    provider_id: String,
+    endpoint_id: String,
+    real_model: String,
+    _display_name: String,
+    retry_count: u32,
+    log_tx: mpsc::Sender<RequestLogEntry>,
+    event_log_tx: mpsc::Sender<EventEntry>,
+    pool: SqlitePool,
+    app: AppHandle,
+    sub_rt: Arc<RwLock<SubscriptionRuntime>>,
+    ctx: ClientContext,
+    // 本次 attempt 的思考强度三格 (客户端 / 实际 / 来源), 只写请求日志; 拿不到就是 None。
+    effort_log: EffortLog,
+) -> Response {
+    let start = std::time::Instant::now();
+
+    // 提取 usage 字段 (用于日志, 翻译前提; 先过 responses_usage_to_anthropic 归一化缓存命名)
+    let usage = upstream_body
+        .get("usage")
+        .map(crate::proxy::transform::responses_common::responses_usage_to_anthropic);
+    let input_tokens = usage
+        .as_ref()
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let output_tokens = usage
+        .as_ref()
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let cache_read = usage
+        .as_ref()
+        .and_then(|u| u.get("cache_read_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let cache_creation = usage
+        .as_ref()
+        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let response_model = upstream_body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // 上游 response 对象回显的 reasoning.effort (非流式: 顶层就是 response 对象)
+    let upstream_effort_echo =
+        crate::proxy::transform::responses_common::responses_upstream_effort(&upstream_body);
+
+    let final_msg = match responses_json_to_anthropic(&upstream_body, &transform_config) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream_translation_error",
+                &format!("OpenAI Responses JSON 翻译失败: {e}"),
+            );
+        }
+    };
+
+
+    let tool_calls = {
+        let mut tally = ToolUseTally::default();
+        tally.observe_message(&final_msg);
+        tally.fields(&ctx.tools)
+    };
+
+    // 状态机 + 日志 (在 spawn 里跑, 不阻塞响应)
+    let log_app = app.clone();
+    let log_pool = pool.clone();
+    let log_sub_rt = sub_rt.clone();
+    let log_event_log_tx = event_log_tx.clone();
+    let log_real_model = real_model.clone();
+    let log_provider_id = provider_id.clone();
+    let log_endpoint_id = endpoint_id.clone();
+    tokio::spawn(async move {
+        let _ = state_machine::apply(
+            &log_pool,
+            &log_app,
+            &log_event_log_tx,
+            log_sub_rt,
+            state_machine::Event::RequestSucceeded,
+        )
+        .await;
+
+        let entry = RequestLogEntry {
+            id: attempt_id,
+            timestamp_ms: Utc::now().timestamp_millis(),
+            virtual_model_name: vm_name,
+            subscription_id: sub_id,
+            provider_id: log_provider_id,
+            endpoint_id: log_endpoint_id,
+            real_model_name: log_real_model.clone(),
+            response_model_name: response_model,
+            is_streaming: false,
+            status: RequestStatus::Success,
+            http_status: Some(200),
+            ttft_ms: None,
+            total_latency_ms: Some(start.elapsed().as_millis() as u64),
+            upstream_input_tokens: input_tokens,
+            upstream_output_tokens: output_tokens,
+            upstream_cache_creation: cache_creation,
+            upstream_cache_read: cache_read,
+            retry_count,
+            error_message: None,
+            upstream_response_body: None,
+            client_tool: ctx.info.tool,
+            client_user_agent: ctx.info.user_agent.clone(),
+            client_version: ctx.info.version.clone(),
+            client_ip: ctx.ip.clone(),
+            entry_kind: Some(ctx.entry_kind.as_str()),
+            downstream_http_version: ctx.http_version.clone(),
+            client_effort: effort_log.client.clone(),
+            effective_effort: effort_log.effective.clone(),
+            effort_source: effort_log.source,
+            upstream_effort: upstream_effort_echo.clone(),
+            tool_calls,
+        };
+        let _ = log_tx.try_send(entry);
+    });
+
+    let bytes = serde_json::to_vec(&final_msg).unwrap_or_default();
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// issue #35: required_headers 注入 —— 自定义 header 必须到达上游。
+    /// Mock 用 .and(header("X-DST", ...)) 匹配: header 未送达时 wiremock 回 404,
+    /// dispatch 转成 Upstream 错误, expect 即失败。
+    #[tokio::test]
+    async fn dispatch_sends_required_headers_to_upstream() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("Authorization", "Bearer sk-test"))
+            .and(header("X-DST", "eastus2"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "resp_1", "output": []}))
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut required = std::collections::BTreeMap::new();
+        required.insert("X-DST".to_string(), "eastus2".to_string());
+
+        let result = dispatch_openai_responses_attempt(
+            &reqwest::Client::new(),
+            "sk-test".into(),
+            "Authorization".into(),
+            AuthHeaderFormat::Bearer,
+            format!("{}/v1/responses", server.uri()),
+            &json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 32,
+            }),
+            false,
+            Vec::new(),
+            HeaderMap::new(),
+            required,
+            OpenAiResponsesExtras {
+                reasoning_effort: None,
+                expose_reasoning: true,
+                dialect: Default::default(),
+            },
+        )
+        .await;
+
+        let ok = result.expect("上游 mock 仅在收到 X-DST: eastus2 时匹配, 失败即 header 未送达");
+        assert!(matches!(ok.payload, OpenaiResponsesPayload::NonStreaming(_)));
+    }
+
+    /// issue #38: 上游 HTTP 200 但流首帧就是 response.failed → attempt 返回 Err,
+    /// pipeline 据此 failover 到下一个候选订阅 (对齐智谱 SSE error peek 前例)。
+    #[tokio::test]
+    async fn dispatch_streaming_failed_first_frame_returns_err_for_failover() {
+        let server = MockServer::start().await;
+        let sse_body = "event: response.failed\ndata: {\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The model failed to generate a response.\"}}}\n\n";
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(sse_body, "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let result = dispatch_openai_responses_attempt(
+            &reqwest::Client::new(),
+            "sk-test".into(),
+            "Authorization".into(),
+            AuthHeaderFormat::Bearer,
+            format!("{}/v1/responses", server.uri()),
+            &json!({
+                "model": "gpt-5",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+            true,
+            Vec::new(),
+            HeaderMap::new(),
+            std::collections::BTreeMap::new(),
+            OpenAiResponsesExtras {
+                reasoning_effort: None,
+                expose_reasoning: true,
+                dialect: Default::default(),
+            },
+        )
+        .await;
+
+        match result {
+            Err(OAuthDispatchError::Upstream { status, message }) => {
+                assert_eq!(status, None, "流内失败无 HTTP 状态, pipeline 按 502 分类重试");
+                assert!(
+                    message.contains("The model failed to generate a response."),
+                    "错误消息应透出上游 error.message, got: {message}"
+                );
+            }
+            Err(OAuthDispatchError::Auth(m)) => panic!("unexpected auth error: {m}"),
+            Ok(_) => panic!("expected Upstream error, got Ok"),
+        }
+    }
+
+    /// 正常流式响应不受 peek 影响, 上游字节完整到达翻译层。
+    #[tokio::test]
+    async fn dispatch_streaming_normal_first_frame_passes_through() {
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "event: response.created\ndata: {\"response\":{\"id\":\"r\",\"model\":\"gpt-5\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+            "event: response.output_text.delta\ndata: {\"output_index\":0,\"delta\":\"hello\"}\n\n",
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(sse_body, "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let result = dispatch_openai_responses_attempt(
+            &reqwest::Client::new(),
+            "sk-test".into(),
+            "Authorization".into(),
+            AuthHeaderFormat::Bearer,
+            format!("{}/v1/responses", server.uri()),
+            &json!({
+                "model": "gpt-5",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+            true,
+            Vec::new(),
+            HeaderMap::new(),
+            std::collections::BTreeMap::new(),
+            OpenAiResponsesExtras {
+                reasoning_effort: None,
+                expose_reasoning: true,
+                dialect: Default::default(),
+            },
+        )
+        .await;
+
+        let ok = result.expect("正常 SSE 应返回 Ok");
+        let OpenaiResponsesPayload::Streaming(s) = ok.payload else {
+            panic!("expected streaming payload");
+        };
+        let collected: Vec<u8> = s
+            .filter_map(|r| async move { r.ok() })
+            .fold(Vec::new(), |mut acc, b| async move {
+                acc.extend_from_slice(&b);
+                acc
+            })
+            .await;
+        assert_eq!(collected, sse_body.as_bytes(), "peek 不能丢/改任何字节");
+    }
+}

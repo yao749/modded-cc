@@ -1,0 +1,307 @@
+//! 动效 token。页面只调这里的语义函数, 时长 / 缓动不在别处散写 (CLAUDE.md「工作风格偏好」)。
+//!
+//! tachyonfx 的效果是对**已经画好的缓冲区**做后处理: 内容当帧就绪、按键当帧生效, 效果只是叠在上面的一层;
+//! 同一个 [`FxKey`] 再次添加会取消旧效果。所以这里的每个效果都满足「不阻塞输入、可被打断」。
+//!
+//! **只动前景色**: 我们不知道用户终端的背景色 (theme.rs 同一条规则), 所以不用 `sweep_in` / `slide_in` /
+//! `fade_from` 这类需要指定背景色的效果; 方向感由 `fade_from_fg` + `SweepPattern` 给出。
+//! 循环效果一个都没有 —— 「重连中」用 250ms tick 驱动的 throbber, 否则 app 没开的几个小时里 TUI 会一直跑 60fps。
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
+use tachyonfx::pattern::SweepPattern;
+use tachyonfx::{fx, CellFilter, Duration, Effect, EffectManager, Interpolation};
+
+/// 标称时长 (毫秒)。入场用 `QuadOut`, 退场用 `QuadIn`。
+pub mod ms {
+    pub const STARTUP: u32 = 400;
+    pub const PAGE: u32 = 150;
+    pub const POPUP_OPEN: u32 = 120;
+    pub const POPUP_CLOSE: u32 = 100;
+    pub const TOAST_IN: u32 = 200;
+    pub const TOAST_OUT: u32 = 300;
+    pub const ROW_CHANGED: u32 = 600;
+    pub const VALUE_CHANGED: u32 = 400;
+    /// 实时路由页新行的淡入。
+    pub const ROW_NEW: u32 = 300;
+    /// 向导表单校验失败的那一行。
+    pub const FIELD_ERR: u32 = 300;
+    /// 向导换步 (`Basics → Slots`)。
+    pub const WIZARD_STEP: u32 = 180;
+}
+
+// `Default` 只是为了满足 `EffectManager<K>: Default` 的派生约束 (tachyonfx 0.25), 没有语义。
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FxKey {
+    #[default]
+    Startup,
+    Page,
+    Popup,
+    Toast,
+    /// 订阅 id
+    Row(String),
+    Value(&'static str),
+    /// 实时路由的条目序号。
+    LiveRow(u64),
+    /// 向导表单里的一行 (行下标)。
+    Field(usize),
+    /// 向导整块内容区。
+    Wizard,
+}
+
+/// 切页方向: 往右边的标签走是 `Forward`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    Forward,
+    Backward,
+}
+
+pub struct Fx {
+    enabled: bool,
+    mgr: EffectManager<FxKey>,
+    /// toast 消散效果还剩多久播完; `None` = 没在播 (或从没触发过), `Some(ZERO)` = 播完了。
+    /// 独立于 `mgr` 追踪是因为 `EffectManager` 一旦效果结束就把它整个清掉, 调用方问不出
+    /// 「它是不是刚播完」——而 `draw_toast` 恰好需要这个「刚播完」的瞬间去停止继续画它 (H2)。
+    toast_out_left: Option<std::time::Duration>,
+}
+
+impl Fx {
+    /// `enabled = false` 时所有方法都是空操作, 调用点不需要分支。
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled, mgr: EffectManager::default(), toast_out_left: None }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// 有效果在播 → 主循环切到约 60fps; 播完回落到按需重绘。
+    pub fn is_running(&self) -> bool {
+        self.mgr.is_running()
+    }
+
+    /// 每帧所有 widget 画完之后调用一次。
+    pub fn process(&mut self, elapsed: std::time::Duration, buf: &mut Buffer, area: Rect) {
+        if self.enabled {
+            self.mgr.process_effects(Duration::from_millis(elapsed.as_millis() as u32), buf, area);
+            if let Some(left) = self.toast_out_left {
+                self.toast_out_left = Some(left.saturating_sub(elapsed));
+            }
+        }
+    }
+
+    fn add(&mut self, key: FxKey, effect: Effect) {
+        if self.enabled {
+            self.mgr.add_unique_effect(key, effect);
+        }
+    }
+
+    /// 丢掉所有在播的效果。终端太小时没有可以叠加动效的画面, 不清掉的话 `is_running()` 会一直为真。
+    pub fn clear(&mut self) {
+        self.mgr = EffectManager::default();
+        self.toast_out_left = None;
+    }
+
+    /// 启动: logo 逐格凝聚, 其余内容从暗色淡入。
+    pub fn startup(&mut self, logo: Rect, screen: Rect, from: Color) {
+        let logo_fx = fx::coalesce((ms::STARTUP, Interpolation::QuadOut)).with_area(logo);
+        let rest_fx = fx::fade_from_fg(from, (ms::STARTUP * 3 / 4, Interpolation::QuadOut)).with_area(screen);
+        self.add(FxKey::Startup, fx::parallel(&[rest_fx, logo_fx]));
+    }
+
+    /// 切页: 内容区沿标签移动的方向扫入。
+    pub fn page_enter(&mut self, dir: Dir, content: Rect, from: Color) {
+        let pattern = match dir {
+            Dir::Forward => SweepPattern::left_to_right(12),
+            Dir::Backward => SweepPattern::right_to_left(12),
+        };
+        let effect = fx::fade_from_fg(from, (ms::PAGE, Interpolation::QuadOut)).with_pattern(pattern).with_area(content);
+        self.add(FxKey::Page, effect);
+    }
+
+    pub fn popup_open(&mut self, popup: Rect, from: Color) {
+        self.add(FxKey::Popup, fx::fade_from_fg(from, (ms::POPUP_OPEN, Interpolation::QuadOut)).with_area(popup));
+    }
+
+    /// 弹窗已经不画了, 它原来盖住的那块内容重新凝聚出来 —— 不需要让弹窗多活 100ms。
+    pub fn popup_close(&mut self, popup: Rect) {
+        self.add(FxKey::Popup, fx::coalesce((ms::POPUP_CLOSE, Interpolation::QuadIn)).with_area(popup));
+    }
+
+    pub fn toast_in(&mut self, toast: Rect, from: Color) {
+        let effect = fx::fade_from_fg(from, (ms::TOAST_IN, Interpolation::QuadOut))
+            .with_pattern(SweepPattern::right_to_left(8))
+            .with_area(toast);
+        self.add(FxKey::Toast, effect);
+        self.toast_out_left = None;
+    }
+
+    pub fn toast_out(&mut self, toast: Rect) {
+        self.add(FxKey::Toast, fx::dissolve((ms::TOAST_OUT, Interpolation::QuadIn)).with_area(toast));
+        if self.enabled {
+            self.toast_out_left = Some(std::time::Duration::from_millis(u64::from(ms::TOAST_OUT)));
+        }
+    }
+
+    /// 消散效果是否已经播完 (`toast_out` 从触发到现在累计流逝的时间 ≥ `ms::TOAST_OUT`)。
+    /// 关掉动效时恒为 `false`——没有消散效果, 也就没有「刚播完」这回事, 调用方仍按 `Toast::expired`
+    /// (`toast::LIFETIME_MS`) 的老逻辑显示到过期为止。
+    pub fn toast_out_finished(&self) -> bool {
+        matches!(self.toast_out_left, Some(d) if d.is_zero())
+    }
+
+    /// 功能性动画: 某条订阅的状态变了, 那一行从状态色回落, 视线直接落过去。
+    pub fn row_changed(&mut self, id: &str, row: Rect, color: Color) {
+        let effect = fx::fade_from_fg(color, (ms::ROW_CHANGED, Interpolation::QuadOut)).with_area(row);
+        self.add(FxKey::Row(id.to_string()), effect);
+    }
+
+    pub fn value_changed(&mut self, key: &'static str, cell: Rect, color: Color) {
+        let effect = fx::fade_from_fg(color, (ms::VALUE_CHANGED, Interpolation::QuadOut)).with_area(cell);
+        self.add(FxKey::Value(key), effect);
+    }
+
+    /// 实时路由的新行从强调色淡入: 视线自然落到刚出现的这一条上, 不需要循环效果。
+    pub fn row_new(&mut self, seq: u64, row: Rect, from: Color) {
+        let effect = fx::fade_from_fg(from, (ms::ROW_NEW, Interpolation::QuadOut)).with_area(row);
+        self.add(FxKey::LiveRow(seq), effect);
+    }
+
+    /// 向导表单校验失败: 那一行泛 `err` 色再回落。只染文字 (`CellFilter::Text`), 不染边框——
+    /// 我们不知道用户终端的背景色, 边框本身也不该被这个反馈染色。
+    pub fn field_err(&mut self, row_index: usize, row: Rect, color: Color) {
+        let effect = fx::fade_from_fg(color, (ms::FIELD_ERR, Interpolation::QuadOut)).with_filter(CellFilter::Text).with_area(row);
+        self.add(FxKey::Field(row_index), effect);
+    }
+
+    /// 向导换步: 带方向的淡入, 与 [`Self::page_enter`] 同一套只是更快——原设计写的是
+    /// `slide_in`, 但那需要指定背景色, 违反「只动前景色」这条纪律。
+    pub fn wizard_step(&mut self, dir: Dir, content: Rect, from: Color) {
+        let pattern = match dir {
+            Dir::Forward => SweepPattern::left_to_right(12),
+            Dir::Backward => SweepPattern::right_to_left(12),
+        };
+        let effect = fx::fade_from_fg(from, (ms::WIZARD_STEP, Interpolation::QuadOut)).with_pattern(pattern).with_area(content);
+        self.add(FxKey::Wizard, effect);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration as StdDuration;
+
+    const AREA: Rect = Rect::new(0, 0, 40, 10);
+    const PART: Rect = Rect::new(2, 2, 20, 3);
+
+    type Trigger = Box<dyn Fn(&mut Fx)>;
+
+    /// 每个语义效果的 (名字, 标称时长, 触发方式)。新增效果时加进来, 终止性测试会自动覆盖它。
+    fn all() -> Vec<(&'static str, u32, Trigger)> {
+        vec![
+            ("startup", ms::STARTUP, Box::new(|f| f.startup(PART, AREA, Color::DarkGray))),
+            ("page_fwd", ms::PAGE, Box::new(|f| f.page_enter(Dir::Forward, AREA, Color::DarkGray))),
+            ("page_back", ms::PAGE, Box::new(|f| f.page_enter(Dir::Backward, AREA, Color::DarkGray))),
+            ("popup_open", ms::POPUP_OPEN, Box::new(|f| f.popup_open(PART, Color::DarkGray))),
+            ("popup_close", ms::POPUP_CLOSE, Box::new(|f| f.popup_close(PART))),
+            ("toast_in", ms::TOAST_IN, Box::new(|f| f.toast_in(PART, Color::DarkGray))),
+            ("toast_out", ms::TOAST_OUT, Box::new(|f| f.toast_out(PART))),
+            ("row_changed", ms::ROW_CHANGED, Box::new(|f| f.row_changed("id", PART, Color::Red))),
+            ("value_changed", ms::VALUE_CHANGED, Box::new(|f| f.value_changed("requests", PART, Color::Red))),
+            ("row_new", ms::ROW_NEW, Box::new(|f| f.row_new(1, PART, Color::Red))),
+            ("field_err", ms::FIELD_ERR, Box::new(|f| f.field_err(0, PART, Color::Red))),
+            ("wizard_step", ms::WIZARD_STEP, Box::new(|f| f.wizard_step(Dir::Forward, AREA, Color::DarkGray))),
+        ]
+    }
+
+    /// 效果永不结束会把渲染锁死在 60fps —— 每个效果推进标称时长后必须停。
+    #[test]
+    fn every_effect_terminates_after_its_nominal_duration() {
+        for (name, nominal, trigger) in all() {
+            let mut fx = Fx::new(true);
+            let mut buf = Buffer::empty(AREA);
+            trigger(&mut fx);
+            assert!(fx.is_running(), "{name}: 触发后应该在播");
+            fx.process(StdDuration::from_millis(u64::from(nominal) / 2), &mut buf, AREA);
+            assert!(fx.is_running(), "{name}: 半程不应该结束");
+            fx.process(StdDuration::from_millis(u64::from(nominal)), &mut buf, AREA);
+            assert!(!fx.is_running(), "{name}: 超过标称时长 {nominal}ms 仍在播");
+        }
+    }
+
+    #[test]
+    fn disabled_fx_never_runs() {
+        for (name, _, trigger) in all() {
+            let mut fx = Fx::new(false);
+            trigger(&mut fx);
+            assert!(!fx.is_running(), "{name}");
+        }
+    }
+
+    /// 连续切页: 新效果取消旧效果, 不会越叠越多。
+    #[test]
+    fn same_key_replaces_the_previous_effect() {
+        let mut fx = Fx::new(true);
+        let mut buf = Buffer::empty(AREA);
+        for _ in 0..50 {
+            fx.page_enter(Dir::Forward, AREA, Color::DarkGray);
+            fx.process(StdDuration::from_millis(10), &mut buf, AREA);
+        }
+        fx.process(StdDuration::from_millis(u64::from(ms::PAGE)), &mut buf, AREA);
+        assert!(!fx.is_running());
+    }
+
+    #[test]
+    fn clear_stops_everything() {
+        let mut fx = Fx::new(true);
+        let mut buf = Buffer::empty(AREA);
+        fx.startup(PART, AREA, Color::DarkGray);
+        fx.row_changed("a", PART, Color::Red);
+        assert!(fx.is_running());
+        fx.clear();
+        assert!(!fx.is_running());
+        // clear 之后照常能再触发新效果, 不是把 Fx 弄坏了。
+        fx.page_enter(Dir::Forward, AREA, Color::DarkGray);
+        fx.process(StdDuration::from_millis(10), &mut buf, AREA);
+        assert!(fx.is_running());
+    }
+
+    #[test]
+    fn rows_with_different_ids_run_side_by_side() {
+        let mut fx = Fx::new(true);
+        let mut buf = Buffer::empty(AREA);
+        fx.row_changed("a", PART, Color::Red);
+        fx.process(StdDuration::from_millis(u64::from(ms::ROW_CHANGED) - 100), &mut buf, AREA);
+        fx.row_changed("b", PART, Color::Red);
+        fx.process(StdDuration::from_millis(200), &mut buf, AREA);
+        assert!(fx.is_running(), "b 才播了 200ms");
+    }
+
+    /// H2: `draw_toast` 靠 `toast_out_finished()` 判断消散有没有播完, 才能在「播完但还没被
+    /// `Tick` 弹出」的空隙里不再画它 —— 这条测试锁住这个信号本身的语义。
+    #[test]
+    fn toast_out_finished_tracks_the_dissolve() {
+        let mut fx = Fx::new(true);
+        let mut buf = Buffer::empty(AREA);
+        assert!(!fx.toast_out_finished(), "还没触发 toast_out");
+
+        fx.toast_out(PART);
+        assert!(!fx.toast_out_finished(), "刚触发, 还没开始流逝时间");
+
+        fx.process(StdDuration::from_millis(u64::from(ms::TOAST_OUT) / 2), &mut buf, AREA);
+        assert!(!fx.toast_out_finished(), "播到一半");
+
+        fx.process(StdDuration::from_millis(u64::from(ms::TOAST_OUT)), &mut buf, AREA);
+        assert!(fx.toast_out_finished(), "累计流逝已经 ≥ TOAST_OUT");
+
+        fx.toast_in(PART, Color::DarkGray);
+        assert!(!fx.toast_out_finished(), "toast_in 重置了标记");
+
+        // 关掉动效时恒为 false: 没有消散效果, 也就没有「刚播完」这回事。
+        let mut disabled = Fx::new(false);
+        disabled.toast_out(PART);
+        disabled.process(StdDuration::from_millis(u64::from(ms::TOAST_OUT) * 2), &mut buf, AREA);
+        assert!(!disabled.toast_out_finished(), "关闭动效时恒为 false");
+    }
+}

@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Provider",
+  "type": "object",
+  "required": ["id", "display_name", "compatibility", "endpoints", "auth"],
+  "additionalProperties": true,
+  "definitions": {
+    "localizedText": {
+      "description": "上屏文字: 纯字符串 = 三语相同 (品牌名); 含中文时必须写成 zh/en/ja 对象",
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "required": ["zh", "en", "ja"],
+          "additionalProperties": false,
+          "properties": { "zh": { "type": "string" }, "en": { "type": "string" }, "ja": { "type": "string" } }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "display_name": { "$ref": "#/definitions/localizedText" },
+    "description": { "$ref": "#/definitions/localizedText" },
+    "homepage": { "type": "string" },
+    "docs_url": { "type": "string" },
+    "api_key_url": { "type": "string" },
+    "icon": { "type": "string" },
+    "compatibility": { "enum": ["verified", "partial", "untested"] },
+    "compatibility_notes": { "anyOf": [{ "$ref": "#/definitions/localizedText" }, { "type": "null" }] },
+    "category": { "enum": ["first_party", "second_party", "aggregator"] },
+    "url_params": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "pattern"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "$ref": "#/definitions/localizedText" },
+          "placeholder": { "$ref": "#/definitions/localizedText" },
+          "pattern": { "type": "string" }
+        }
+      }
+    },
+    "endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "base_url", "messages_path"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "$ref": "#/definitions/localizedText" },
+          "description": { "$ref": "#/definitions/localizedText" },
+          "base_url": { "type": "string" },
+          "messages_path": { "type": "string" },
+          "region": { "type": "string" },
+          "billing": { "type": "string" },
+          "protocol": { "enum": ["messages", "systemone"] },
+          "example_models": { "type": "array", "items": { "type": "string" } },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "systemone_wire": { "enum": ["standard", "cloudflare_run"] }
+        }
+      }
+    },
+    "default_endpoint": { "type": "string" },
+    "auth": {
+      "type": "object",
+      "required": ["type", "header_name", "header_format"],
+      "properties": {
+        "type": { "enum": ["api_key", "chatgpt_oauth", "kiro_oauth", "gemini_api_key", "openai_responses_api_key", "openai_chat_completions_api_key", "gemini_interactions_api_key"] },
+        "header_name": { "type": "string" },
+        "header_format": { "enum": ["raw", "bearer"] }
+      }
+    },
+    "required_headers": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "forward_headers": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "model_discovery": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string" },
+        "url": { "type": "string" },
+        "cache_ttl_hours": { "type": "integer", "minimum": 0 },
+        "envelope": { "enum": ["openai", "gemini", "cloudflare"] },
+        "example_models": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "balance_discovery": {
+      "type": "object",
+      "required": ["url", "parser"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "url": { "type": "string", "format": "uri" },
+        "method": { "enum": ["GET", "POST"] },
+        "parser": { "type": "string" },
+        "cache_ttl_minutes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "expose_reasoning": { "type": "boolean" },
+    "default_reasoning_effort": { "type": "string", "enum": ["minimal", "low", "medium", "high", "xhigh", "max"] },
+    "inject_missing_thinking_placeholder": { "type": "boolean" }
+  }
+}

@@ -1,0 +1,47 @@
+[package]
+name = "cc-router-tui"
+version = "6.4.0"
+edition = "2021"
+description = "cc-router 的终端界面"
+license = "MIT"
+publish = false
+
+# bin 名刻意不叫 cc-router-tui: tauri-build 会把 sidecar 复制成 target/<profile>/cc-router-tui,
+# 与同名的 cargo 产物撞路径 (占位文件会把真二进制覆盖成 0 字节)。最终用户看到的文件名由
+# scripts/build-tui-sidecar.mjs 与 tauri.conf.json::bundle.externalBin 决定, 仍是 cc-router-tui。
+[[bin]]
+name = "cc-router-tui-bin"
+path = "src/main.rs"
+
+[dependencies]
+# 本地时区显示时间。与主 crate 同一版本 (0.4.45, 2026-06-04); 只要 Local 时钟, 不要默认的 oldtime / wasmbind。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# event-stream: 异步读键盘。ratatui 再导出的就是这个 crate, 这里只是为了打开 feature (cargo 会合并)。
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = { version = "0.3", default-features = false }
+ratatui = "0.30"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 不要默认的 dsl feature (会带进一个解析器), 效果全部用 Rust API 构造。
+tachyonfx = { version = "0.25", default-features = false, features = ["std"] }
+thiserror = "2"
+throbber-widgets-tui = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tui-big-text = "0.8"
+# 默认 feature "ratatui-crossterm" 拉的是同一个 ratatui/crossterm (由 ratatui 的 "crossterm" 默认
+# feature 提供), 不会引入第二份 crossterm / ratatui —— 加依赖后用 `cargo tree -p cc-router-tui -d`
+# 确认过。
+tui-input = "0.15"
+unicode-width = "0.2"
+# URL 参数的格式校验 (与后端同一份 pattern)。
+regex = "1"
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"
+# 只给测试用的 trickle_server (client::test_support) 拉 TCP 原语; 与 [dependencies] 里的
+# tokio 是同一份依赖, 但这两个 feature 只在 cargo 为测试构建做 feature 统一时才生效, 不影响
+# 生产二进制的 feature 集合 (Task 3)。
+tokio = { version = "1", features = ["net", "io-util"] }
+wiremock = "0.6"

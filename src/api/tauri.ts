@@ -1,0 +1,221 @@
+import { runtime } from "@/runtime";
+
+const invoke = runtime.invoke;
+import type {
+  BreakdownBy,
+  BreakdownDto,
+  ChatGptAccount,
+  ClaudeCodeInspectResult,
+  ClaudeCodeReadResult,
+  ClaudeCodeWriteOutcome,
+  ClientActivityDto,
+  CreateChatGptOAuthSubscriptionInput,
+  CreateKiroSubscriptionInput,
+  CreateSubscriptionInput,
+  DailySeriesPointDto,
+  DeviceFlowStart,
+  EventFilters,
+  ExportSummary,
+  HeatmapDayDto,
+  ImportOptions,
+  ImportPreview,
+  ImportReport,
+  KiroAccount,
+  KiroDeviceFlowStart,
+  KiroDisguise,
+  KiroImportResult,
+  ListEventsResult,
+  ListRequestsResult,
+  OnboardingState,
+  OverallStatsDto,
+  ProviderInfo,
+  ProxyStatus,
+  ReceiptDto,
+  ReceiptRange,
+  ReleaseNotesDto,
+  RefreshBalanceResult,
+  RefreshModelListResult,
+  RequestLogFilters,
+  RestartProxyResult,
+  Settings,
+  SettingsPatch,
+  StatsRange,
+  StorageStatsDto,
+  SubscriptionDto,
+  SubscriptionPatch,
+  TestConnectionResult,
+  TlsStatus,
+  TokenQuotas,
+  ToolBreakdownDto,
+  TuiInstallOutcome,
+  TuiLaunchInfo,
+  UpdateInfo,
+  UpdateVirtualModelInput,
+  VirtualModelDto,
+  VirtualModelName,
+} from "@/types";
+
+export const api = {
+  // providers
+  listProviders: () => invoke<ProviderInfo[]>("list_providers"),
+
+  // subscriptions
+  listSubscriptions: () => invoke<SubscriptionDto[]>("list_subscriptions"),
+  getSubscription: (id: string) =>
+    invoke<SubscriptionDto>("get_subscription", { id }),
+  createSubscription: (input: CreateSubscriptionInput) =>
+    invoke<SubscriptionDto>("create_subscription", { input }),
+  updateSubscription: (id: string, patch: SubscriptionPatch) =>
+    invoke<SubscriptionDto>("update_subscription", { id, patch }),
+  updateSubscriptionKey: (id: string, newKey: string) =>
+    invoke<void>("update_subscription_key", { id, newKey }),
+  deleteSubscription: (id: string) =>
+    invoke<void>("delete_subscription", { id }),
+  setSubscriptionEnabled: (id: string, enabled: boolean) =>
+    invoke<void>("set_subscription_enabled", { id, enabled }),
+  testConnection: (id: string) =>
+    invoke<TestConnectionResult>("test_connection", { id }),
+  refreshModelList: (id: string) =>
+    invoke<RefreshModelListResult>("refresh_model_list", { id }),
+  refreshSubscriptionBalance: (id: string) =>
+    invoke<RefreshBalanceResult>("refresh_subscription_balance", { id }),
+  updateTokenQuotas: (id: string, quotas: TokenQuotas) =>
+    invoke<SubscriptionDto>("update_token_quotas", { id, quotas }),
+  resetTotalQuotaUsage: (id: string) =>
+    invoke<SubscriptionDto>("reset_total_quota_usage", { id }),
+
+  // ChatGPT OAuth (Phase 1, OpenAI Codex provider)
+  startChatGptDeviceFlow: () =>
+    invoke<DeviceFlowStart>("start_chatgpt_device_flow"),
+  pollChatGptDeviceCode: (deviceCode: string) =>
+    invoke<ChatGptAccount | null>("poll_chatgpt_device_code", { deviceCode }),
+  createChatGptOAuthSubscription: (input: CreateChatGptOAuthSubscriptionInput) =>
+    invoke<SubscriptionDto>("create_chatgpt_oauth_subscription", { input }),
+  forgetChatGptOAuthCache: (subscriptionId: string) =>
+    invoke<void>("forget_chatgpt_oauth_cache", { subscriptionId }),
+
+  // Kiro OAuth (方案 A JSON 导入 + 方案 B AWS Builder ID OIDC Device Flow)
+  importKiroCredentialsFromFile: (path: string) =>
+    invoke<KiroImportResult>("import_kiro_credentials_from_file", { path }),
+  importKiroCredentialsFromText: (json: string) =>
+    invoke<KiroImportResult>("import_kiro_credentials_from_text", { json }),
+  startKiroDeviceFlow: (region?: string) =>
+    invoke<KiroDeviceFlowStart>("start_kiro_device_flow", { region }),
+  pollKiroDeviceCode: (deviceCode: string) =>
+    invoke<KiroAccount | null>("poll_kiro_device_code", { deviceCode }),
+  createKiroSubscription: (input: CreateKiroSubscriptionInput) =>
+    invoke<SubscriptionDto>("create_kiro_subscription", { input }),
+  forgetKiroOAuthCache: (subscriptionId: string) =>
+    invoke<void>("forget_kiro_oauth_cache", { subscriptionId }),
+  updateKiroDisguiseFields: (subscriptionId: string, disguise: KiroDisguise) =>
+    invoke<void>("update_kiro_disguise_fields", { subscriptionId, disguise }),
+
+  // virtual models
+  listVirtualModels: () => invoke<VirtualModelDto[]>("list_virtual_models"),
+  updateVirtualModel: (name: VirtualModelName, input: UpdateVirtualModelInput) =>
+    invoke<void>("update_virtual_model", { name, input }),
+
+  // request logs
+  listRequests: (
+    page: number,
+    pageSize: number,
+    filters?: RequestLogFilters,
+  ) =>
+    invoke<ListRequestsResult>("list_requests", { page, pageSize, filters }),
+  /** 按当前筛选导出 CSV 到 path (来自 save dialog), 返回导出行数 */
+  exportRequestsCsv: (path: string, filters?: RequestLogFilters) =>
+    invoke<number>("export_requests_csv", { path, filters }),
+  /** 网页端导出: 返回 CSV 文本 (含 BOM), 由浏览器下载 */
+  exportRequestsCsvText: (filters?: RequestLogFilters) =>
+    invoke<string>("export_requests_csv_text", { filters }),
+  /** Live Routing「客户端接入」: 按 client_tool 聚合的最近活动 (被动流量检测) */
+  getClientActivity: () => invoke<ClientActivityDto[]>("get_client_activity"),
+
+  // config backup / import
+  exportConfig: (path: string, password?: string) =>
+    invoke<ExportSummary>("export_config", { path, password: password ?? null }),
+
+  exportConfigText: () => invoke<string>("export_config_text"),
+
+  previewConfigImport: (text: string) =>
+    invoke<ImportPreview>("preview_config_import", { text }),
+
+  applyConfigImport: (text: string, options: ImportOptions) =>
+    invoke<ImportReport>("apply_config_import", { text, options }),
+
+  // statistics (聚合表查询, 跨范围全局)
+  getOverallStats: (range: StatsRange) =>
+    invoke<OverallStatsDto>("get_overall_stats", { range }),
+  getDailySeries: (range: StatsRange) =>
+    invoke<DailySeriesPointDto[]>("get_daily_series", { range }),
+  getBreakdown: (range: StatsRange, by: BreakdownBy) =>
+    invoke<BreakdownDto[]>("get_breakdown", { range, by }),
+  getTokenHeatmap: (days: number) =>
+    invoke<HeatmapDayDto[]>("get_token_heatmap", { days }),
+  getToolBreakdown: (range: StatsRange, limit: number) =>
+    invoke<ToolBreakdownDto[]>("get_tool_breakdown", { range, limit }),
+
+  getReceiptSummary: (range: ReceiptRange) =>
+    invoke<ReceiptDto>("get_receipt_summary", { range }),
+
+  // event stream (kind=subscription_state_change / system_error / quota_reached)
+  listEvents: (
+    page: number,
+    pageSize: number,
+    filters?: EventFilters,
+  ) =>
+    invoke<ListEventsResult>("list_events", { page, pageSize, filters }),
+
+  // release notes
+  getReleaseNotes: () => invoke<ReleaseNotesDto>("get_release_notes"),
+  markReleaseNotesSeen: () => invoke<void>("mark_release_notes_seen"),
+
+  // settings / proxy
+  getSettings: () => invoke<Settings>("get_settings"),
+  updateSettings: (patch: SettingsPatch) =>
+    invoke<Settings>("update_settings", { patch }),
+  generateNewToken: () => invoke<Settings>("generate_new_token"),
+  proxyStatus: () => invoke<ProxyStatus>("proxy_status"),
+  restartProxy: () => invoke<RestartProxyResult>("restart_proxy"),
+  envSnippet: () => invoke<string>("env_snippet"),
+  /** 局域网 IPv4 列表 (非回环), 设置页拼网页访问地址用 */
+  listLanAddresses: () => invoke<string[]>("list_lan_addresses"),
+  tuiLaunchInfo: () => invoke<TuiLaunchInfo>("tui_launch_info"),
+  /** 仅桌面端可用; 网页端后端直接拒绝 */
+  installTuiCommand: () => invoke<TuiInstallOutcome>("install_tui_command"),
+  uninstallTuiCommand: () => invoke<TuiInstallOutcome>("uninstall_tui_command"),
+
+  // onboarding
+  getOnboardingState: () => invoke<OnboardingState>("get_onboarding_state"),
+  completeOnboarding: () => invoke<void>("complete_onboarding"),
+
+  // app
+  factoryReset: () => invoke<void>("factory_reset"),
+  getStorageStats: () => invoke<StorageStatsDto>("get_storage_stats"),
+
+  // 调试模式 dump 目录管理
+  openDebugDumpDir: () => invoke<void>("open_debug_dump_dir"),
+  clearDebugDumps: () => invoke<void>("clear_debug_dumps"),
+
+  // updater (运行时按 settings.update_source 切换 manifest 源)
+  checkForUpdate: () => invoke<UpdateInfo | null>("check_for_update"),
+  downloadInstallUpdate: () => invoke<void>("download_install_update"),
+  /** 把检测到的新版本号推给托盘菜单 (null = 已是最新)。只在桌面运行时调用。 */
+  setTrayUpdate: (version: string | null) => invoke<void>("set_tray_update", { version }),
+
+  // TLS / HTTPS 证书 (proxy_mode 包含 https 时使用)
+  tlsGetStatus: () => invoke<TlsStatus>("tls_get_status"),
+  tlsGetCaPemPath: () => invoke<string>("tls_get_ca_pem_path"),
+  tlsExportCaPem: (dest: string) => invoke<void>("tls_export_ca_pem", { dest }),
+  /** 网页端导出: 返回 CA PEM 文本 */
+  tlsGetCaPemText: () => invoke<string>("tls_get_ca_pem_text"),
+  tlsRegenerateLeaf: () => invoke<TlsStatus>("tls_regenerate_leaf"),
+
+  // Claude Code 集成 (~/.claude/settings.json)
+  readClaudeCodeSettings: () =>
+    invoke<ClaudeCodeReadResult>("read_claude_code_settings"),
+  inspectClaudeCodeSettings: () =>
+    invoke<ClaudeCodeInspectResult>("inspect_claude_code_settings"),
+  writeClaudeCodeSettings: (newContent: string) =>
+    invoke<ClaudeCodeWriteOutcome>("write_claude_code_settings", { newContent }),
+};
