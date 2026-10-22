@@ -516,12 +516,12 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus(401), false),
+                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
                         OAuthDispatchError::Upstream { status, .. } => {
                             let s = status.unwrap_or(502);
                             let retryable =
                                 matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus(s), retryable)
+                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
                         }
                     };
                     let _ = state_machine::apply(
@@ -635,12 +635,12 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus(401), false),
+                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
                         OAuthDispatchError::Upstream { status, .. } => {
                             let s = status.unwrap_or(502);
                             let retryable =
                                 matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus(s), retryable)
+                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
                         }
                     };
                     let _ = state_machine::apply(
@@ -764,12 +764,12 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus(401), false),
+                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
                         OAuthDispatchError::Upstream { status, .. } => {
                             let s = status.unwrap_or(502);
                             let retryable =
                                 matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus(s), retryable)
+                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
                         }
                     };
                     let _ = state_machine::apply(
@@ -904,12 +904,12 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus(401), false),
+                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
                         OAuthDispatchError::Upstream { status, .. } => {
                             let s = status.unwrap_or(502);
                             let retryable =
                                 matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus(s), retryable)
+                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
                         }
                     };
                     let _ = state_machine::apply(
@@ -1043,12 +1043,12 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus(401), false),
+                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
                         OAuthDispatchError::Upstream { status, .. } => {
                             let s = status.unwrap_or(502);
                             let retryable =
                                 matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus(s), retryable)
+                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
                         }
                     };
                     let _ = state_machine::apply(
@@ -1182,13 +1182,13 @@ pub async fn dispatch(
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = match &err {
                         OAuthDispatchError::Auth(_) => {
-                            (state_machine::Event::HttpStatus(401), false)
+                            (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false)
                         }
                         OAuthDispatchError::Upstream { status, .. } => {
                             let s = status.unwrap_or(502);
                             let retryable =
                                 matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus(s), retryable)
+                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
                         }
                     };
                     let _ = state_machine::apply(
@@ -1390,12 +1390,12 @@ pub async fn dispatch(
                 let should_retry = classify_response(status.as_u16(), None);
                 // 状态机事件
                 let event = match should_retry {
-                    ShouldRetry::Yes(_) => state_machine::Event::HttpStatus(status.as_u16()),
+                    ShouldRetry::Yes(_) => state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None },
                     ShouldRetry::No => {
                         if status.is_success() {
                             state_machine::Event::RequestSucceeded
                         } else {
-                            state_machine::Event::HttpStatus(status.as_u16())
+                            state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None }
                         }
                     }
                 };
@@ -1493,7 +1493,7 @@ pub async fn dispatch(
                 // 流式：若非 2xx 按非流式错误处理
                 if !status.is_success() {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let event = state_machine::Event::HttpStatus(status.as_u16());
+                    let event = state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None };
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1530,7 +1530,7 @@ pub async fn dispatch(
                             &state.app_handle,
                             &state.event_log_tx,
                             rt.clone(),
-                            state_machine::Event::UpstreamSseError { is_quota_exhausted },
+                            state_machine::Event::UpstreamSseError { is_quota_exhausted, retry_after_secs: None },
                         )
                         .await;
 

@@ -436,6 +436,7 @@ fn finalize_streaming(
         let state_event = if upstream_error.is_some() {
             state_machine::Event::UpstreamSseError {
                 is_quota_exhausted: false,
+                retry_after_secs: None,
             }
         } else {
             state_machine::Event::RequestSucceeded

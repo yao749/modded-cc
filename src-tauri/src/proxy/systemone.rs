@@ -1,4 +1,4 @@
-//! `POST /v1/systemone`: Jev (System One 决策协议) 的多上游网关。
+﻿//! `POST /v1/systemone`: Jev (System One 决策协议) 的多上游网关。
 //!
 //! 协议原样透传、不翻译; 只服务 `model-jev` 虚拟模型, 只调度端点协议为 systemone 的订阅。
 //! 候选循环 [`run_candidates`] 不碰 `AppState`: 发请求 / 状态机 / 日志都经 [`AttemptSink`]
@@ -258,7 +258,7 @@ pub async fn run_candidates<S: AttemptSink + Send>(cands: &[Candidate], sink: &m
 pub fn state_event(r: &AttemptResult) -> state_machine::Event {
     match r {
         AttemptResult::Http { status, .. } if status.is_success() => state_machine::Event::RequestSucceeded,
-        AttemptResult::Http { status, .. } => state_machine::Event::HttpStatus(status.as_u16()),
+        AttemptResult::Http { status, .. } => state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None },
         AttemptResult::Network(_) => state_machine::Event::NetworkError,
     }
 }
@@ -995,7 +995,7 @@ mod tests {
     fn state_events() {
         use crate::subscription::state_machine::Event;
         assert!(matches!(state_event(&http(200, ok_body())), Event::RequestSucceeded));
-        assert!(matches!(state_event(&http(429, serde_json::json!({}))), Event::HttpStatus(429)));
+        assert!(matches!(state_event(&http(429, serde_json::json!({}))), Event::HttpStatus { status: 429, retry_after_secs: None }));
         assert!(matches!(state_event(&AttemptResult::Network("x".into())), Event::NetworkError));
     }
 

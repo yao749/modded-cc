@@ -527,7 +527,7 @@ fn finalize_streaming(
                 message,
                 http_status: hs,
             } => (
-                state_machine::Event::HttpStatus(*hs),
+                state_machine::Event::HttpStatus { status: *hs, retry_after_secs: None },
                 RequestStatus::Error,
                 Some(*hs),
                 Some(message.clone()),
