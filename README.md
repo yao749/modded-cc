@@ -2,7 +2,81 @@
   <img src="assets/icon.png" alt="cc-router logo" width="160" height="160" />  
 </p>
 
-<h1 align="center">cc-router</h1>
+<h1 align="center">cc-router · 魔改版</h1>
+
+<div align="center">
+
+**🛠️ AI 辅助魔改版本 — 基于上游 v6.4.0**
+
+**原始项目**: [finch-xu/cc-router](https://github.com/finch-xu/cc-router) · **原始作者**: finch-xu  
+**原始版本**: v6.4.0 (commit `9e609a2`) · **上游文档**: [ccrouter.app](https://ccrouter.app)
+
+</div>
+
+---
+
+> **关于本项目**
+>
+> 这是基于上游 [cc-router](https://github.com/finch-xu/cc-router) v6.4.0 的二次开发版本，所有新增功能均通过 AI 辅助（Trae IDE）设计与实现。原始代码架构、设计稿与绝大部分功能来自 finch-xu 先生的开源工作。本版本**不隶属于原项目**，也不是原项目的官方分支。
+>
+> 原始项目采用 **MIT License**，本版本同样遵循 MIT License 发布。
+>
+> **如果你觉得有用，请优先给上游仓库点 Star 🌟**：<https://github.com/finch-xu/cc-router>
+
+### 📌 原始版本功能（全部保留，未删减）
+
+上游 v6.4.0 的完整功能：
+
+- **虚拟模型四槽路由**：`model-fable` / `model-opus` / `model-sonnet` / `model-haiku` / `model-fallback` / `model-jev` 共 6 个虚拟模型名，按「能力等级」将请求路由到订阅的对应槽位
+- **三协议入口**：Anthropic Messages / OpenAI Responses / OpenAI Chat Completions / System One
+- **三协议出口**：支持 Anthropic / OpenAI / Gemini / OAuth（ChatGPT / Kiro）/ System One
+- **顺序 / 轮询 / 会话亲和**三种调度模式
+- **自动模型发现**（`/v1/models`），Cloudflare / Gemini / OpenAI 三种 envelope 格式
+- **桌面 GUI / 网页界面 / 终端 TUI** 三种管理界面
+- **用量小票 / Token 统计 / 余额查询 / 导入导出备份**
+- **本地 HTTPS、Claude Desktop App 接入**等完整功能
+
+### ✨ 本版本新增功能（AI 魔改）
+
+#### 1. 能力分类模型池（与四槽共存）
+
+打破「等级槽位」的单一维度，新增基于**能力类型**的模型池体系，与旧四槽完全并存互不干扰。
+
+**5 个能力分类虚拟模型**：
+
+| 虚拟模型名 | 能力分类 | 说明 |
+|---|---|---|
+| `model-vision` | 视觉模型 | 图像生成/编辑/理解 |
+| `model-llm` | 大语言模型 | 文本生成/对话 |
+| `model-multimodal` | 多模态模型 | 同时支持文本+图像输入输出 |
+| `model-speech` | 语音模型 | TTS/ASR |
+| `model-embedding` | 向量嵌入 | Embedding 生成 |
+
+路由按虚拟模型名分道：`model-sonnet` 继续走旧四槽路径，`model-vision` 走新模型池路径。
+
+**模型池数据模型**：`subscription_model_pool` 新表，每条记录包含 `(subscription_id, capability, model_name, priority, enabled)`。同一订阅、同一能力分类下可配多个模型，按优先级（priority ASC）排序；首选模型 4xx/5xx 时自动降级到下一个。
+
+**自动能力推断**：`/v1/models` 拉回的模型列表不再硬过滤（旧版只保留对话模型，embedding/语音/视觉被丢弃），现在全部保留，并通过模型名关键词 + 上游原生标签（Cloudflare `task.name` / Gemini `supportedGenerationMethods`）自动推断每个模型所属的能力分类，前端用户可在此基础上调整分类和优先级。
+
+**数据库迁移**：`migrations/025_add_model_pool.sql` — 新增一张表和两个索引，旧 schema 不动。
+
+#### 2. 连接测试优先使用 Fable 槽（pick_test_model 改动）
+
+订阅添加完后的「测试连接」按钮，原来从 `sonnet → haiku → opus` 里挑一个模型测试，**刻意跳过了 Fable 槽**。本版本调整为 **`fable → sonnet → haiku → opus`**，优先用用户自定义槽位的模型来验证连通性。
+
+#### 3. 后端模型发现保留全量能力标签
+
+原始 `model_discovery` 在解析 Cloudflare / Gemini 响应时硬过滤掉了 embedding、Image Generation、非 generateContent 的模型。本版本去掉了这层过滤，改为：
+- 只保留绝对不能直接用的（Clef 决策模型、LoRA 基类）
+- 其余全部返回，附带 `native_capabilities`（上游原生标签）和 `inferred_capability`（自动推断的能力分类）
+
+### 🔒 向后兼容
+
+- 旧四槽路由完全不受影响，所有现有订阅数据不需要迁移
+- 能力分类模型池为新增路径，未配置模型池的订阅在收到 `model-vision` 等请求时会被跳过（503 summary 里能看到原因）
+- 原始 License、项目结构、绝大部分代码完全保留
+
+---
 
 <p align="center">  
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>  

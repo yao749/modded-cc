@@ -4,9 +4,9 @@ members = [".", "crates/cc-router-tui"]
 
 [package]
 name = "cc-router"
-version = "6.4.0"
-description = "多订阅聚合代理 · 让 Claude Code 无缝调用多家厂商订阅"
-authors = ["cc-router"]
+version = "6.5.0"
+description = "多订阅聚合代理 · 让 Claude Code 无缝调用多家厂商订阅 · AI 魔改版"
+authors = ["cc-router AI-mod · 基于 finch-xu/cc-router v6.4.0"]
 license = "MIT"
 # 不发布到 crates.io; 同时让 cargo-deny 的 [licenses.private] 认出这是自家 crate
 publish = false
