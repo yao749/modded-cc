@@ -90,6 +90,8 @@ export const api = {
     invoke<ModelPoolEntry[]>("load_model_pool", { subscriptionId }),
   saveModelPool: (subscriptionId: string, entries: Omit<ModelPoolEntry, "subscription_id">[]) =>
     invoke<void>("save_model_pool", { input: { subscription_id: subscriptionId, entries } as { subscription_id: string; entries: Omit<ModelPoolEntry, "subscription_id">[] } }),
+  testPoolConnection: (subscriptionId: string, capability: string) =>
+    invoke<TestConnectionResult>("test_pool_connection", { id: subscriptionId, capability }),
 
   // ChatGPT OAuth (Phase 1, OpenAI Codex provider)
   startChatGptDeviceFlow: () =>

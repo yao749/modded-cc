@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight } from "lucide-react";
+import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight, Wifi, WifiOff } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -14,7 +14,9 @@ import {
   type InputModality,
   type ModelInfo,
   type ModelPoolEntry,
+  type TestConnectionResult,
 } from "@/types";
+import { api } from "@/api/tauri";
 
 const CAPABILITIES: CapabilityCategory[] = ["vision", "llm", "multimodal", "speech", "embedding"];
 
@@ -42,6 +44,34 @@ export function ModelPoolPicker({
   disabled,
 }: Props) {
   const [active, setActive] = useState<CapabilityCategory>("llm");
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
+
+  // 切换 tab 时清空上次测试结果
+  function switchCap(c: CapabilityCategory) {
+    setActive(c);
+    setTestResult(null);
+  }
+
+  async function runPoolTest() {
+    setTestLoading(true);
+    setTestResult(null);
+    try {
+      const r = await api.testPoolConnection(subscriptionId, active);
+      setTestResult(r);
+    } catch (e) {
+      setTestResult({
+        ok: false,
+        message: String(e),
+        http_status: undefined,
+        model_used: undefined,
+        state_reset: false,
+        note: undefined,
+      });
+    } finally {
+      setTestLoading(false);
+    }
+  }
 
   // 同一能力分类下按 priority 排序
   const entriesByCap = useMemo(() => {
@@ -172,7 +202,7 @@ export function ModelPoolPicker({
               <button
                 key={cap}
                 type="button"
-                onClick={() => setActive(cap)}
+                onClick={() => switchCap(cap)}
                 disabled={disabled}
                 className={isActive ? "cap-tab on" : "cap-tab"}
               >
@@ -185,6 +215,20 @@ export function ModelPoolPicker({
           })}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            className="btn sm"
+            onClick={runPoolTest}
+            disabled={disabled || testLoading}
+            title={`测试 ${CAPABILITY_LABEL[active]} 分类下首选模型的连通性`}
+          >
+            {testLoading ? (
+              <RefreshCw size={12} className="animate-spin" />
+            ) : (
+              testResult?.ok ? <Wifi size={12} /> : <WifiOff size={12} />
+            )}
+            {testLoading ? "测试中..." : `测试 ${CAPABILITY_LABEL[active]}`}
+          </button>
           {autoFillCandidates.length > 0 && (
             <button
               type="button"
@@ -216,6 +260,33 @@ export function ModelPoolPicker({
         {CAPABILITY_LABEL[active]} 能力分类下的模型, 将以 <code>model-{active === "multimodal" ? "multimodal" : active}</code> 名称对外暴露.
         路由时按优先级 (数字最小优先) 取可用模型; 首选失败自动降级到下一个.
       </div>
+
+      {/* 测试结果 */}
+      {testResult && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "10px 14px",
+            borderRadius: 8,
+            border: `1px solid ${testResult.ok ? "#22c55e" : "#ef4444"}`,
+            background: testResult.ok ? "#f0fdf4" : "#fef2f2",
+            color: testResult.ok ? "#166534" : "#991b1b",
+            fontSize: 13,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, marginBottom: 4 }}>
+            {testResult.ok ? <Wifi size={14} /> : <CircleAlert size={14} />}
+            {testResult.ok ? "连通成功" : "连通失败"}
+            {testResult.model_used && (
+              <span style={{ fontWeight: 400, opacity: 0.85 }}>— {testResult.model_used}</span>
+            )}
+            {testResult.http_status != null && (
+              <span style={{ fontWeight: 400, opacity: 0.7 }}>· HTTP {testResult.http_status}</span>
+            )}
+          </div>
+          <div style={{ opacity: 0.9 }}>{testResult.message}</div>
+        </div>
+      )}
 
       {/* 列头 */}
       <div

@@ -131,6 +131,7 @@ pub fn run() {
             commands::subscriptions::delete_subscription,
             commands::subscriptions::set_subscription_enabled,
             commands::subscriptions::test_connection,
+            commands::subscriptions::test_pool_connection,
             commands::subscriptions::refresh_model_list,
             commands::subscriptions::probe_custom_models,
             commands::subscriptions::refresh_subscription_balance,

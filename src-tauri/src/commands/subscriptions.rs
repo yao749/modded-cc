@@ -782,6 +782,61 @@ pub async fn test_connection(
     })
 }
 
+/// 测试能力分类模型池里某个分类的首选模型.
+/// 与 test_connection 类似, 但模型名来自 subscription_model_pool 表而非四槽.
+#[tauri::command]
+pub async fn test_pool_connection(
+    state: State<'_, AppState>,
+    id: String,
+    capability: String,
+) -> AppResult<TestConnectionResult> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
+    let rt = {
+        let subs = state.subscriptions.read().await;
+        subs.get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::SubscriptionNotFound(id.to_string()))?
+    };
+    let row = {
+        let g = rt.read().await;
+        g.row.clone()
+    };
+
+    let (model, supported_inputs) =
+        match crate::subscription::store::pick_pool_model(&state.db, id, &capability).await? {
+            Some(pair) => pair,
+            None => {
+                return Ok(TestConnectionResult {
+                    ok: false,
+                    message: format!("该分类 ({}) 没有启用的模型, 请先在模型池里添加", capability),
+                    http_status: None,
+                    model_used: None,
+                    state_reset: false,
+                    note: None,
+                });
+            }
+        };
+
+    let input_hint = supported_inputs
+        .as_ref()
+        .map(|v| format!(" (支持输入: {})", v.join(",")))
+        .unwrap_or_default();
+    let result = ping::probe_subscription(&state, &row, &model, None).await;
+
+    Ok(TestConnectionResult {
+        ok: result.ok,
+        message: if result.ok {
+            format!("能力分类 [{}] 首选模型 {} 连通成功{}", capability, model, input_hint)
+        } else {
+            result.message
+        },
+        http_status: result.http_status,
+        model_used: Some(model),
+        state_reset: false, // 不影响订阅状态机
+        note: result.note,
+    })
+}
+
 #[tauri::command]
 pub async fn refresh_model_list(
     state: State<'_, AppState>,

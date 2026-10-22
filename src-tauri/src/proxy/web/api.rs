@@ -127,6 +127,7 @@ web_commands! {
     delete_subscription(id: String) => commands::subscriptions::delete_subscription(st, args.id).await,
     set_subscription_enabled(id: String, enabled: bool) => commands::subscriptions::set_subscription_enabled(st, args.id, args.enabled).await,
     test_connection(id: String) => commands::subscriptions::test_connection(st, args.id).await,
+    test_pool_connection(id: String, capability: String) => commands::subscriptions::test_pool_connection(st, args.id, args.capability).await,
     refresh_model_list(id: String) => commands::subscriptions::refresh_model_list(st, args.id).await,
     probe_custom_models(input: ProbeCustomModelsInput) => commands::subscriptions::probe_custom_models(st, args.input).await,
     refresh_subscription_balance(id: String) => commands::subscriptions::refresh_subscription_balance(st, args.id).await,
