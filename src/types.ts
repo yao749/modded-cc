@@ -254,6 +254,49 @@ export interface QuotaUsageDto {
 export interface ModelInfo {
   id: string;
   display_name?: string;
+  /** 上游原生返回的能力标签 (Cloudflare task.name / Gemini supportedGenerationMethods). */
+  native_capabilities?: string[];
+  /** 后端自动推断的能力分类 (None 表示无法判断). */
+  inferred_capability?: CapabilityCategory;
+}
+
+/** 5 种能力分类 — 与后端 VirtualModelName 新变体一一对应. */
+export type CapabilityCategory =
+  | "vision"
+  | "llm"
+  | "multimodal"
+  | "speech"
+  | "embedding";
+
+/** 能力分类 → 显示标签 (中文). */
+export const CAPABILITY_LABEL: Record<CapabilityCategory, string> = {
+  vision: "视觉模型",
+  llm: "大语言模型",
+  multimodal: "多模态模型",
+  speech: "语音模型",
+  embedding: "向量嵌入",
+};
+
+/** 能力分类 → 对应的虚拟模型名 (客户端请求的 model 字段). */
+export const CAPABILITY_VIRTUAL_MODEL: Record<CapabilityCategory, string> = {
+  vision: "model-vision",
+  llm: "model-llm",
+  multimodal: "model-multimodal",
+  speech: "model-speech",
+  embedding: "model-embedding",
+};
+
+/** 订阅的能力分类模型池条目. */
+export interface ModelPoolEntry {
+  id: string;
+  subscription_id: string;
+  /** 对应的能力分类. */
+  capability: CapabilityCategory;
+  /** 上游模型名 (直接透传给该订阅的 endpoint). */
+  model_name: string;
+  /** 同 capability 下的优先级, 0 = 最高. */
+  priority: number;
+  enabled: boolean;
 }
 
 export interface ModelDiscoveryDto {

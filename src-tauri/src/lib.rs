@@ -136,6 +136,8 @@ pub fn run() {
             commands::subscriptions::refresh_subscription_balance,
             commands::subscriptions::update_token_quotas,
             commands::subscriptions::reset_total_quota_usage,
+            commands::subscriptions::load_model_pool,
+            commands::subscriptions::save_model_pool,
             commands::virtual_models::list_virtual_models,
             commands::virtual_models::update_virtual_model,
             commands::requests::list_requests,

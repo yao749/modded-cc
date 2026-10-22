@@ -27,6 +27,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { ModelSlotPicker } from "@/components/ModelSlotPicker";
+import { ModelPoolPicker } from "@/components/ModelPoolPicker";
 import { SubscriptionBalanceCard } from "@/components/SubscriptionBalanceCard";
 import { SubscriptionQuotaCard } from "@/components/SubscriptionQuotaCard";
 import { api } from "@/api/tauri";
@@ -44,6 +45,7 @@ import { useT } from "@/i18n";
 import type {
   AuthHeaderFormat,
   ModelInfo,
+  ModelPoolEntry,
   ModelSlots,
   QuotaPeriod,
   RefreshModelListResult,
@@ -112,6 +114,18 @@ export function SubscriptionEditPage() {
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+
+  // 能力分类模型池
+  const poolQuery = useQuery({
+    queryKey: ["model-pool", id],
+    queryFn: () => api.loadModelPool(id!),
+    enabled: !!id,
+  });
+  const [poolEntries, setPoolEntries] = useState<ModelPoolEntry[]>([]);
+  useEffect(() => {
+    if (poolQuery.data) setPoolEntries(poolQuery.data);
+  }, [poolQuery.data]);
+
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
   const [keyDialog, setKeyDialog] = useState(false);
   const [newKey, setNewKey] = useState("");
@@ -225,6 +239,12 @@ export function SubscriptionEditPage() {
     }
     try {
       await updateMut.mutateAsync({ id, patch });
+      // 模型池保存 (独立 patch, 无变化也覆盖写, 保持数据库一致)
+      await api.saveModelPool(
+        id,
+        poolEntries.map(({ subscription_id: _sub, ...rest }) => rest),
+      );
+      queryClient.invalidateQueries({ queryKey: ["model-pool", id] });
     } catch (e) {
       setSaveError(`${t("subscriptionEdit.errSave")}: ${errorText(e)}`);
     }
@@ -517,6 +537,34 @@ export function SubscriptionEditPage() {
                 )}
               </CardContent>
             </Card>
+
+            {/* 能力分类模型池 (新体系, 与四槽共存, 不在 systemone 订阅显示) */}
+            {!isSystemOne && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>能力分类模型池</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ModelPoolPicker
+                    subscriptionId={id!}
+                    entries={poolEntries}
+                    onChange={setPoolEntries}
+                    models={models}
+                    loading={fetchingModels}
+                    onRefresh={refreshModels}
+                  />
+                  <div
+                    className="mt-3 text-xs text-muted-foreground"
+                    style={{ lineHeight: 1.6 }}
+                  >
+                    <b>提示：</b>模型池与上方四槽配置是两套独立的路由体系, 互不干扰。客户端请求
+                    <code>model-vision</code> / <code>model-llm</code> / <code>model-multimodal</code> /
+                    <code>model-speech</code> / <code>model-embedding</code>
+                    会使用对应的能力分类池。保存时与订阅基本设置一起写入。
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <SubscriptionBalanceCard
               subscription={sub}

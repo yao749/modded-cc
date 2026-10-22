@@ -1328,3 +1328,78 @@ mod protocol_tests {
         assert!(protocol_switch_rejection(Systemone, Messages).is_some());
     }
 }
+
+// ============== 能力分类模型池命令 ==============
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelPoolEntryDto {
+    pub id: String,
+    pub subscription_id: String,
+    pub capability: String,
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+}
+
+impl From<crate::subscription::store::ModelPoolEntry> for ModelPoolEntryDto {
+    fn from(e: crate::subscription::store::ModelPoolEntry) -> Self {
+        Self {
+            id: e.id,
+            subscription_id: e.subscription_id.to_string(),
+            capability: e.capability,
+            model_name: e.model_name,
+            priority: e.priority,
+            enabled: e.enabled,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn load_model_pool(
+    state: State<'_, AppState>,
+    subscription_id: String,
+) -> AppResult<Vec<ModelPoolEntryDto>> {
+    use std::str::FromStr;
+    let id = Uuid::from_str(&subscription_id)
+        .map_err(|e| AppError::BadRequest(format!("invalid uuid: {e}")))?;
+    let entries = crate::subscription::store::load_model_pool(&state.db, id).await?;
+    Ok(entries.into_iter().map(ModelPoolEntryDto::from).collect())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SaveModelPoolInput {
+    pub subscription_id: String,
+    pub entries: Vec<ModelPoolEntryDto>,
+}
+
+#[tauri::command]
+pub async fn save_model_pool(
+    state: State<'_, AppState>,
+    input: SaveModelPoolInput,
+) -> AppResult<()> {
+    use std::str::FromStr;
+    let id = Uuid::from_str(&input.subscription_id)
+        .map_err(|e| AppError::BadRequest(format!("invalid uuid: {e}")))?;
+    // 生成缺失的 id (前端可能新添加了 entry 但没生成 id)
+    let entries: Vec<crate::subscription::store::ModelPoolEntry> = input
+        .entries
+        .into_iter()
+        .map(|e| {
+            let real_id = if e.id.is_empty() {
+                Uuid::new_v4().to_string()
+            } else {
+                e.id
+            };
+            crate::subscription::store::ModelPoolEntry {
+                id: real_id,
+                subscription_id: id,
+                capability: e.capability,
+                model_name: e.model_name,
+                priority: e.priority,
+                enabled: e.enabled,
+            }
+        })
+        .collect();
+    crate::subscription::store::save_model_pool(&state.db, id, &entries).await?;
+    Ok(())
+}

@@ -26,15 +26,16 @@ import type {
   KiroImportResult,
   ListEventsResult,
   ListRequestsResult,
+  ModelPoolEntry,
   OnboardingState,
   OverallStatsDto,
   ProviderInfo,
   ProxyStatus,
   ReceiptDto,
   ReceiptRange,
-  ReleaseNotesDto,
   RefreshBalanceResult,
   RefreshModelListResult,
+  ReleaseNotesDto,
   RequestLogFilters,
   RestartProxyResult,
   Settings,
@@ -83,6 +84,12 @@ export const api = {
     invoke<SubscriptionDto>("update_token_quotas", { id, quotas }),
   resetTotalQuotaUsage: (id: string) =>
     invoke<SubscriptionDto>("reset_total_quota_usage", { id }),
+
+  // 能力分类模型池
+  loadModelPool: (subscriptionId: string) =>
+    invoke<ModelPoolEntry[]>("load_model_pool", { subscriptionId }),
+  saveModelPool: (subscriptionId: string, entries: Omit<ModelPoolEntry, "subscription_id">[]) =>
+    invoke<void>("save_model_pool", { input: { subscription_id: subscriptionId, entries } as { subscription_id: string; entries: Omit<ModelPoolEntry, "subscription_id">[] } }),
 
   // ChatGPT OAuth (Phase 1, OpenAI Codex provider)
   startChatGptDeviceFlow: () =>
