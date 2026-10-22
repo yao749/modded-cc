@@ -15,6 +15,11 @@ export const VM_COLOR: Record<VirtualModelName, string> = {
   "model-haiku": "var(--vm-haiku)",
   "model-fallback": "var(--vm-fallback)",
   "model-jev": "var(--vm-jev)",
+  "model-vision": "var(--vm-vision)",
+  "model-llm": "var(--vm-llm)",
+  "model-multimodal": "var(--vm-multimodal)",
+  "model-speech": "var(--vm-speech)",
+  "model-embedding": "var(--vm-embedding)",
 };
 
 type Metric = "requests" | "tokens";

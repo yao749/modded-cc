@@ -104,7 +104,13 @@ export type VirtualModelName =
   | "model-sonnet"
   | "model-haiku"
   | "model-fallback"
-  | "model-jev";
+  | "model-jev"
+  // 5 个能力分类模型池 (model-vision / model-llm / model-multimodal / model-speech / model-embedding)
+  | "model-vision"
+  | "model-llm"
+  | "model-multimodal"
+  | "model-speech"
+  | "model-embedding";
 
 /** 端点协议: messages = 对话类 (三个对话入口); systemone = Jev 决策协议, 只服务 POST /v1/systemone */
 export type EndpointProtocol = "messages" | "systemone";

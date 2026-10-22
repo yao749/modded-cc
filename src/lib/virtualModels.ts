@@ -7,12 +7,19 @@ import type {
 } from "@/types";
 
 export const VM_ORDER: VirtualModelName[] = [
+  // 旧四槽体系 (保留完整)
   "model-fable",
   "model-opus",
   "model-sonnet",
   "model-haiku",
   "model-fallback",
   "model-jev",
+  // 新能力分类模型池
+  "model-vision",
+  "model-llm",
+  "model-multimodal",
+  "model-speech",
+  "model-embedding",
 ];
 
 export interface VmMeta {
@@ -55,9 +62,35 @@ export const VM_META: Record<VirtualModelName, VmMeta> = {
     purposeEnKey: "vm.jev.purposeEn",
     labelKey: "vm.jev.label",
   },
+  // 新能力分类模型池 —— 不依赖 i18n, purposeKey/labelKey 先用通用值
+  "model-vision": {
+    purposeKey: "vm.capability.vision.purpose",
+    purposeEnKey: "vm.capability.vision.purposeEn",
+    labelKey: "vm.capability.vision.label",
+  },
+  "model-llm": {
+    purposeKey: "vm.capability.llm.purpose",
+    purposeEnKey: "vm.capability.llm.purposeEn",
+    labelKey: "vm.capability.llm.label",
+  },
+  "model-multimodal": {
+    purposeKey: "vm.capability.multimodal.purpose",
+    purposeEnKey: "vm.capability.multimodal.purposeEn",
+    labelKey: "vm.capability.multimodal.label",
+  },
+  "model-speech": {
+    purposeKey: "vm.capability.speech.purpose",
+    purposeEnKey: "vm.capability.speech.purposeEn",
+    labelKey: "vm.capability.speech.label",
+  },
+  "model-embedding": {
+    purposeKey: "vm.capability.embedding.purpose",
+    purposeEnKey: "vm.capability.embedding.purposeEn",
+    labelKey: "vm.capability.embedding.label",
+  },
 };
 
-/** fallback / jev 不绑四槽 (fallback 走原样透传, jev 走自己的 jev 槽) */
+/** fallback / jev 不绑四槽, 能力分类模型也不绑四槽 (走自己的模型池) */
 const SLOT_BY_VM: Record<VirtualModelName, SubscriptionSlot | null> = {
   "model-fable": "fable",
   "model-opus": "opus",
@@ -65,6 +98,12 @@ const SLOT_BY_VM: Record<VirtualModelName, SubscriptionSlot | null> = {
   "model-haiku": "haiku",
   "model-fallback": null,
   "model-jev": null,
+  // 能力分类模型池不绑旧四槽
+  "model-vision": null,
+  "model-llm": null,
+  "model-multimodal": null,
+  "model-speech": null,
+  "model-embedding": null,
 };
 
 export function vmNameToSlot(name: VirtualModelName): SubscriptionSlot | null {

@@ -200,6 +200,12 @@
   --vm-haiku:    oklch(0.66 0.14 85);
   --vm-fallback: var(--ink-4);
   --vm-jev:      oklch(0.60 0.09 170);
+  /* 能力分类模型池 */
+  --vm-vision:      oklch(0.55 0.14 200);
+  --vm-llm:         oklch(0.50 0.12 30);
+  --vm-multimodal:  oklch(0.52 0.15 340);
+  --vm-speech:      oklch(0.58 0.11 140);
+  --vm-embedding:   oklch(0.52 0.08 260);
 
   --shadow-sm: 0 1px 0 rgba(20,18,12,0.04), 0 1px 2px rgba(20,18,12,0.04);
   --shadow-md: 0 1px 0 rgba(20,18,12,0.04), 0 6px 18px -8px rgba(20,18,12,0.10);
@@ -343,6 +349,12 @@
   --vm-sonnet:   oklch(0.64 0.13 245);
   --vm-haiku:    oklch(0.66 0.13 85);
   --vm-jev:      oklch(0.70 0.09 170);
+  /* 能力分类模型池 */
+  --vm-vision:      oklch(0.62 0.13 200);
+  --vm-llm:         oklch(0.60 0.11 30);
+  --vm-multimodal:  oklch(0.62 0.14 340);
+  --vm-speech:      oklch(0.66 0.10 140);
+  --vm-embedding:   oklch(0.62 0.07 260);
 
   /* Shadows — 暗色下加重 */
   --shadow-sm: 0 1px 0 rgba(0,0,0,0.30), 0 1px 2px rgba(0,0,0,0.30);
