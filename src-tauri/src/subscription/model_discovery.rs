@@ -137,14 +137,16 @@ pub fn candidate_model_urls(base_url: &str, path: &str) -> Vec<String> {
     urls
 }
 
-/// 换一个候选地址有没有意义. 404/405 = 路径不对; InvalidResponse = 200 但不是模型列表
-/// (中转站对未知路径常返回前端页面 HTML)。鉴权失败 / 网络错误换地址也没用, 立即上抛,
-/// 否则用户看到的是最后一个候选的 404 而不是真实原因。
-fn worth_trying_next(e: &DiscoveryError) -> bool {
-    matches!(
-        e,
-        DiscoveryError::Http(404) | DiscoveryError::Http(405) | DiscoveryError::InvalidResponse(_)
-    )
+/// 换一个候选地址有没有意义.
+/// 第一层 (用户配置的 path) 只认 404/405/InvalidResponse —— 鉴权失败直接抛出, 让用户看到真实原因.
+/// 第二层 (多 path 候选) 额外把 401/403 也当作"可恢复": DashScope 不同端点用不同鉴权方式,
+/// 自定义网关的 header 拿到原始模型列表端点上可能就是 401, 应该继续试下一个.
+fn worth_trying_next(e: &DiscoveryError, layer: u8) -> bool {
+    match e {
+        DiscoveryError::Http(404) | DiscoveryError::Http(405) | DiscoveryError::InvalidResponse(_) => true,
+        DiscoveryError::Http(401) | DiscoveryError::Http(403) => layer > 1, // 只在第二层尝试下一个
+        _ => false,
+    }
 }
 
 /// 第二层候选 path —— 借鉴 DSH: 用户配的 path 跑不通时, 试一些常见的替代路径.
@@ -217,7 +219,7 @@ pub async fn probe(
         for url in candidate_model_urls(&target.base_url, &target.path) {
             match fetch_url(client, &url, target).await {
                 Ok(models) => return Ok(Discovered { models, url }),
-                Err(e) if worth_trying_next(&e) => {
+                Err(e) if worth_trying_next(&e, 1) => {
                     warn!(%url, error = %e, "models 候选地址失败, 尝试下一个");
                     first_err.get_or_insert(e);
                     got_recoverable = true;
@@ -251,10 +253,10 @@ pub async fn probe(
                 info!(%url, "第二层探测命中模型列表");
                 return Ok(Discovered { models, url });
             }
-            Err(e) if worth_trying_next(&e) => {
+            Err(e) if worth_trying_next(&e, 2) => {
                 debug!(%url, error = %e, "第二层候选失败, 继续下一个");
             }
-            Err(e) => return Err(e), // 致命错 (401/403/网络断开)
+            Err(e) => return Err(e), // 第二层都试完了还是致命错 → 放弃
         }
     }
 
@@ -286,7 +288,7 @@ pub async fn fetch(
         let configured_url = join_base_path(&row.base_url, &row.model_discovery.path);
         match fetch_url(client, &configured_url, &target).await {
             Ok(models) => Ok(Discovered { models, url: configured_url }),
-            Err(e) if worth_trying_next(&e) => {
+            Err(e) if worth_trying_next(&e, 1) => {
                 warn!(
                     configured = %configured_url,
                     error = %e,
@@ -692,10 +694,11 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, DiscoveryError::InvalidResponse(_)), "{err}");
-        assert!(worth_trying_next(&err));
-        assert!(worth_trying_next(&DiscoveryError::Http(404)));
-        assert!(!worth_trying_next(&DiscoveryError::Http(401)));
-        assert!(!worth_trying_next(&DiscoveryError::Http(500)));
+        assert!(worth_trying_next(&err, 1));
+        assert!(worth_trying_next(&DiscoveryError::Http(404), 1));
+        assert!(!worth_trying_next(&DiscoveryError::Http(401), 1)); // 层 1 不认 401
+        assert!(worth_trying_next(&DiscoveryError::Http(401), 2));  // 层 2 认 401 (DashScope 多端点鉴权不同)
+        assert!(!worth_trying_next(&DiscoveryError::Http(500), 2));
     }
 
     #[tokio::test]
