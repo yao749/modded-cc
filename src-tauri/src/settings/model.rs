@@ -105,6 +105,12 @@ pub struct Settings {
     /// 中间件每请求读取, 开关不需要重启. 与 web_ui_enabled 互相独立.
     #[serde(default)]
     pub tui_enabled: bool,
+    /// 路由模式: "slots" (旧四槽, 默认, 向后兼容) 或 "pool" (能力分类模型池).
+    /// 两套数据共存不删除, 切模式只是翻转门禁: slots 模式下 model-llm 等池名会被 400,
+    /// pool 模式下 model-opus / model-sonnet 等旧名会被 400.
+    /// pipeline.rs 每请求读取, 开关不需要重启.
+    #[serde(default = "default_routing_mode")]
+    pub routing_mode: String,
     /// 导出用量小票时是否播放「小票机吐纸」动画. 默认开. 纯前端偏好, 后端不读.
     #[serde(default = "default_receipt_print_animation")]
     pub receipt_print_animation: bool,
@@ -150,6 +156,9 @@ fn default_max_request_body_mb() -> u32 {
 fn default_web_ui_auth_enabled() -> bool {
     true
 }
+fn default_routing_mode() -> String {
+    "slots".into()
+}
 fn default_receipt_print_animation() -> bool {
     true
 }
@@ -177,6 +186,7 @@ impl Default for Settings {
             web_ui_enabled: false,
             web_ui_auth_enabled: default_web_ui_auth_enabled(),
             tui_enabled: false,
+            routing_mode: default_routing_mode(),
             receipt_print_animation: default_receipt_print_animation(),
             last_seen_release_notes: None,
         }
@@ -204,6 +214,7 @@ pub struct SettingsPatch {
     pub web_ui_enabled: Option<bool>,
     pub web_ui_auth_enabled: Option<bool>,
     pub tui_enabled: Option<bool>,
+    pub routing_mode: Option<String>,
     pub receipt_print_animation: Option<bool>,
 }
 
@@ -265,6 +276,14 @@ impl Settings {
         }
         if let Some(p) = patch.tui_enabled {
             self.tui_enabled = p;
+        }
+        if let Some(p) = patch.routing_mode {
+            // 只接受 "slots" / "pool", 脏值静默回落到默认 (apply_patch 里不报错, 让 patch 整体成功).
+            if p == "slots" || p == "pool" {
+                self.routing_mode = p;
+            } else {
+                self.routing_mode = default_routing_mode();
+            }
         }
         if let Some(p) = patch.receipt_print_animation {
             self.receipt_print_animation = p;

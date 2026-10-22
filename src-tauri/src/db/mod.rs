@@ -105,6 +105,14 @@ const MIGRATIONS: &[(u32, &str)] = &[
         24,
         include_str!("../../migrations/024_add_url_params_and_systemone_wire.sql"),
     ),
+    (
+        25,
+        include_str!("../../migrations/025_add_model_pool.sql"),
+    ),
+    (
+        26,
+        include_str!("../../migrations/026_add_model_pool_inputs.sql"),
+    ),
 ];
 
 pub async fn init_pool(db_path: &Path) -> AppResult<SqlitePool> {
@@ -396,7 +404,7 @@ mod tests {
         run_migrations(&pool).await.expect("migrate fresh");
 
         let versions = applied_versions(&pool).await;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
         assert!(!has_column(&pool, "subscriptions", "supports_thinking_blocks").await);
         assert!(!has_column(&pool, "subscriptions", "thinking_block_field_name").await);
         assert!(has_column(&pool, "requests", "upstream_response_body").await);
@@ -438,6 +446,48 @@ mod tests {
         assert!(has_column(&pool, "request_stats_daily", "tool_use_request_count").await);
         assert!(has_column(&pool, "request_stats_daily", "tool_result_count").await);
         assert!(has_table(&pool, "tool_stats_daily").await);
+        // v25/26: 能力分类模型池 + per-model 输入模态
+        assert!(has_table(&pool, "subscription_model_pool").await);
+        assert!(has_column(&pool, "subscription_model_pool", "supported_inputs").await);
+    }
+
+    /// 回归测试: migrations/ 目录下的每个 .sql 文件都必须登记在 MIGRATIONS 数组里,
+    /// 且版本号连续无空洞。曾因 025/026 只落了文件忘了注册, 导致线上
+    /// `no such table: subscription_model_pool` — 此后由本测试守住。
+    #[test]
+    fn every_migration_file_is_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut on_disk: Vec<u32> = std::fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| Some(e.file_name().to_str()?.to_string()))
+            .filter_map(|name| {
+                name.strip_suffix(".sql")
+                    .and_then(|stem| stem.split('_').next())
+                    .and_then(|v| v.parse::<u32>().ok())
+            })
+            .collect();
+        on_disk.sort_unstable();
+        on_disk.dedup();
+
+        let registered: Vec<u32> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+
+        let missing: Vec<u32> = on_disk
+            .iter()
+            .copied()
+            .filter(|v| !registered.contains(v))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "migrations/ 里有文件没登记进 MIGRATIONS (db/mod.rs): {missing:?} — 启动时不会执行, 会出现 no such table"
+        );
+
+        // 版本号必须从 1 连续递增
+        let expected: Vec<u32> = (1..=on_disk.len() as u32).collect();
+        assert_eq!(
+            on_disk, expected,
+            "migrations/ 版本号不连续或有重号 — 补请按 next_version 顺序追加"
+        );
     }
 
     #[tokio::test]
@@ -452,7 +502,7 @@ mod tests {
         run_migrations(&pool).await.expect("migrate legacy");
 
         let versions = applied_versions(&pool).await;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]); // baseline v=1, 然后跑增量
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]); // baseline v=1, 然后跑增量
         assert!(!has_column(&pool, "subscriptions", "supports_thinking_blocks").await);
         assert!(!has_column(&pool, "subscriptions", "thinking_block_field_name").await);
         assert!(has_column(&pool, "requests", "upstream_response_body").await);

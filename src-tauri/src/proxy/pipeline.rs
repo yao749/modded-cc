@@ -190,6 +190,70 @@ pub(crate) fn jev_only_via_systemone(vm_name: VirtualModelName) -> Option<Respon
     })
 }
 
+/// 路由模式门禁: 读取 settings.routing_mode, 检查当前虚拟名范式是否匹配.
+/// Jev (Both) 两套都放行; paradigm 不匹配 → 400 + 清晰指引.
+/// 默认 routing_mode="slots", 脏值 (非 "slots"/"pool") 也按 slots 处理.
+pub(crate) fn routing_mode_gate(
+    vm_name: VirtualModelName,
+    routing_mode: &str,
+) -> Option<Response> {
+    use crate::virtual_model::{RoutingParadigm, VirtualModelName};
+
+    let paradigm = vm_name.paradigm();
+    if matches!(paradigm, RoutingParadigm::Both) {
+        return None; // Jev 两套都放行
+    }
+    let effective_mode = match routing_mode {
+        "pool" => "pool",
+        _ => "slots", // 默认 + 脏值兜底
+    };
+
+    match (effective_mode, paradigm) {
+        ("slots", RoutingParadigm::Pool) => {
+            // slots 模式下用户发了 model-llm / model-vision 等池名
+            let hint = if vm_name.is_capability_based() {
+                match vm_name {
+                    VirtualModelName::Vision => "model-vision",
+                    VirtualModelName::Llm => "model-llm",
+                    VirtualModelName::Multimodal => "model-multimodal",
+                    VirtualModelName::Speech => "model-speech",
+                    VirtualModelName::Embedding => "model-embedding",
+                    _ => unreachable!(),
+                }
+            } else {
+                vm_name.as_str()
+            };
+            Some(crate::proxy::handler::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &format!(
+                    "当前为四槽模式 (settings.routing_mode=slots), 「{hint}」属于能力分类池范式. \
+请改用 model-opus / model-sonnet / model-haiku / model-fable / model-fallback, \
+或在设置里切换路由模式为 pool."
+                ),
+            ))
+        }
+        ("pool", RoutingParadigm::Slots) => {
+            // pool 模式下用户发了 model-opus / model-sonnet 等旧名
+            let hint = vm_name.as_str();
+            let alternatives = if vm_name.is_fallback() {
+                "model-fallback 不支持 pool 模式, 请明确选择 model-llm / model-vision / model-multimodal / model-speech / model-embedding"
+            } else {
+                "请改用 model-llm / model-vision / model-multimodal / model-speech / model-embedding, 或在设置里切换回四槽模式"
+            };
+            Some(crate::proxy::handler::error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &format!(
+                    "当前为能力分类池模式 (settings.routing_mode=pool), 「{hint}」属于四槽范式. \
+{alternatives}."
+                ),
+            ))
+        }
+        _ => None, // 范式匹配 → 放行
+    }
+}
+
 pub async fn dispatch(
     state: &AppState,
     model: &str,
@@ -204,6 +268,15 @@ pub async fn dispatch(
     let is_capability_based = vm_name.is_capability_based();
 
     if let Some(resp) = jev_only_via_systemone(vm_name) {
+        return Ok(resp);
+    }
+
+    // 1b. 路由模式门禁 (默认 slots, 脏值回落到 slots)
+    let routing_mode = {
+        let guard = state.settings.read().await;
+        guard.routing_mode.clone()
+    };
+    if let Some(resp) = routing_mode_gate(vm_name, &routing_mode) {
         return Ok(resp);
     }
 
@@ -1951,5 +2024,79 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(jev_only_via_systemone(VirtualModelName::Sonnet).is_none());
         assert!(jev_only_via_systemone(VirtualModelName::Fallback).is_none());
+    }
+
+    // ---- routing_mode_gate 测试 ----
+
+    #[test]
+    fn slots_mode_allows_slot_names() {
+        let mode = "slots";
+        assert!(routing_mode_gate(VirtualModelName::Opus, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Sonnet, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Haiku, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Fable, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Fallback, mode).is_none());
+    }
+
+    #[test]
+    fn slots_mode_rejects_pool_names() {
+        let mode = "slots";
+        let blocked = [
+            VirtualModelName::Vision,
+            VirtualModelName::Llm,
+            VirtualModelName::Multimodal,
+            VirtualModelName::Speech,
+            VirtualModelName::Embedding,
+        ];
+        for name in blocked {
+            let resp = routing_mode_gate(name, mode).expect(&format!("{name:?} 应被 slots 模式拦截"));
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn pool_mode_allows_pool_names() {
+        let mode = "pool";
+        assert!(routing_mode_gate(VirtualModelName::Vision, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Llm, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Multimodal, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Speech, mode).is_none());
+        assert!(routing_mode_gate(VirtualModelName::Embedding, mode).is_none());
+    }
+
+    #[test]
+    fn pool_mode_rejects_slot_names() {
+        let mode = "pool";
+        let blocked = [
+            VirtualModelName::Opus,
+            VirtualModelName::Sonnet,
+            VirtualModelName::Haiku,
+            VirtualModelName::Fable,
+            VirtualModelName::Fallback,
+        ];
+        for name in blocked {
+            let resp = routing_mode_gate(name, mode).expect(&format!("{name:?} 应被 pool 模式拦截"));
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn jev_always_passes_gate() {
+        // slots 模式
+        assert!(routing_mode_gate(VirtualModelName::Jev, "slots").is_none());
+        // pool 模式
+        assert!(routing_mode_gate(VirtualModelName::Jev, "pool").is_none());
+        // 脏值
+        assert!(routing_mode_gate(VirtualModelName::Jev, "junk").is_none());
+    }
+
+    #[test]
+    fn garbage_routing_mode_falls_back_to_slots() {
+        // 脏值按 slots 处理: slots 名放行, pool 名拦截
+        let mode = "not_a_valid_value";
+        assert!(routing_mode_gate(VirtualModelName::Opus, mode).is_none());
+        let resp = routing_mode_gate(VirtualModelName::Llm, mode)
+            .expect("脏值模式下 pool 名应被拦截");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

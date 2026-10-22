@@ -188,6 +188,24 @@ impl VirtualModelName {
         )
     }
 
+    /// 返回该虚拟名所属的路由范式 (slots / pool / both)。
+    /// 用于 pipeline.rs 门禁: 用户设置的 routing_mode 决定哪套范式被放行。
+    pub fn paradigm(self) -> RoutingParadigm {
+        match self {
+            VirtualModelName::Fable
+            | VirtualModelName::Opus
+            | VirtualModelName::Sonnet
+            | VirtualModelName::Haiku
+            | VirtualModelName::Fallback => RoutingParadigm::Slots,
+            VirtualModelName::Vision
+            | VirtualModelName::Llm
+            | VirtualModelName::Multimodal
+            | VirtualModelName::Speech
+            | VirtualModelName::Embedding => RoutingParadigm::Pool,
+            VirtualModelName::Jev => RoutingParadigm::Both,
+        }
+    }
+
     /// 能力分类变体 → 对应的 CapabilityCategory; 非能力分类变体返回 None。
     pub fn capability(self) -> Option<CapabilityCategory> {
         match self {
@@ -241,6 +259,14 @@ impl VirtualModelName {
             Self::Embedding,
         ]
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingParadigm {
+    Slots,
+    Pool,
+    /// 两套都放行 — 典型是 Jev, 它走独立 System One 协议, 不属于任何一套范式。
+    Both,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
