@@ -203,8 +203,8 @@ fn subscription_detail_fields_match() {
     rt.model_cache = Some(ModelCache {
         fetched_at: chrono::Utc::now(),
         models: vec![
-            ModelInfo { id: "glm-4.6".into(), display_name: Some("GLM-4.6".into()) },
-            ModelInfo { id: "glm-4.7".into(), display_name: None },
+            ModelInfo { id: "glm-4.6".into(), display_name: Some("GLM-4.6".into()), native_capabilities: Vec::new(), inferred_capability: None },
+            ModelInfo { id: "glm-4.7".into(), display_name: None, native_capabilities: Vec::new(), inferred_capability: None },
         ],
     });
     rt.balance_cache = Some(BalanceSnapshot {
@@ -298,14 +298,14 @@ fn test_connection_result_matches() {
 #[test]
 fn refresh_model_list_result_matches() {
     let auto = RefreshModelListResult::Auto {
-        models: vec![ModelInfo { id: "glm-4.6".into(), display_name: None }],
+        models: vec![ModelInfo { id: "glm-4.6".into(), display_name: None, native_capabilities: Vec::new(), inferred_capability: None }],
         fetched_at: 1_700_000_000_000,
     };
     let view: dto::RefreshModelsResult = through_json(&auto);
     assert_eq!(
         view,
         dto::RefreshModelsResult::Auto {
-            models: vec![dto::ModelInfo { id: "glm-4.6".into(), display_name: None }],
+            models: vec![dto::ModelInfo { id: "glm-4.6".into(), display_name: None, native_capabilities: Vec::new(), inferred_capability: None }],
             fetched_at: 1_700_000_000_000,
         }
     );
@@ -1049,14 +1049,14 @@ fn probe_custom_models_input_and_result_match() {
     assert_eq!(real.protocol, CustomProtocol::OpenaiChatCompletions);
 
     let auto = ProbeCustomModelsResult::Auto {
-        models: vec![ModelInfo { id: "glm-4.6".into(), display_name: None }],
+        models: vec![ModelInfo { id: "glm-4.6".into(), display_name: None, native_capabilities: Vec::new(), inferred_capability: None }],
         models_url: "https://relay.example.com/v1/models".into(),
     };
     let view: dto::ProbeModelsResult = through_json(&auto);
     assert_eq!(
         view,
         dto::ProbeModelsResult::Auto {
-            models: vec![dto::ModelInfo { id: "glm-4.6".into(), display_name: None }],
+            models: vec![dto::ModelInfo { id: "glm-4.6".into(), display_name: None, native_capabilities: Vec::new(), inferred_capability: None }],
             models_url: "https://relay.example.com/v1/models".into(),
         }
     );

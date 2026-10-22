@@ -5,6 +5,9 @@
 //! Envelope 解析按 `auth_type` 分发:
 //! - `ApiKey` / `ChatgptOauth` / `KiroOauth` → OpenAI 风格 `{data:[{id,model,display_name}]}`
 //! - `GeminiApiKey` / `GeminiInteractionsApiKey` → Gemini 风格 `{models:[{name:"models/gemini-...", displayName, supportedGenerationMethods}]}`
+//!
+//! 解析不再硬过滤 (旧版本只留对话模型): Cloudflare 的 task.name、Gemini 的
+//! supportedGenerationMethods 全部保留到 ModelInfo.native_capabilities, 供前端展示给用户选分类。
 
 use std::collections::BTreeMap;
 
@@ -247,24 +250,41 @@ fn parse_by_kind(kind: Option<ModelsEnvelopeKind>, auth_type: AuthType, text: &s
     }
 }
 
-/// Workers AI `/ai/models/search`: `{"result": [{name, task: {name}}]}`. Keeps text-generation
-/// models usable on the chat endpoint: drops Clef (decision model, System One only) and LoRA
-/// bases (need an adapter).
+/// Workers AI `/ai/models/search`: `{"result": [{name, task: {name}}]}`.
+/// 不再硬过滤 — 全部保留, task.name 写入 native_capabilities 供前端分类.
+/// 仅过滤 Clef (System One 决策模型) 和 LoRA 基类 (需要 adapter, 不能直接用).
 fn parse_cloudflare_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryError> {
     let parsed: Value = serde_json::from_str(text)?;
     let arr = parsed
         .get("result")
         .and_then(|m| m.as_array())
         .ok_or_else(|| DiscoveryError::InvalidResponse("Cloudflare 响应缺少 result 数组".into()))?;
-    let out: Vec<ModelInfo> = arr
-        .iter()
-        .filter(|m| m.pointer("/task/name").and_then(Value::as_str) == Some("Text Generation"))
-        .filter_map(|m| m.get("name").and_then(Value::as_str))
-        .filter(|name| !name.starts_with("@cf/cloudflare/clef") && !name.ends_with("-lora"))
-        .map(|name| ModelInfo { id: name.to_string(), display_name: None })
-        .collect();
+    let mut out = Vec::with_capacity(arr.len());
+    for m in arr {
+        let Some(name) = m.get("name").and_then(Value::as_str) else { continue };
+        // 绝对不能直接用的: Clef 决策模型、LoRA 基类
+        if name.starts_with("@cf/cloudflare/clef") || name.ends_with("-lora") {
+            continue;
+        }
+        // 保留 task.name 到 native_capabilities
+        let native_task = m
+            .pointer("/task/name")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let inferred = infer_capability(name, &native_task);
+        out.push(ModelInfo {
+            id: name.to_string(),
+            display_name: None,
+            native_capabilities: native_task,
+            inferred_capability: inferred,
+        });
+    }
     if out.is_empty() {
-        return Err(DiscoveryError::InvalidResponse("Cloudflare 响应中没有可用的对话模型".into()));
+        return Err(DiscoveryError::InvalidResponse(
+            "Cloudflare 响应中没有可用模型".into(),
+        ));
     }
     Ok(out)
 }
@@ -278,9 +298,12 @@ fn parse_openai_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryError> {
     for item in parsed.data {
         let id = item.id.or(item.model);
         let Some(id) = id else { continue };
+        let inferred = infer_capability(&id, &[]);
         models.push(ModelInfo {
             id,
             display_name: item.display_name,
+            native_capabilities: Vec::new(),
+            inferred_capability: inferred,
         });
     }
     if models.is_empty() {
@@ -298,7 +321,7 @@ fn parse_openai_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryError> {
 ///   ...
 /// }]}
 /// ```
-/// 过滤规则: 只保留 `supportedGenerationMethods` 含 `generateContent` 的模型 (排除 embedding/imagen 等).
+/// 不再硬过滤 — 全部保留, supportedGenerationMethods 写入 native_capabilities 供前端分类.
 fn parse_gemini_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryError> {
     let parsed: Value = serde_json::from_str(text)?;
     let arr = parsed
@@ -313,27 +336,114 @@ fn parse_gemini_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryError> {
         }
         // Gemini name 形如 "models/gemini-2.5-flash" — 去前缀
         let id = name.strip_prefix("models/").unwrap_or(name).to_string();
-        // 过滤: 必须支持 generateContent
-        let supports_generate = item
+        // 保留 supportedGenerationMethods
+        let native_methods: Vec<String> = item
             .get("supportedGenerationMethods")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|v| v.as_str() == Some("generateContent")))
-            .unwrap_or(false);
-        if !supports_generate {
-            continue;
-        }
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let display_name = item
             .get("displayName")
             .and_then(|v| v.as_str())
             .map(String::from);
-        out.push(ModelInfo { id, display_name });
+        let inferred = infer_capability(&id, &native_methods);
+        out.push(ModelInfo {
+            id,
+            display_name,
+            native_capabilities: native_methods,
+            inferred_capability: inferred,
+        });
     }
     if out.is_empty() {
         return Err(DiscoveryError::InvalidResponse(
-            "Gemini envelope 中无支持 generateContent 的模型".into(),
+            "Gemini envelope 中无可用模型".into(),
         ));
     }
     Ok(out)
+}
+
+/// 根据模型名关键词 + 上游原生能力标签自动推断属于哪个能力分类.
+/// 规则按优先级排列, 第一个命中即返回. 全部不命中返回 None (由用户手动选).
+///
+/// 设计原则: 宁可多也不能错 — embedding/whisper 这类强特征必须优先命中,
+/// 普通 LLM 名字太多可能猜错, 直接返回 None 让用户确认.
+pub(crate) fn infer_capability(
+    model_id: &str,
+    native_capabilities: &[String],
+) -> Option<super::super::virtual_model::model::CapabilityCategory> {
+    use super::super::virtual_model::model::CapabilityCategory as C;
+    let id_lower = model_id.to_ascii_lowercase();
+
+    // 1. 原生标签优先: Cloudflare task.name / Gemini supportedGenerationMethods
+    for cap in native_capabilities {
+        match cap.as_str() {
+            "Text Embeddings" | "embedContent" | "embeddings.generateEmbeddings" => {
+                return Some(C::Embedding);
+            }
+            "Image Generation" => return Some(C::Vision),
+            "Text-to-Speech" | "Speech-to-Text" | "audio" if id_lower.contains("speech")
+                || id_lower.contains("whisper")
+                || id_lower.contains("tts") =>
+            {
+                return Some(C::Speech);
+            }
+            _ => {}
+        }
+    }
+
+    // 2. 模型名关键词 (从最明确到最模糊)
+    if id_lower.contains("embed") || id_lower.contains("bge") || id_lower.contains("e5-") {
+        return Some(C::Embedding);
+    }
+    if id_lower.contains("whisper")
+        || id_lower.contains("tts")
+        || id_lower.contains("speech")
+        || id_lower.contains("text-to-speech")
+    {
+        return Some(C::Speech);
+    }
+    if id_lower.contains("dall")
+        || id_lower.contains("imagen")
+        || id_lower.contains("image-gen")
+        || id_lower.contains("stable-diffusion")
+    {
+        return Some(C::Vision);
+    }
+    // 多模态: 名字里同时带 vision + 文字相关, 或带 multimodal
+    if id_lower.contains("multimodal")
+        || id_lower.contains("vision")
+        || id_lower.contains("vl")
+        || id_lower.contains("gemini") // Gemini 家族普遍多模态
+        || id_lower.contains("gpt-4o")
+        || id_lower.contains("claude-3.5") // Sonnet 4+ / Opus 4 视觉
+        || id_lower.contains("claude-4")
+        || id_lower.contains("qwen-vl")
+    {
+        return Some(C::Multimodal);
+    }
+
+    // 3. 默认 LLM 命中: 名字明显是对话模型 (claude/chatgpt/gpt/deepseek/mistral/llama/qwen-text)
+    if id_lower.contains("claude")
+        || id_lower.contains("deepseek")
+        || id_lower.contains("mistral")
+        || id_lower.contains("llama")
+        || id_lower.contains("chat")
+        || id_lower.contains("gpt-") // 但 gpt-4o 已在多模态分支命中
+        || id_lower.contains("sonnet")
+        || id_lower.contains("opus")
+        || id_lower.contains("haiku")
+        || id_lower.contains("fable")
+        || id_lower.contains("nova")
+        || id_lower.contains("gpt-oss")
+    {
+        return Some(C::Llm);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -351,9 +461,15 @@ mod tests {
     ],"success":true,"errors":[],"messages":[]}"#;
 
     #[test]
-    fn cloudflare_envelope_keeps_chat_models_only() {
+    fn cloudflare_envelope_keeps_all_models_except_clef_and_lora() {
+        // 不过滤 task.name 了: Text Generation + Text Embeddings 都保留.
+        // 只过滤 Clef (System One 专用, 包括 clef 和 clef-flash 都以 clef 开头) 和 LoRA 基类.
         let ids: Vec<String> = parse_cloudflare_envelope(CLOUDFLARE_MODELS).unwrap().into_iter().map(|m| m.id).collect();
-        assert_eq!(ids, vec!["@cf/openai/gpt-oss-120b".to_string(), "@cf/zai-org/glm-5.3".to_string()]);
+        assert_eq!(ids, vec![
+            "@cf/openai/gpt-oss-120b".to_string(),
+            "@cf/baai/bge-m3".to_string(),
+            "@cf/zai-org/glm-5.3".to_string(),
+        ]);
     }
 
     #[test]
@@ -364,12 +480,14 @@ mod tests {
 
     #[test]
     fn envelope_kind_overrides_auth_type() {
-        assert!(matches!(parse_by_kind(Some(ModelsEnvelopeKind::Cloudflare), AuthType::OpenaiChatCompletionsApiKey, CLOUDFLARE_MODELS), Ok(v) if v.len() == 2));
+        assert!(matches!(parse_by_kind(Some(ModelsEnvelopeKind::Cloudflare), AuthType::OpenaiChatCompletionsApiKey, CLOUDFLARE_MODELS), Ok(v) if v.len() == 3));
         assert!(parse_by_kind(None, AuthType::OpenaiChatCompletionsApiKey, CLOUDFLARE_MODELS).is_err(), "default stays OpenAI envelope");
     }
 
     #[test]
-    fn gemini_envelope_filters_non_generate_models() {
+    fn gemini_envelope_keeps_all_models() {
+        // 不再硬过滤 generateContent — embedding / imagen 都保留,
+        // supportedGenerationMethods 写入 native_capabilities 供前端分类.
         let text = r#"{
           "models": [
             {"name":"models/gemini-2.5-flash","displayName":"Gemini 2.5 Flash",
@@ -381,10 +499,12 @@ mod tests {
           ]
         }"#;
         let out = parse_gemini_envelope(text).unwrap();
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].id, "gemini-2.5-flash");
         assert_eq!(out[0].display_name, Some("Gemini 2.5 Flash".into()));
-        assert_eq!(out[1].id, "gemini-2.5-pro");
+        assert_eq!(out[0].native_capabilities, vec!["generateContent", "countTokens"]);
+        assert_eq!(out[1].id, "embedding-001");
+        assert_eq!(out[2].id, "gemini-2.5-pro");
     }
 
     #[test]
@@ -611,11 +731,15 @@ mod tests {
     }
 
     #[test]
-    fn gemini_envelope_empty_after_filter_errors() {
+    fn gemini_envelope_embedding_only_is_ok() {
+        // 不过滤 generateContent 后, 只有 embedding 模型也能正常返回.
         let text = r#"{"models":[
           {"name":"models/embedding-001","supportedGenerationMethods":["embedContent"]}
         ]}"#;
-        assert!(parse_gemini_envelope(text).is_err());
+        let out = parse_gemini_envelope(text).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "embedding-001");
+        assert_eq!(out[0].inferred_capability, Some(crate::virtual_model::model::CapabilityCategory::Embedding));
     }
 }
 

@@ -19,6 +19,61 @@ pub enum VirtualModelName {
     /// 与另外五个互相隔离 (见 [`VirtualModelName::accepts`])。
     #[serde(rename = "model-jev")]
     Jev,
+
+    // ---- 以下 5 个为能力分类虚拟模型, 走模型池路由 (与四槽共存互不干扰) ----
+
+    /// 视觉模型池 (图像生成/编辑/理解)
+    #[serde(rename = "model-vision")]
+    Vision,
+    /// 大语言模型池 (文本生成/对话)
+    #[serde(rename = "model-llm")]
+    Llm,
+    /// 多模态模型池 (文本+图像混合输入输出)
+    #[serde(rename = "model-multimodal")]
+    Multimodal,
+    /// 语音模型池 (TTS/ASR)
+    #[serde(rename = "model-speech")]
+    Speech,
+    /// 向量嵌入模型池
+    #[serde(rename = "model-embedding")]
+    Embedding,
+}
+
+/// 能力分类: 模型池中各条记录所属的能力标签.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityCategory {
+    Vision,
+    Llm,
+    Multimodal,
+    Speech,
+    Embedding,
+}
+
+impl CapabilityCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vision => "vision",
+            Self::Llm => "llm",
+            Self::Multimodal => "multimodal",
+            Self::Speech => "speech",
+            Self::Embedding => "embedding",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vision => "视觉模型",
+            Self::Llm => "大语言模型",
+            Self::Multimodal => "多模态模型",
+            Self::Speech => "语音模型",
+            Self::Embedding => "向量嵌入",
+        }
+    }
+
+    pub fn all() -> [CapabilityCategory; 5] {
+        [Self::Vision, Self::Llm, Self::Multimodal, Self::Speech, Self::Embedding]
+    }
 }
 
 impl VirtualModelName {
@@ -30,6 +85,11 @@ impl VirtualModelName {
             VirtualModelName::Haiku => "model-haiku",
             VirtualModelName::Fallback => "model-fallback",
             VirtualModelName::Jev => "model-jev",
+            VirtualModelName::Vision => "model-vision",
+            VirtualModelName::Llm => "model-llm",
+            VirtualModelName::Multimodal => "model-multimodal",
+            VirtualModelName::Speech => "model-speech",
+            VirtualModelName::Embedding => "model-embedding",
         }
     }
 
@@ -39,7 +99,7 @@ impl VirtualModelName {
         let s = s.strip_prefix("anthropic/").unwrap_or(s);
         let s = s.strip_prefix("openai/").unwrap_or(s);
 
-        // 虚拟模型名: 精确映射.
+        // 虚拟模型名: 精确映射 (含 5 个能力分类新名).
         match s {
             "model-fable" => return Some(Self::Fable),
             "model-opus" => return Some(Self::Opus),
@@ -47,6 +107,11 @@ impl VirtualModelName {
             "model-haiku" => return Some(Self::Haiku),
             "model-fallback" => return Some(Self::Fallback),
             "model-jev" => return Some(Self::Jev),
+            "model-vision" => return Some(Self::Vision),
+            "model-llm" => return Some(Self::Llm),
+            "model-multimodal" => return Some(Self::Multimodal),
+            "model-speech" => return Some(Self::Speech),
+            "model-embedding" => return Some(Self::Embedding),
             _ => {}
         }
 
@@ -84,8 +149,8 @@ impl VirtualModelName {
         }
     }
 
-    /// fallback / jev 不对应任何四槽 slot。为保持签名这里返回 sonnet, 正确的调用路径
-    /// 应该先判断 `is_fallback()` / `is_jev()`。
+    /// fallback / jev / 能力分类 都不对应任何四槽 slot。为保持签名这里返回 sonnet,
+    /// 正确的调用路径应该先判断 `is_fallback()` / `is_jev()` / `is_capability_based()`。
     pub fn slot(self) -> SubscriptionSlot {
         match self {
             VirtualModelName::Fable => SubscriptionSlot::Fable,
@@ -94,6 +159,12 @@ impl VirtualModelName {
                 SubscriptionSlot::Sonnet
             }
             VirtualModelName::Haiku => SubscriptionSlot::Haiku,
+            // 能力分类变体不使用四槽路由, slot() 仅为兼容签名保留
+            VirtualModelName::Vision
+            | VirtualModelName::Llm
+            | VirtualModelName::Multimodal
+            | VirtualModelName::Speech
+            | VirtualModelName::Embedding => SubscriptionSlot::Sonnet,
         }
     }
 
@@ -105,8 +176,31 @@ impl VirtualModelName {
         matches!(self, VirtualModelName::Jev)
     }
 
-    /// 绑定隔离: model-jev 只收 systemone 订阅, 其余五个只收对话类 (messages) 订阅。
-    /// 写入 (绑定命令)、导入、运行时三处都用它判断。
+    /// 是否走能力分类模型池路由 (与四槽路由分道)。
+    pub fn is_capability_based(self) -> bool {
+        matches!(
+            self,
+            VirtualModelName::Vision
+                | VirtualModelName::Llm
+                | VirtualModelName::Multimodal
+                | VirtualModelName::Speech
+                | VirtualModelName::Embedding
+        )
+    }
+
+    /// 能力分类变体 → 对应的 CapabilityCategory; 非能力分类变体返回 None。
+    pub fn capability(self) -> Option<CapabilityCategory> {
+        match self {
+            VirtualModelName::Vision => Some(CapabilityCategory::Vision),
+            VirtualModelName::Llm => Some(CapabilityCategory::Llm),
+            VirtualModelName::Multimodal => Some(CapabilityCategory::Multimodal),
+            VirtualModelName::Speech => Some(CapabilityCategory::Speech),
+            VirtualModelName::Embedding => Some(CapabilityCategory::Embedding),
+            _ => None,
+        }
+    }
+
+    /// 绑定隔离: model-jev 只收 systemone 订阅, 其余 (含 5 个能力分类新名) 只收对话类 (messages) 订阅。
     pub fn accepts(self, protocol: crate::provider::model::EndpointProtocol) -> bool {
         use crate::provider::model::EndpointProtocol;
         match protocol {
@@ -131,7 +225,8 @@ impl VirtualModelName {
         })
     }
 
-    pub fn all() -> [VirtualModelName; 6] {
+    /// 全部 11 个变体: 旧 6 个 + 5 个能力分类新名.
+    pub fn all() -> [VirtualModelName; 11] {
         [
             Self::Fable,
             Self::Opus,
@@ -139,6 +234,11 @@ impl VirtualModelName {
             Self::Haiku,
             Self::Fallback,
             Self::Jev,
+            Self::Vision,
+            Self::Llm,
+            Self::Multimodal,
+            Self::Speech,
+            Self::Embedding,
         ]
     }
 }
@@ -292,7 +392,7 @@ mod tests {
         assert_eq!(VirtualModelName::parse("model-jev"), Some(VirtualModelName::Jev));
         assert_eq!(VirtualModelName::Jev.as_str(), "model-jev");
         assert_eq!(serde_json::to_string(&VirtualModelName::Jev).unwrap(), "\"model-jev\"");
-        assert_eq!(VirtualModelName::all().len(), 6);
+        assert_eq!(VirtualModelName::all().len(), 11);
         assert!(VirtualModelName::Jev.is_jev() && !VirtualModelName::Jev.is_fallback());
         // jev-latest 这类客户端模型名不能被识别成 jev (路由由路径决定, 不由 body 决定)
         assert_eq!(VirtualModelName::parse("jev-latest"), None);

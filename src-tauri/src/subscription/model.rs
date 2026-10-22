@@ -229,6 +229,14 @@ pub struct ModelInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// 上游原生返回的能力标签 (如 Cloudflare 的 task.name, Gemini 的 supportedGenerationMethods).
+    /// 不硬过滤 — 前端据此让用户分配能力分类.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_capabilities: Vec<String>,
+    /// 自动推断的 [`CapabilityCategory`] (基于模型名关键词 + native_capabilities).
+    /// None 表示无法自动判断, 由用户手动选.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inferred_capability: Option<super::super::virtual_model::model::CapabilityCategory>,
 }
 
 /// 订阅的持久化字段。对应 `subscriptions` 表。

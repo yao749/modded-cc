@@ -308,6 +308,12 @@ pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// 上游原生能力标签 (Cloudflare task.name / Gemini supportedGenerationMethods).
+    #[serde(default)]
+    pub native_capabilities: Vec<String>,
+    /// 自动推断的能力分类.
+    #[serde(default)]
+    pub inferred_capability: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

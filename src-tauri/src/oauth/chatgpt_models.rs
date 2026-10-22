@@ -90,9 +90,14 @@ pub async fn fetch(
         .models
         .into_iter()
         .filter(|m| m.visibility.as_deref() == Some("list"))
-        .map(|m| ModelInfo {
-            id: m.slug,
-            display_name: m.display_name,
+        .map(|m| {
+            let inferred = crate::subscription::model_discovery::infer_capability(&m.slug, &[]);
+            ModelInfo {
+                id: m.slug,
+                display_name: m.display_name,
+                native_capabilities: Vec::new(),
+                inferred_capability: inferred,
+            }
         })
         .collect();
     if models.is_empty() {

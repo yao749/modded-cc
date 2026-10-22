@@ -155,6 +155,7 @@ pub async fn dispatch(
     // 1. 解析虚拟模型; 非三个虚拟名走 fallback（透传原始 model）
     let vm_name = VirtualModelName::parse(model).unwrap_or(VirtualModelName::Fallback);
     let is_fallback = vm_name.is_fallback();
+    let is_capability_based = vm_name.is_capability_based();
 
     if let Some(resp) = jev_only_via_systemone(vm_name) {
         return Ok(resp);
@@ -234,6 +235,8 @@ pub async fn dispatch(
     let mut skipped_no_fallback_slot: Vec<String> = Vec::new();
     // systemone 订阅误入对话路径 (历史数据兜底) 时跳过, 同样记入 503 summary。
     let mut skipped_wrong_protocol: Vec<String> = Vec::new();
+    // 能力分类池下订阅未配置该能力模型时跳过
+    let mut skipped_no_pool_model: Vec<String> = Vec::new();
 
     for sub_id in order.candidate_ids {
         let attempt_id = Uuid::new_v4();
@@ -284,6 +287,33 @@ pub async fn dispatch(
                 fallback_override
                     .clone()
                     .unwrap_or_else(|| model.to_string())
+            } else if is_capability_based {
+                // 能力分类池: 异步查 DB 取首选模型 (priority 最小 + enabled).
+                let capability = vm_name.capability().map(|c| c.as_str()).unwrap_or("llm");
+                match crate::subscription::store::pick_pool_model(
+                    &state.db,
+                    guard.row.id,
+                    capability,
+                )
+                .await
+                {
+                    Ok(Some(m)) => m,
+                    Ok(None) => {
+                        warn!(
+                            %sub_id,
+                            display_name = %guard.row.display_name,
+                            capability,
+                            "subscription has no enabled model for capability pool, skipping"
+                        );
+                        skipped_no_pool_model.push(guard.row.display_name.clone());
+                        continue; // 这个候选跳过, 走下一个订阅
+                    }
+                    Err(e) => {
+                        warn!(%sub_id, error = %e, "failed to query model pool");
+                        skipped_no_pool_model.push(guard.row.display_name.clone());
+                        continue;
+                    }
+                }
             } else {
                 let slot = vm_name.slot();
                 guard.row.model_slots.get(slot).to_string()
@@ -1681,6 +1711,12 @@ pub async fn dispatch(
                 summary.push(format!(
                     "- {}: 未配置兜底模型, fallback 下已跳过",
                     g.row.display_name
+                ));
+            } else if skipped_no_pool_model.contains(&g.row.display_name) {
+                summary.push(format!(
+                    "- {}: 未配置 {} 能力的模型, 已跳过",
+                    g.row.display_name,
+                    vm_name.capability().map(|c| c.label()).unwrap_or("未知")
                 ));
             } else {
                 summary.push(format!("- {}: {:?}", g.row.display_name, g.state));

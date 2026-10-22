@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -613,6 +614,122 @@ pub async fn save_quota_usage_snapshot(
     save_quota_usage_rows(&mut tx, &rows, Utc::now().timestamp_millis()).await?;
     tx.commit().await?;
     Ok(())
+}
+
+// ============== 能力分类模型池 CRUD ==============
+
+/// 模型池中的一条记录: 某订阅下, 某模型, 归属于某能力分类, 在该分类池内的优先级.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPoolEntry {
+    pub id: String,
+    pub subscription_id: Uuid,
+    pub capability: String,
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+}
+
+/// 读某个订阅的全部模型池内容, 按 capability + priority 排序.
+pub async fn load_model_pool(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+) -> AppResult<Vec<ModelPoolEntry>> {
+    let rows = sqlx::query(
+        "SELECT id, subscription_id, capability, model_name, priority, enabled
+         FROM subscription_model_pool
+         WHERE subscription_id = ?
+         ORDER BY capability ASC, priority ASC",
+    )
+    .bind(sub_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let sub_id_str: String = row.try_get("subscription_id")?;
+        let sub = Uuid::parse_str(&sub_id_str)
+            .map_err(|e| AppError::internal(format!("invalid uuid: {e}")))?;
+        out.push(ModelPoolEntry {
+            id: row.try_get("id")?,
+            subscription_id: sub,
+            capability: row.try_get("capability")?,
+            model_name: row.try_get("model_name")?,
+            priority: row.try_get("priority")?,
+            enabled: row.try_get::<i64, _>("enabled")? != 0,
+        });
+    }
+    Ok(out)
+}
+
+/// 覆盖写某个订阅的模型池 —— 先删全部, 再批量插入. 一个事务完成.
+pub async fn save_model_pool(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+    entries: &[ModelPoolEntry],
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM subscription_model_pool WHERE subscription_id = ?")
+        .bind(sub_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let now = Utc::now().timestamp_millis();
+    for e in entries {
+        sqlx::query(
+            "INSERT INTO subscription_model_pool
+             (id, subscription_id, capability, model_name, priority, enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&e.id)
+        .bind(sub_id.to_string())
+        .bind(&e.capability)
+        .bind(&e.model_name)
+        .bind(e.priority)
+        .bind(e.enabled as i64)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 路由时用: 给定订阅 + 能力分类, 取 enabled=1 且优先级最高 (priority 最小) 的模型名.
+pub async fn pick_pool_model(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+    capability: &str,
+) -> AppResult<Option<String>> {
+    let model: Option<String> = sqlx::query_scalar(
+        "SELECT model_name FROM subscription_model_pool
+         WHERE subscription_id = ? AND capability = ? AND enabled = 1
+         ORDER BY priority ASC LIMIT 1",
+    )
+    .bind(sub_id.to_string())
+    .bind(capability)
+    .fetch_optional(pool)
+    .await?;
+    Ok(model)
+}
+
+/// 同上, 但一次返回该订阅某能力分类池内全部启用的模型 (按 priority).
+/// 用于失败回退: 首选 4xx/5xx 时第二优先级顶上.
+pub async fn list_pool_models(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+    capability: &str,
+) -> AppResult<Vec<String>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT model_name, priority FROM subscription_model_pool
+         WHERE subscription_id = ? AND capability = ? AND enabled = 1
+         ORDER BY priority ASC",
+    )
+    .bind(sub_id.to_string())
+    .bind(capability)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(name, _)| name).collect())
 }
 
 #[cfg(test)]

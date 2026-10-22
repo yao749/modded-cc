@@ -141,7 +141,7 @@ mod tests {
             subscription_ids: vec![r[0].id],
         });
         let file = build_export(&r, &v, None, "6.1.0", Utc::now()).unwrap();
-        assert_eq!(file.virtual_models.len(), 6);
+        assert_eq!(file.virtual_models.len(), 11);
         assert!(file.virtual_models.iter().any(|v| v.name.is_jev()));
     }
 
@@ -153,7 +153,7 @@ mod tests {
         assert!(file.subscriptions.iter().all(|s| s.secret_refs.is_none()));
         let text = serde_json::to_string(&file).unwrap();
         assert!(!text.contains("sk-a") && !text.contains("\"hk\""), "{text}");
-        assert_eq!(file.virtual_models.len(), 5, "无绑定的 model-jev 不输出, 其余五个全部输出");
+        assert_eq!(file.virtual_models.len(), 10, "无绑定的 model-jev 不输出, 其余十个全部输出");
         assert!(file.virtual_models.iter().all(|v| !v.name.is_jev()));
         let opus = file.virtual_models.iter().find(|v| v.name == VirtualModelName::Opus).unwrap();
         assert_eq!(opus.mode, RoutingMode::Sticky);
