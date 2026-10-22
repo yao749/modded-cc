@@ -521,11 +521,9 @@ export function SubscriptionEditPage() {
                   models={models}
                   loading={fetchingModels}
                   error={modelError}
-                  onRefresh={isSystemOne ? undefined : refreshModels}
+                  onRefresh={refreshModels}
                   exampleModels={
-                    isSystemOne
-                      ? provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? []
-                      : sub.model_discovery.example_models
+                    provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
                   }
                   systemone={isSystemOne}
                   jevRequired={isSystemOne && sub.is_user_defined}

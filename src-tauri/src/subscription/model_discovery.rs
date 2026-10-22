@@ -42,22 +42,6 @@ impl From<serde_json::Error> for DiscoveryError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ModelsEnvelope {
-    #[serde(default)]
-    data: Vec<ModelsItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelsItem {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    display_name: Option<String>,
-}
-
 /// 一次发现成功的结果. `url` 是实际打通的完整地址 —— 自定义订阅靠候选探测得到,
 /// 调用方把它写回 snapshot 的 `model_discovery.url`, 之后刷新就不必再猜。
 #[derive(Debug, Clone)]
@@ -211,7 +195,7 @@ pub async fn fetch(
 ) -> Result<Discovered, DiscoveryError> {
     let target = ProbeTarget::from_row(row);
 
-    // models 接口与 messages 不同域时, 订阅 snapshot 里的 model_discovery.url 是完整 URL。
+    // models 接口与 messages 不同域时, 订阅 snapshot 里的 model_discovery.url 是完整 URL.
     if let Some(full) = row.model_discovery.url.as_deref() {
         let models = fetch_url(client, full, &target).await?;
         return Ok(Discovered {
@@ -220,20 +204,27 @@ pub async fn fetch(
         });
     }
 
-    // 自定义订阅无视 enabled: 老的自定义 Anthropic 订阅 snapshot 写死了 enabled=false,
-    // 不值得为此写 migration, 直接走候选探测。
+    // 借鉴 DSH: 任何订阅都先尝试 probe (多 URL 候选探测), 不再依赖 yaml 里的 enabled 配置.
+    // DSH 不会预先假设某个 API 端点有没有 /models, 总是先去探测.
     if row.is_user_defined {
-        return probe(client, &target).await;
+        // 自定义订阅直接 probe (候选 URL 含 base + path 和 origin + path)
+        probe(client, &target).await
+    } else {
+        // 内置订阅: 先按配置的 path 打, 如果 404/InvalidResponse 自动回退 probe.
+        let configured_url = join_base_path(&row.base_url, &row.model_discovery.path);
+        match fetch_url(client, &configured_url, &target).await {
+            Ok(models) => Ok(Discovered { models, url: configured_url }),
+            Err(e) if worth_trying_next(&e) => {
+                warn!(
+                    configured = %configured_url,
+                    error = %e,
+                    "配置的 models 地址失败, 回退 probe 多候选"
+                );
+                probe(client, &target).await
+            }
+            Err(e) => Err(e),
+        }
     }
-
-    if !row.model_discovery.enabled {
-        return Err(DiscoveryError::InvalidResponse(
-            "该订阅未启用 /models 自动发现, 请使用手动输入".into(),
-        ));
-    }
-    let url = join_base_path(&row.base_url, &row.model_discovery.path);
-    let models = fetch_url(client, &url, &target).await?;
-    Ok(Discovered { models, url })
 }
 
 /// Envelope chosen by yaml `model_discovery.envelope`, else by auth type (historical rule).
@@ -290,19 +281,52 @@ fn parse_cloudflare_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryErro
 }
 
 fn parse_openai_envelope(text: &str) -> Result<Vec<ModelInfo>, DiscoveryError> {
-    let parsed: ModelsEnvelope = serde_json::from_str(text)?;
-    if parsed.data.is_empty() {
+    // 宽松解析 —— 兼容各种 OpenAI-compatible 网关的不同返回形状.
+    // 借鉴 DSH: 不依赖严格结构体, 用 serde_json::Value 探测数组位置.
+    let parsed: Value = serde_json::from_str(text)?;
+    let arr: &[Value] = if let Some(a) = parsed.pointer("/data").and_then(Value::as_array) {
+        a
+    } else if let Some(a) = parsed.pointer("/items").and_then(Value::as_array) {
+        a
+    } else if parsed.is_array() {
+        // 极少数网关直接返回顶层数组 [{id: "..."}]
+        parsed.as_array().unwrap()
+    } else {
+        return Err(DiscoveryError::InvalidResponse(
+            "未找到模型列表数组 (data/items 或顶层数组)".into(),
+        ));
+    };
+
+    if arr.is_empty() {
         return Err(DiscoveryError::InvalidResponse("data 为空".into()));
     }
-    let mut models = Vec::with_capacity(parsed.data.len());
-    for item in parsed.data {
-        let id = item.id.or(item.model);
+
+    let mut models = Vec::with_capacity(arr.len());
+    for item in arr {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("model").and_then(Value::as_str));
         let Some(id) = id else { continue };
-        let inferred = infer_capability(&id, &[]);
+        let display_name = item
+            .get("display_name")
+            .and_then(Value::as_str)
+            .map(String::from);
+        // 顺便看看上游有没有传能力标签 (部分网关会带 abilities/capabilities 字段)
+        let native_capabilities: Vec<String> = item
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let inferred = infer_capability(id, &native_capabilities);
         models.push(ModelInfo {
-            id,
-            display_name: item.display_name,
-            native_capabilities: Vec::new(),
+            id: id.to_string(),
+            display_name,
+            native_capabilities,
             inferred_capability: inferred,
         });
     }
