@@ -152,20 +152,63 @@ fn worth_trying_next(e: &DiscoveryError, layer: u8) -> bool {
 /// 第二层候选 path —— 借鉴 DSH: 用户配的 path 跑不通时, 试一些常见的替代路径.
 /// 比如 DashScope 的 `/api/v1/models` 就不是 OpenAI 兼容的 `/v1/models`.
 /// 按常见度排序, 越靠前越可能命中.
+///
+/// 注意: 顺序里 `/models` 在 `/v1/models` **前面** —— 因为 DSH 的做法是 baseUrl
+/// 自带版本号 (如 `.../compatible-mode/v1`), 模型列表只用 `/models`. 直接带 `/v1`
+/// 会产生双重前缀 `.../v1/v1/models`. 详见 [`path_variants_for_base`].
 fn common_model_paths(auth_type: AuthType) -> Vec<&'static str> {
     match auth_type {
         AuthType::GeminiApiKey | AuthType::GeminiInteractionsApiKey => {
             vec!["/v1beta/models"]
         }
         _ => vec![
-            "/v1/models",            // OpenAI 标准 (最常见)
-            "/models",               // 简化版 (某些网关)
-            "/api/v1/models",        // DashScope 原始端点
-            "/compatible-mode/v1/models", // DashScope 兼容模式
-            "/api/v1/deployments/models", // DashScope 部署列表
-            "/v1beta/models",        // 部分 Anthropic 兼容端点
+            "/models",                       // DSH 风格: baseUrl 自带 /v1, 只用 /models
+            "/v1/models",                    // OpenAI 标准 (最常见)
+            "/api/v1/models",                // DashScope 原始端点
+            "/compatible-mode/v1/models",    // DashScope 兼容模式 (完整路径, 直接拼 origin 域名)
+            "/api/v1/deployments/models",    // DashScope 部署列表
+            "/v1beta/models",                // 部分 Anthropic 兼容端点
         ],
     }
+}
+
+/// 根据 base_url 是否以版本号结尾, 生成"智能" path 变体.
+/// 例如 base = `https://dashscope.aliyuncs.com/compatible-mode/v1`:
+///   - 标准 path `/v1/models` → 直接用会变 `.../v1/v1/models` (错)
+///   - 变体: `/v1/models` (保持原样, 让 join_base_path 处理) + `/models` (去掉 v1, 变成 `.../v1/models`)
+///
+/// 但更简单的做法: 直接让 common_model_paths 返回完整 path 列表, 在这里根据
+/// base 是否带 `/v1` 结尾, 额外 push 一个不带 v1 的变体.
+fn path_variants_for_base<'a>(
+    paths: &'a [&'static str],
+    base_url: &str,
+) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = paths.to_vec();
+    let trimmed = base_url.trim_end_matches('/');
+    let ends_with_v1 = trimmed.ends_with("/v1");
+    let ends_with_v1beta = trimmed.ends_with("/v1beta");
+    if ends_with_v1 {
+        // base 以 /v1 结尾, 把含 `/v1/models` 的 path 替换成 `/models` 的版本
+        // 但我们已经在 common_model_paths 里把 `/models` 放在前面了, 所以只要保证
+        // `candidate_model_urls` 里也会生成 origin (不带 /v1 的域名) 版本就行.
+        // 这里额外加一个: 如果 path 是 `/v1/models` 且 base 结尾是 `/v1`, 再额外推一个 `/models`
+        for &p in paths {
+            if p == "/v1/models" {
+                out.push("/models");
+            }
+        }
+    }
+    if ends_with_v1beta {
+        for &p in paths {
+            if p == "/v1beta/models" {
+                out.push("/models");
+            }
+        }
+    }
+    // 去重
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// 把一个 base_url 和一组 path 组合成去重的候选 URL 列表.
@@ -236,7 +279,9 @@ pub async fn probe(
     // ===== 第二层: DSH 风格多 path 候选 =====
     // 用户配的 path 已经在第一层试过了, 这里跳过它避免重复请求.
     let common_paths = common_model_paths(target.auth_type);
-    let unique_paths: Vec<&str> = common_paths
+    // 根据 base_url 是否自带版本号生成智能变体 (避免 /v1/v1/models 双重前缀)
+    let smart_paths = path_variants_for_base(&common_paths, &target.base_url);
+    let unique_paths: Vec<&str> = smart_paths
         .into_iter()
         .filter(|p| *p != target.path.as_str())
         .collect();

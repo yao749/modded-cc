@@ -265,6 +265,10 @@ pub struct ConnectionPatch {
     /// 额外出站 header。整块替换 (与 model_slots / slot_efforts 一致):
     /// Some(map) = 覆盖为 map (空 map = 清空), None = 不改。
     pub required_headers: Option<BTreeMap<String, String>>,
+    /// 用户显式指定的模型列表完整 URL (如 `https://dashscope.aliyuncs.com/compatible-mode/v1/models`).
+    /// None = 不改; Some(url) = 写入 model_discovery.url; Some("") = 清空让后端自动 probe.
+    #[serde(default)]
+    pub models_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -611,6 +615,14 @@ pub async fn update_subscription(
             }
             if let Some(v) = conn.required_headers {
                 guard.row.required_headers = v;
+            }
+            // 模型列表完整 URL: 非空 = 写入; 空串 = 清空让后端自动 probe
+            if let Some(v) = conn.models_url.as_deref() {
+                if v.trim().is_empty() {
+                    guard.row.model_discovery.url = None;
+                } else {
+                    guard.row.model_discovery.url = Some(v.trim().to_string());
+                }
             }
         }
 

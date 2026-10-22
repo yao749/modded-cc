@@ -110,6 +110,8 @@ export function SubscriptionEditPage() {
   const [providerDisplayName, setProviderDisplayName] = useState<string>("");
   const [requiredHeaders, setRequiredHeaders] = useState<KeyValueRow[]>([]);
   const [forwardClientHeaders, setForwardClientHeaders] = useState(false);
+  /** 用户显式指定的模型列表完整 URL (如 DashScope 兼容端点) */
+  const [modelsUrl, setModelsUrl] = useState<string>("");
 
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
@@ -160,6 +162,7 @@ export function SubscriptionEditPage() {
           value,
         })),
       );
+      setModelsUrl(subQuery.data.model_discovery.url ?? "");
       if (subQuery.data.model_cache) {
         setModels(subQuery.data.model_cache.models);
       }
@@ -218,6 +221,7 @@ export function SubscriptionEditPage() {
         auth_header_format: authHeaderFormat,
         provider_display_name: providerDisplayName.trim(),
         required_headers: Object.fromEntries(headerRows.map((r) => [r.key, r.value])),
+        models_url: modelsUrl.trim(),
       };
     } else {
       // 内置订阅: 切 endpoint 走 endpoint_id patch (后端 re-snapshot)
@@ -470,6 +474,31 @@ export function SubscriptionEditPage() {
                           {t("subscriptionEdit.requiredHeadersHint")}
                         </p>
                       </div>
+                    </div>
+                    <div className="grid grid-cols-[120px_1fr] gap-3 items-center">
+                      <Label>模型列表 URL</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          className="font-mono flex-1"
+                          value={modelsUrl}
+                          onChange={(e) => setModelsUrl(e.target.value)}
+                          placeholder="留空让后端自动探测, 如 https://dashscope.aliyuncs.com/compatible-mode/v1/models"
+                        />
+                        {modelsUrl && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setModelsUrl("")}
+                            title="清空让后端自动 probe"
+                          >
+                            清空
+                          </Button>
+                        )}
+                      </div>
+                      <p className="col-start-2 text-xs text-muted-foreground -mt-2">
+                        仅当自动探测找不到模型时才需要填 (如 DashScope 自定义网关没有 /models 端点)。
+                        保存后下次刷新模型列表会优先用这个地址。
+                      </p>
                     </div>
                   </>
                 )}

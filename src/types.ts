@@ -531,6 +531,9 @@ export interface ConnectionPatch {
   provider_display_name?: string;
   /** 额外出站 header, 整块替换; 缺省 = 不改 */
   required_headers?: Record<string, string>;
+  /** 模型列表完整 URL, 如 `https://dashscope.aliyuncs.com/compatible-mode/v1/models`.
+   *  设为空串则清空, 让后端自动 probe. 仅自定义订阅可改. */
+  models_url?: string;
 }
 
 export interface SubscriptionPatch {
