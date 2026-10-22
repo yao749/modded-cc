@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use crate::virtual_model::model::{RoutingMode, VirtualModelName};
+use crate::virtual_model::model::{RoutingMode, RoutingParadigm, VirtualModelName};
 use crate::virtual_model::store;
 
 #[derive(Debug, Serialize)]
@@ -22,9 +22,25 @@ pub struct UpdateVirtualModelInput {
 
 #[tauri::command]
 pub async fn list_virtual_models(state: State<'_, AppState>) -> AppResult<Vec<VirtualModelDto>> {
+    // GUI 只列出当前路由模式放行的虚拟名: 范式不匹配的整条隐藏, Jev (Both) 两套都列。
+    // 内存表与 DB 仍然全量加载 (store::load_all 不动), 这里只是读侧过滤, 切模式即恢复。
+    let routing_mode = {
+        let guard = state.settings.read().await;
+        guard.routing_mode.clone()
+    };
+    let is_pool = routing_mode == "pool";
+
     let guard = state.virtual_models.read().await;
     let mut out = Vec::with_capacity(VirtualModelName::all().len());
     for name in VirtualModelName::all() {
+        let allowed = match name.paradigm() {
+            RoutingParadigm::Pool => is_pool,
+            RoutingParadigm::Slots => !is_pool,
+            RoutingParadigm::Both => true,
+        };
+        if !allowed {
+            continue;
+        }
         if let Some(cfg) = guard.get(&name) {
             out.push(VirtualModelDto {
                 name: cfg.name.as_str().to_string(),

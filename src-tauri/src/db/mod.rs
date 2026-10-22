@@ -518,7 +518,7 @@ mod tests {
         run_migrations(&pool).await.expect("third run");
 
         let versions = applied_versions(&pool).await;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]); // 没有重复写
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]); // 没有重复写
     }
 
     /// 在 v4 schema 状态下插一条订阅 (含已 v7 移除的 supports_thinking_blocks 列)。
@@ -584,7 +584,7 @@ mod tests {
         assert!(!has_table(&pool, "subscriptions_new").await);
         assert_eq!(
             applied_versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
         );
 
         let count: (i64,) =
