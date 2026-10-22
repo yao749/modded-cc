@@ -74,10 +74,24 @@ impl ProbeTarget {
     fn from_row(row: &SubscriptionRow) -> Self {
         // 老的自定义 Anthropic 订阅 snapshot 里 path 是空串 (当年 derive(Default) 的产物,
         // 因为 enabled=false 从不发请求所以没暴露)。空 path 会把 base_url 本身当 models 地址去请求。
-        let path = match row.model_discovery.path.trim() {
+        let mut path = match row.model_discovery.path.trim() {
             "" => default_models_path(row.auth_type).to_string(),
             p => p.to_string(),
         };
+
+        // 优化: 如果用户没有显式改过 path (即走的 default), 且 base_url 结尾自带 /v1 或 /v1beta,
+        // 就把默认的 `/v1/models` 改成 `/models`, 避免 join_base_path 时产生双重前缀
+        // (DSH 风格: baseUrl 自带版本号, 模型列表只用 `/models`).
+        let user_edited_path = !row.model_discovery.path.trim().is_empty();
+        if !user_edited_path {
+            let trimmed = row.base_url.trim_end_matches('/');
+            let ends_v1 = trimmed.ends_with("/v1");
+            let ends_v1beta = trimmed.ends_with("/v1beta");
+            if (ends_v1 || ends_v1beta) && path == "/v1/models" {
+                path = "/models".to_string();
+            }
+        }
+
         let target = Self {
             base_url: row.base_url.clone(),
             path,
