@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight, Wifi, WifiOff } from "lucide-react";
+import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight, Check, X, Minus, CircleHelp } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -14,7 +14,7 @@ import {
   type InputModality,
   type ModelInfo,
   type ModelPoolEntry,
-  type TestConnectionResult,
+  type PoolTestItem,
 } from "@/types";
 import { api } from "@/api/tauri";
 
@@ -45,28 +45,35 @@ export function ModelPoolPicker({
 }: Props) {
   const [active, setActive] = useState<CapabilityCategory>("llm");
   const [testLoading, setTestLoading] = useState(false);
-  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
+  /** 按 model_name 索引的测试结果, 用于每行前面显示 ✓/✗/- 状态 */
+  const [testResults, setTestResults] = useState<Record<string, PoolTestItem>>({});
 
   // 切换 tab 时清空上次测试结果
   function switchCap(c: CapabilityCategory) {
     setActive(c);
-    setTestResult(null);
+    setTestResults({});
   }
 
   async function runPoolTest() {
     setTestLoading(true);
-    setTestResult(null);
+    setTestResults({});
     try {
-      const r = await api.testPoolConnection(subscriptionId, active);
-      setTestResult(r);
+      const list = await api.testPoolConnection(subscriptionId, active);
+      const idx: Record<string, PoolTestItem> = {};
+      for (const item of list) {
+        idx[item.model_name] = item;
+      }
+      setTestResults(idx);
     } catch (e) {
-      setTestResult({
-        ok: false,
-        message: String(e),
-        http_status: undefined,
-        model_used: undefined,
-        state_reset: false,
-        note: undefined,
+      // 整批失败, 给一个占位
+      setTestResults({
+        "(error)": {
+          model_name: "(error)",
+          priority: 0,
+          enabled: false,
+          ok: false,
+          message: String(e),
+        },
       });
     } finally {
       setTestLoading(false);
@@ -220,14 +227,10 @@ export function ModelPoolPicker({
             className="btn sm"
             onClick={runPoolTest}
             disabled={disabled || testLoading}
-            title={`测试 ${CAPABILITY_LABEL[active]} 分类下首选模型的连通性`}
+            title={`逐个测试 ${CAPABILITY_LABEL[active]} 分类下所有模型的连通性`}
           >
-            {testLoading ? (
-              <RefreshCw size={12} className="animate-spin" />
-            ) : (
-              testResult?.ok ? <Wifi size={12} /> : <WifiOff size={12} />
-            )}
-            {testLoading ? "测试中..." : `测试 ${CAPABILITY_LABEL[active]}`}
+            <RefreshCw size={12} className={testLoading ? "animate-spin" : undefined} />
+            {testLoading ? "测试中..." : `全部测试 ${CAPABILITY_LABEL[active]}`}
           </button>
           {autoFillCandidates.length > 0 && (
             <button
@@ -261,30 +264,50 @@ export function ModelPoolPicker({
         路由时按优先级 (数字最小优先) 取可用模型; 首选失败自动降级到下一个.
       </div>
 
-      {/* 测试结果 */}
-      {testResult && (
+      {/* 测试结果汇总条 — 批量测试后一行显示成功/失败/跳过统计 */}
+      {Object.keys(testResults).length > 0 && !testResults["(error)"] && (
         <div
           style={{
-            marginBottom: 12,
-            padding: "10px 14px",
-            borderRadius: 8,
-            border: `1px solid ${testResult.ok ? "#22c55e" : "#ef4444"}`,
-            background: testResult.ok ? "#f0fdf4" : "#fef2f2",
-            color: testResult.ok ? "#166534" : "#991b1b",
-            fontSize: 13,
+            marginBottom: 10,
+            padding: "8px 12px",
+            borderRadius: 6,
+            border: "1px solid var(--border-2)",
+            background: "var(--bg-elev, transparent)",
+            fontSize: 12,
+            display: "flex",
+            gap: 14,
+            alignItems: "center",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, marginBottom: 4 }}>
-            {testResult.ok ? <Wifi size={14} /> : <CircleAlert size={14} />}
-            {testResult.ok ? "连通成功" : "连通失败"}
-            {testResult.model_used && (
-              <span style={{ fontWeight: 400, opacity: 0.85 }}>— {testResult.model_used}</span>
-            )}
-            {testResult.http_status != null && (
-              <span style={{ fontWeight: 400, opacity: 0.7 }}>· HTTP {testResult.http_status}</span>
-            )}
-          </div>
-          <div style={{ opacity: 0.9 }}>{testResult.message}</div>
+          {(() => {
+            const items = Object.values(testResults);
+            const ok = items.filter((t) => t.enabled && t.ok).length;
+            const fail = items.filter((t) => t.enabled && !t.ok).length;
+            const skip = items.filter((t) => !t.enabled).length;
+            return (
+              <>
+                <span style={{ fontWeight: 600 }}>测试结果 ({items.length})</span>
+                {ok > 0 && (
+                  <span style={{ color: "#22c55e" }}>
+                    <Check size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
+                    成功 {ok}
+                  </span>
+                )}
+                {fail > 0 && (
+                  <span style={{ color: "#ef4444" }}>
+                    <X size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
+                    失败 {fail}
+                  </span>
+                )}
+                {skip > 0 && (
+                  <span style={{ color: "#9ca3af" }}>
+                    <Minus size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
+                    跳过 {skip}
+                  </span>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -347,6 +370,7 @@ export function ModelPoolPicker({
             total={entriesByCap[active].length}
             models={models}
             disabled={disabled}
+            testItem={testResults[entry.model_name]}
             onModelNameChange={(v) => updateCap(active, idx, { model_name: v })}
             onInputsChange={(v) => updateCap(active, idx, { supported_inputs: v })}
             onEnabledToggle={() => updateCap(active, idx, { enabled: !entry.enabled })}
@@ -381,6 +405,7 @@ function EntryRow({
   total,
   models,
   disabled,
+  testItem,
   onModelNameChange,
   onInputsChange,
   onEnabledToggle,
@@ -393,6 +418,8 @@ function EntryRow({
   total: number;
   models: ModelInfo[] | null;
   disabled?: boolean;
+  /** 该模型的连通性测试结果 (undefined = 未测过) */
+  testItem?: PoolTestItem;
   onModelNameChange: (v: string) => void;
   onInputsChange: (v: InputModality[]) => void;
   onEnabledToggle: () => void;
@@ -402,7 +429,9 @@ function EntryRow({
 }) {
   const discoveryCandidates = useMemo(() => {
     if (!models) return [];
-    return models.filter((m) => !m.id.startsWith("@cf/cloudflare/clef"));
+    return models
+      .filter((m) => !m.id.startsWith("@cf/cloudflare/clef"))
+      .sort((a, b) => a.id.localeCompare(b.id));
   }, [models]);
 
   const inferredMismatch = useMemo(() => {
@@ -442,6 +471,73 @@ function EntryRow({
         opacity: entry.enabled ? 1 : 0.55,
       }}
     >
+      {/* 连通性状态图标: 未测试→虚线圈问号 / 成功→绿圆白勾 / 失败→红圆白叉 / 未启用→灰圆白减号 */}
+      {!testItem ? (
+        <div
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            border: "1.5px dashed #9ca3af",
+            background: "transparent",
+          }}
+          title="未测试 — 点击右上角「全部测试」按钮批量探测"
+        >
+          <CircleHelp size={13} color="#9ca3af" />
+        </div>
+      ) : !testItem.enabled ? (
+        <div
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            background: "#9ca3af",
+          }}
+          title="未启用, 跳过测试"
+        >
+          <Minus size={14} color="#ffffff" strokeWidth={3} />
+        </div>
+      ) : testItem.ok ? (
+        <div
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            background: "#22c55e",
+          }}
+          title={`连通成功${testItem.http_status ? ` · HTTP ${testItem.http_status}` : ""}`}
+        >
+          <Check size={14} color="#ffffff" strokeWidth={3} />
+        </div>
+      ) : (
+        <div
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            background: "#ef4444",
+          }}
+          title={`连通失败 · ${testItem.message}${testItem.http_status ? ` · HTTP ${testItem.http_status}` : ""}`}
+        >
+          <X size={14} color="#ffffff" strokeWidth={3} />
+        </div>
+      )}
       {/* 序号 + 优先级 badge */}
       <div
         style={{

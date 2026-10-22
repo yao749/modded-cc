@@ -116,6 +116,8 @@ export function SubscriptionEditPage() {
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  /** 模型配置面板 Tab 切换: slot = 旧四槽, pool = 能力分类模型池 */
+  const [modelPanelMode, setModelPanelMode] = useState<"slot" | "pool">("slot");
 
   // 能力分类模型池
   const poolQuery = useQuery({
@@ -537,61 +539,94 @@ export function SubscriptionEditPage() {
 
             <Card>
               <CardHeader>
-                <CardTitle>{t("subscriptionEdit.modelSlotsTitle")}</CardTitle>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%" }}>
+                  <CardTitle>{t("subscriptionEdit.modelSlotsTitle")}</CardTitle>
+                  {!isSystemOne && (
+                    <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-2)" }}>
+                      <button
+                        type="button"
+                        onClick={() => setModelPanelMode("slot")}
+                        style={{
+                          padding: "4px 12px",
+                          fontSize: 12,
+                          fontWeight: modelPanelMode === "slot" ? 600 : 400,
+                          background: modelPanelMode === "slot" ? "var(--accent, #3b82f6)" : "transparent",
+                          color: modelPanelMode === "slot" ? "#fff" : "var(--ink)",
+                          border: "none",
+                          cursor: "pointer",
+                        }}
+                      >
+                        四槽模式
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setModelPanelMode("pool")}
+                        style={{
+                          padding: "4px 12px",
+                          fontSize: 12,
+                          fontWeight: modelPanelMode === "pool" ? 600 : 400,
+                          background: modelPanelMode === "pool" ? "var(--accent, #3b82f6)" : "transparent",
+                          color: modelPanelMode === "pool" ? "#fff" : "var(--ink)",
+                          border: "none",
+                          cursor: "pointer",
+                        }}
+                      >
+                        能力分类池
+                      </button>
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
-                <ModelSlotPicker
-                  value={slots}
-                  onChange={setSlots}
-                  efforts={slotEfforts}
-                  onEffortsChange={setSlotEfforts}
-                  effortDisabled={sub.auth_type === "kiro_oauth"}
-                  effortDisabledReason={t("slotEffort.unsupportedKiro")}
-                  models={models}
-                  loading={fetchingModels}
-                  error={modelError}
-                  onRefresh={refreshModels}
-                  exampleModels={
-                    provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
-                  }
-                  systemone={isSystemOne}
-                  jevRequired={isSystemOne && sub.is_user_defined}
-                />
-                {sub.model_cache && !isSystemOne && (
-                  <div className="mt-3 text-xs text-muted-foreground">
-                    {t("subscriptionEdit.modelCacheUpdated")}{new Date(sub.model_cache.fetched_at).toLocaleString()}
-                  </div>
+                {modelPanelMode === "slot" || isSystemOne ? (
+                  <>
+                    <ModelSlotPicker
+                      value={slots}
+                      onChange={setSlots}
+                      efforts={slotEfforts}
+                      onEffortsChange={setSlotEfforts}
+                      effortDisabled={sub.auth_type === "kiro_oauth"}
+                      effortDisabledReason={t("slotEffort.unsupportedKiro")}
+                      models={models}
+                      loading={fetchingModels}
+                      error={modelError}
+                      onRefresh={refreshModels}
+                      exampleModels={
+                        provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
+                      }
+                      systemone={isSystemOne}
+                      jevRequired={isSystemOne && sub.is_user_defined}
+                    />
+                    {sub.model_cache && !isSystemOne && (
+                      <div className="mt-3 text-xs text-muted-foreground">
+                        {t("subscriptionEdit.modelCacheUpdated")}{new Date(sub.model_cache.fetched_at).toLocaleString()}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <ModelPoolPicker
+                      subscriptionId={id!}
+                      entries={poolEntries}
+                      onChange={setPoolEntries}
+                      models={models}
+                      loading={fetchingModels}
+                      onRefresh={refreshModels}
+                    />
+                    <div
+                      className="mt-3 text-xs text-muted-foreground"
+                      style={{ lineHeight: 1.6 }}
+                    >
+                      <b>两套体系说明：</b>此面板与四槽模式是两套独立的路由体系, 互不干扰。客户端请求
+                      <code>model-vision</code> / <code>model-llm</code> / <code>model-multimodal</code> /
+                      <code>model-speech</code> / <code>model-embedding</code>
+                      会使用对应的能力分类池。请求 <code>model-fable</code> / <code>model-sonnet</code> 等旧四槽名则走四槽配置。
+                      切换面板只是改变编辑视图, 两边的数据都会保留并一起保存。
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>
-
-            {/* 能力分类模型池 (新体系, 与四槽共存, 不在 systemone 订阅显示) */}
-            {!isSystemOne && (
-              <Card>
-                <CardHeader>
-                  <CardTitle>能力分类模型池</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <ModelPoolPicker
-                    subscriptionId={id!}
-                    entries={poolEntries}
-                    onChange={setPoolEntries}
-                    models={models}
-                    loading={fetchingModels}
-                    onRefresh={refreshModels}
-                  />
-                  <div
-                    className="mt-3 text-xs text-muted-foreground"
-                    style={{ lineHeight: 1.6 }}
-                  >
-                    <b>提示：</b>模型池与上方四槽配置是两套独立的路由体系, 互不干扰。客户端请求
-                    <code>model-vision</code> / <code>model-llm</code> / <code>model-multimodal</code> /
-                    <code>model-speech</code> / <code>model-embedding</code>
-                    会使用对应的能力分类池。保存时与订阅基本设置一起写入。
-                  </div>
-                </CardContent>
-              </Card>
-            )}
 
             <SubscriptionBalanceCard
               subscription={sub}

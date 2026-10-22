@@ -446,7 +446,9 @@ pub async fn load_model_cache(
     let Some(row) = row else { return Ok(None) };
     let fetched_at_ms: i64 = row.try_get("fetched_at")?;
     let json: String = row.try_get("models_json")?;
-    let models: Vec<ModelInfo> = serde_json::from_str(&json)?;
+    let mut models: Vec<ModelInfo> = serde_json::from_str(&json)?;
+    // 旧缓存行可能保存于排序逻辑生效前, 这里兜底排序 — 保证任何读取路径都稳定有序.
+    models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     Ok(Some(ModelCache {
         fetched_at: ms_to_dt(fetched_at_ms),
         models,

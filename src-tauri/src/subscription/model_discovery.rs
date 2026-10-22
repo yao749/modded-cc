@@ -908,9 +908,12 @@ pub async fn fetch_and_cache(
     row: &SubscriptionRow,
 ) -> Result<(ModelCache, String), DiscoveryError> {
     let found = fetch(client, row).await?;
+    let mut models = found.models;
+    // 统一按模型名字母序排, 所有下游 (前端下拉 / TUI wizard / cache) 自动受益.
+    models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     let cache = ModelCache {
         fetched_at: Utc::now(),
-        models: found.models,
+        models,
     };
     if let Err(e) = store::save_model_cache(pool, &row.id, &row.endpoint_id, &cache).await {
         warn!(?e, "model cache 持久化失败");

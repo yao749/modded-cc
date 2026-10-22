@@ -288,6 +288,18 @@ pub struct TestConnectionResult {
     pub note: Option<ping::ProbeNote>,
 }
 
+/// 能力分类模型池里单个模型的连通性测试结果 —— 用于逐行显示绿色勾/红色叉。
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolTestItem {
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+    pub ok: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RefreshModelListResult {
@@ -782,14 +794,16 @@ pub async fn test_connection(
     })
 }
 
-/// 测试能力分类模型池里某个分类的首选模型.
-/// 与 test_connection 类似, 但模型名来自 subscription_model_pool 表而非四槽.
+/// 批量测试某个能力分类下**所有模型**, 返回每个模型的连通性结果.
+/// 按 priority ASC 顺序依次 probe, 不中断 (一个失败继续下一个).
+/// 未启用的模型跳过 probe, 直接标记 enabled=false.
+/// 前端用这个结果在每行模型前显示绿色勾 (ok) / 红色叉 (fail) / 灰色 (未启用).
 #[tauri::command]
 pub async fn test_pool_connection(
     state: State<'_, AppState>,
     id: String,
     capability: String,
-) -> AppResult<TestConnectionResult> {
+) -> AppResult<Vec<PoolTestItem>> {
     let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
     let rt = {
         let subs = state.subscriptions.read().await;
@@ -802,39 +816,59 @@ pub async fn test_pool_connection(
         g.row.clone()
     };
 
-    let (model, supported_inputs) =
-        match crate::subscription::store::pick_pool_model(&state.db, id, &capability).await? {
-            Some(pair) => pair,
-            None => {
-                return Ok(TestConnectionResult {
-                    ok: false,
-                    message: format!("该分类 ({}) 没有启用的模型, 请先在模型池里添加", capability),
-                    http_status: None,
-                    model_used: None,
-                    state_reset: false,
-                    note: None,
-                });
-            }
-        };
+    // 拉该分类下全部模型 (包括未启用的, 未启用也要返回给前端显示灰色)
+    let all: Vec<crate::subscription::store::ModelPoolEntry> = {
+        let mut all = crate::subscription::store::load_model_pool(&state.db, id).await?;
+        all.retain(|e| e.capability == capability.as_str());
+        // 确保按 priority ASC 排
+        all.sort_by_key(|e| e.priority);
+        all
+    };
 
-    let input_hint = supported_inputs
-        .as_ref()
-        .map(|v| format!(" (支持输入: {})", v.join(",")))
-        .unwrap_or_default();
-    let result = ping::probe_subscription(&state, &row, &model, None).await;
+    if all.is_empty() {
+        return Ok(vec![PoolTestItem {
+            model_name: "(空)".into(),
+            priority: 0,
+            enabled: false,
+            ok: false,
+            message: format!("该分类 ({}) 没有模型, 请先添加", capability),
+            http_status: None,
+        }]);
+    }
 
-    Ok(TestConnectionResult {
-        ok: result.ok,
-        message: if result.ok {
-            format!("能力分类 [{}] 首选模型 {} 连通成功{}", capability, model, input_hint)
-        } else {
-            result.message
-        },
-        http_status: result.http_status,
-        model_used: Some(model),
-        state_reset: false, // 不影响订阅状态机
-        note: result.note,
-    })
+    tracing::info!(
+        "test_pool_connection start sub_id={} provider={} base_url={} capability={} entries={}",
+        id, row.provider_id, row.base_url, capability, all.len()
+    );
+
+    let mut results = Vec::with_capacity(all.len());
+    for entry in &all {
+        if !entry.enabled {
+            results.push(PoolTestItem {
+                model_name: entry.model_name.clone(),
+                priority: entry.priority,
+                enabled: false,
+                ok: false,
+                message: "未启用, 跳过测试".into(),
+                http_status: None,
+            });
+            continue;
+        }
+        let probe = ping::probe_subscription(&state, &row, &entry.model_name, None).await;
+        tracing::info!(
+            "test_pool_connection probe model={} ok={} http_status={:?} message={}",
+            entry.model_name, probe.ok, probe.http_status, probe.message
+        );
+        results.push(PoolTestItem {
+            model_name: entry.model_name.clone(),
+            priority: entry.priority,
+            enabled: true,
+            ok: probe.ok,
+            message: probe.message,
+            http_status: probe.http_status,
+        });
+    }
+    Ok(results)
 }
 
 #[tauri::command]
@@ -960,10 +994,13 @@ pub async fn probe_custom_models(
 
     Ok(
         match model_discovery::probe(&state.http_client, &target).await {
-            Ok(found) => ProbeCustomModelsResult::Auto {
-                models: found.models,
-                models_url: found.url,
-            },
+            Ok(mut found) => {
+                found.models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+                ProbeCustomModelsResult::Auto {
+                    models: found.models,
+                    models_url: found.url,
+                }
+            }
             Err(e) => ProbeCustomModelsResult::ManualFallback {
                 reason: e.to_string(),
             },
@@ -1380,6 +1417,75 @@ mod tests {
         let p: CustomProtocol = serde_json::from_value(serde_json::json!("systemone")).unwrap();
         assert_eq!(p, CustomProtocol::Systemone);
     }
+
+    /// 复现 issue 1: entries 里缺少 subscription_id 会不会让 serde 炸?
+    #[test]
+    fn save_model_pool_entries_without_subscription_id() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            input: SaveModelPoolInput,
+        }
+
+        // 前端真实发送: entries 里 subscription_id 被有意剔除
+        let json = r#"{
+            "input": {
+                "subscription_id": "550e8400-e29b-41d4-a716-446655440000",
+                "entries": [
+                    {
+                        "id": "abc-123",
+                        "capability": "vision",
+                        "model_name": "gpt-4o-vision",
+                        "priority": 0,
+                        "enabled": true,
+                        "supported_inputs": ["text", "image"]
+                    }
+                ]
+            }
+        }"#;
+
+        let result: Result<Args, _> = serde_json::from_str(json);
+        match &result {
+            Ok(args) => eprintln!("OK! loaded {} entries", args.input.entries.len()),
+            Err(e) => eprintln!("FAIL: {e}"),
+        }
+        assert!(result.is_ok(), "缺少 ModelPoolEntryDto.subscription_id 时应该也能反序列化");
+    }
+
+    /// 复现 issue 2: Tauri IPC 可能用的是 camelCase KEY 递归转换
+    #[test]
+    fn save_model_pool_with_camel_case_inner() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            input: SaveModelPoolInput,
+        }
+
+        // 假设 Tauri 把所有 key 递归转成 camelCase
+        let json = r#"{
+            "input": {
+                "subscriptionId": "550e8400-e29b-41d4-a716-446655440000",
+                "entries": [
+                    {
+                        "id": "abc-123",
+                        "subscriptionId": "unused",
+                        "capability": "vision",
+                        "modelName": "gpt-4o-vision",
+                        "priority": 0,
+                        "enabled": true,
+                        "supportedInputs": ["text", "image"]
+                    }
+                ]
+            }
+        }"#;
+
+        let result: Result<Args, _> = serde_json::from_str(json);
+        match &result {
+            Ok(args) => eprintln!("OK (camelCase inner)! loaded {} entries", args.input.entries.len()),
+            Err(e) => eprintln!("FAIL (camelCase inner): {e}"),
+        }
+        // 这个测试预期会 FAIL — 说明 serde 确实不做递归 camelCase
+    }
 }
 
 #[cfg(test)]
@@ -1401,6 +1507,10 @@ mod protocol_tests {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelPoolEntryDto {
     pub id: String,
+    /// 前端会刻意剥离此字段 (外部 SaveModelPoolInput 已经带了 subscription_id),
+    /// 所以用 serde(default) 让 serde 反序列化时忽略缺失值 —— Rust handler 最终
+    /// 会用 input.subscription_id 覆盖这个字段, 不会留空.
+    #[serde(default)]
     pub subscription_id: String,
     pub capability: String,
     pub model_name: String,

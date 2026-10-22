@@ -564,6 +564,16 @@ export interface TestConnectionResult {
   note?: ProbeNote;
 }
 
+/** 能力分类模型池里单个模型的连通性测试结果 —— 逐行显示绿色勾/红色叉 */
+export interface PoolTestItem {
+  model_name: string;
+  priority: number;
+  enabled: boolean;
+  ok: boolean;
+  message: string;
+  http_status?: number;
+}
+
 /** 对齐 Rust `subscription::ping::ProbeNote` */
 export type ProbeNote =
   | { code: "ok" }
