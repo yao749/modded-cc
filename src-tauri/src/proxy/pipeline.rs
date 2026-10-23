@@ -1433,14 +1433,15 @@ pub async fn dispatch(
                     ));
                 }
                 let should_retry = classify_response(status.as_u16(), None);
-                // 状态机事件
+                // 状态机事件 (透传 API Key 家族): 429 的 Retry-After 同样要喂给冷却
+                let retry_after = upstream::retry_after_secs(&resp_headers);
                 let event = match should_retry {
-                    ShouldRetry::Yes(_) => state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None },
+                    ShouldRetry::Yes(_) => state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: retry_after },
                     ShouldRetry::No => {
                         if status.is_success() {
                             state_machine::Event::RequestSucceeded
                         } else {
-                            state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None }
+                            state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: retry_after }
                         }
                     }
                 };
@@ -1538,7 +1539,10 @@ pub async fn dispatch(
                 // 流式：若非 2xx 按非流式错误处理
                 if !status.is_success() {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let event = state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None };
+                    let event = state_machine::Event::HttpStatus {
+                        status: status.as_u16(),
+                        retry_after_secs: upstream::retry_after_secs(&resp_headers),
+                    };
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
