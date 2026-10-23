@@ -33,6 +33,9 @@ pub struct ExportFile {
     pub subscriptions: Vec<ExportSubscription>,
     #[serde(default)]
     pub virtual_models: Vec<ExportVirtualModel>,
+    /// 能力分类模型池条目. 旧备份文件没有该字段 → 空 vec (P0 之前池配置完全不在备份范围).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_pools: Vec<ExportPoolEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<SecretsEnvelope>,
 }
@@ -118,6 +121,26 @@ pub struct ExportVirtualModel {
     pub mode: RoutingMode,
     #[serde(default)]
     pub subscription_ids: Vec<Uuid>,
+}
+
+/// 一条能力分类模型池配置 (行 = 订阅 × 能力 × 模型 × 优先级).
+/// 不导出库内 id / 时间戳: 恢复时重新生成, 避免与目标库既有行冲突。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportPoolEntry {
+    pub subscription_id: Uuid,
+    pub capability: String,
+    pub model_name: String,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default = "pool_entry_enabled_default")]
+    pub enabled: bool,
+    /// 该模型的输入模态声明; 缺省 = 未声明 (路由时按 ["text"] 兜底)。
+    #[serde(default)]
+    pub supported_inputs: Vec<String>,
+}
+
+fn pool_entry_enabled_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
