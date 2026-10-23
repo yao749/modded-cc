@@ -123,6 +123,7 @@ export const api = {
   listVirtualModels: () => invoke<VirtualModelDto[]>("list_virtual_models"),
   updateVirtualModel: (name: VirtualModelName, input: UpdateVirtualModelInput) =>
     invoke<void>("update_virtual_model", { name, input }),
+  listModelPools: () => invoke<import("@/types").ModelPoolEntry[]>("list_model_pools"),
 
   // request logs
   listRequests: (

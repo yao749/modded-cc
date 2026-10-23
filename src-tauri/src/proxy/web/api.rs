@@ -153,6 +153,7 @@ web_commands! {
     // virtual models
     list_virtual_models() => commands::virtual_models::list_virtual_models(st).await,
     update_virtual_model(name: String, input: UpdateVirtualModelInput) => commands::virtual_models::update_virtual_model(st, args.name, args.input).await,
+    list_model_pools() => commands::virtual_models::list_model_pools(st).await,
     // request logs
     list_requests(page: u32, page_size: u32, filters: Option<RequestLogFilters>) => commands::requests::list_requests(st, args.page, args.page_size, args.filters).await,
     export_requests_csv(path: String, filters: Option<RequestLogFilters>) => commands::requests::export_requests_csv(st, args.path, args.filters).await,

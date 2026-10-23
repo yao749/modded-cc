@@ -1,5 +1,6 @@
 import { Outlet, matchPath, useLocation } from "react-router";
 import { Sidebar } from "./Sidebar";
+import { ModeBanner } from "./ModeBanner";
 import { WindowChrome } from "./WindowChrome";
 import { runtime } from "@/runtime";
 import { ReleaseNotesProvider } from "@/components/release-notes/ReleaseNotesController";
@@ -36,6 +37,7 @@ export function AppShell() {
         {runtime.kind === "desktop" && <WindowChrome />}
         <Sidebar />
         <main className={flush ? "main flush" : "main"}>
+          <ModeBanner />
           <Outlet />
         </main>
       </div>

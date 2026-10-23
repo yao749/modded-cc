@@ -27,14 +27,12 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { ModelSlotPicker } from "@/components/ModelSlotPicker";
-import { ModelPoolPicker } from "@/components/ModelPoolPicker";
 import { SubscriptionBalanceCard } from "@/components/SubscriptionBalanceCard";
 import { SubscriptionQuotaCard } from "@/components/SubscriptionQuotaCard";
 import { api } from "@/api/tauri";
 import { KeyValueEditor, type KeyValueRow } from "@/components/KeyValueEditor";
 import { validateConnection, validateRequiredHeaders } from "@/lib/connectionValidation";
 import { useProviders } from "@/hooks/useProviders";
-import { useSettings } from "@/hooks/useSettings";
 import {
   useDeleteSubscription,
   useSetSubscriptionEnabled,
@@ -46,7 +44,6 @@ import { useT } from "@/i18n";
 import type {
   AuthHeaderFormat,
   ModelInfo,
-  ModelPoolEntry,
   ModelSlots,
   QuotaPeriod,
   RefreshModelListResult,
@@ -117,20 +114,6 @@ export function SubscriptionEditPage() {
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
-  // 全局路由模式决定展示哪套面板 (系统一订阅始终四槽): 与 pipeline 门禁同源, 避免编辑到会被拒的那套
-  const settingsQuery = useSettings();
-  const routingMode = settingsQuery.data?.routing_mode ?? "slots";
-
-  // 能力分类模型池
-  const poolQuery = useQuery({
-    queryKey: ["model-pool", id],
-    queryFn: () => api.loadModelPool(id!),
-    enabled: !!id,
-  });
-  const [poolEntries, setPoolEntries] = useState<ModelPoolEntry[]>([]);
-  useEffect(() => {
-    if (poolQuery.data) setPoolEntries(poolQuery.data);
-  }, [poolQuery.data]);
 
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
   const [keyDialog, setKeyDialog] = useState(false);
@@ -247,12 +230,6 @@ export function SubscriptionEditPage() {
     }
     try {
       await updateMut.mutateAsync({ id, patch });
-      // 模型池保存 (独立 patch, 无变化也覆盖写, 保持数据库一致)
-      await api.saveModelPool(
-        id,
-        poolEntries.map(({ subscription_id: _sub, ...rest }) => rest),
-      );
-      queryClient.invalidateQueries({ queryKey: ["model-pool", id] });
     } catch (e) {
       setSaveError(`${t("subscriptionEdit.errSave")}: ${errorText(e)}`);
     }
@@ -546,51 +523,33 @@ export function SubscriptionEditPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                {routingMode !== "pool" || isSystemOne ? (
-                  <>
-                    <ModelSlotPicker
-                      value={slots}
-                      onChange={setSlots}
-                      efforts={slotEfforts}
-                      onEffortsChange={setSlotEfforts}
-                      effortDisabled={sub.auth_type === "kiro_oauth"}
-                      effortDisabledReason={t("slotEffort.unsupportedKiro")}
-                      models={models}
-                      loading={fetchingModels}
-                      error={modelError}
-                      onRefresh={refreshModels}
-                      exampleModels={
-                        provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
-                      }
-                      systemone={isSystemOne}
-                      jevRequired={isSystemOne && sub.is_user_defined}
-                    />
-                    {sub.model_cache && !isSystemOne && (
-                      <div className="mt-3 text-xs text-muted-foreground">
-                        {t("subscriptionEdit.modelCacheUpdated")}{new Date(sub.model_cache.fetched_at).toLocaleString()}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <ModelPoolPicker
-                      subscriptionId={id!}
-                      entries={poolEntries}
-                      onChange={setPoolEntries}
-                      models={models}
-                      loading={fetchingModels}
-                      onRefresh={refreshModels}
-                    />
-                    <div
-                      className="mt-3 text-xs text-muted-foreground"
-                      style={{ lineHeight: 1.6 }}
-                    >
-                      <b>能力分类池：</b>客户端请求
-                      <code>model-vision</code> / <code>model-llm</code> / <code>model-multimodal</code> /
-                      <code>model-speech</code> / <code>model-embedding</code>
-                      会使用这里的配置。当前路由模式为「能力分类池」，四槽配置仍保存在库里，切换回四槽模式即可恢复。
-                    </div>
-                  </>
+                <ModelSlotPicker
+                  value={slots}
+                  onChange={setSlots}
+                  efforts={slotEfforts}
+                  onEffortsChange={setSlotEfforts}
+                  effortDisabled={sub.auth_type === "kiro_oauth"}
+                  effortDisabledReason={t("slotEffort.unsupportedKiro")}
+                  models={models}
+                  loading={fetchingModels}
+                  error={modelError}
+                  onRefresh={refreshModels}
+                  exampleModels={
+                    provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
+                  }
+                  systemone={isSystemOne}
+                  jevRequired={isSystemOne && sub.is_user_defined}
+                />
+                {sub.model_cache && !isSystemOne && (
+                  <div className="mt-3 text-xs text-muted-foreground">
+                    {t("subscriptionEdit.modelCacheUpdated")}{new Date(sub.model_cache.fetched_at).toLocaleString()}
+                  </div>
+                )}
+                {!isSystemOne && (
+                  <div className="mt-3 text-xs text-muted-foreground" style={{ lineHeight: 1.6 }}>
+                    {t("subscriptionEdit.poolMovedHint")}{" "}
+                    <Link to="/pool">{t("sidebar.nav.pool")}</Link>
+                  </div>
                 )}
               </CardContent>
             </Card>

@@ -80,6 +80,12 @@ interface NavItem {
   active?: boolean;
 }
 
+/** 导航分组: 经典组无标题, 能力池组带组标题 (见 docs/routing-mode-portal-plan.md §3) */
+interface NavGroup {
+  labelKey?: string;
+  items: NavItem[];
+}
+
 export function Sidebar() {
   const { t } = useT();
   const subs = useSubscriptions();
@@ -97,36 +103,49 @@ export function Sidebar() {
   const onSettings = location.pathname === "/settings";
   const onBackupTab = onSettings && new URLSearchParams(location.search).get("tab") === "backup";
 
-  const items: NavItem[] = [
-    { to: "/guide", label: t("sidebar.nav.guide"), icon: "guide" },
+  const groups: NavGroup[] = [
     {
-      to: "/live-routing",
-      label: t("sidebar.nav.liveRouting"),
-      icon: "live",
-      dot: running,
-      dotTone: "ok",
-      dotLabelKey: "sidebar.proxyRunning",
+      items: [
+        { to: "/guide", label: t("sidebar.nav.guide"), icon: "guide" },
+        {
+          to: "/live-routing",
+          label: t("sidebar.nav.liveRouting"),
+          icon: "live",
+          dot: running,
+          dotTone: "ok",
+          dotLabelKey: "sidebar.proxyRunning",
+        },
+        {
+          to: "/virtual-models",
+          label: t("sidebar.nav.virtualModels"),
+          icon: "vm",
+          badge: String(vms.data?.length ?? 5),
+        },
+        { to: "/subscriptions", label: t("sidebar.nav.subscriptions"), icon: "subs", badge: subsCount > 0 ? String(subsCount) : undefined },
+        { to: "/request-logs", label: t("sidebar.nav.requestLogs"), icon: "logs" },
+        { to: "/statistics", label: t("sidebar.nav.statistics"), icon: "stats" },
+        { to: "/receipts", label: t("sidebar.nav.receipts"), icon: "receipts" },
+        {
+          to: "/updates",
+          label: t("sidebar.nav.updates"),
+          icon: "updates",
+          dot: hasUpdate,
+          dotLabelKey: "sidebar.updateAvailable",
+        },
+        { to: "/settings?tab=backup", label: t("sidebar.nav.backup"), icon: "backup", active: onBackupTab },
+        { to: "/settings", label: t("sidebar.nav.settings"), icon: "settings", active: onSettings && !onBackupTab },
+        { to: "/about", label: t("sidebar.nav.about"), icon: "about" },
+      ],
     },
     {
-      to: "/virtual-models",
-      label: t("sidebar.nav.virtualModels"),
-      icon: "vm",
-      badge: String(vms.data?.length ?? 5),
+      // 能力池组: 非本模式也可点 —— 点进去就是门户, 由 ModeBanner 引导一键切模式
+      labelKey: "sidebar.group.pool",
+      items: [
+        // 图标复用现有涂鸦: 池总览是矩阵 → stats; 池的虚拟模型 → vm
+        { to: "/pool", label: t("sidebar.nav.pool"), icon: "stats" },
+        { to: "/pool/models", label: t("sidebar.nav.poolModels"), icon: "vm" },
+      ],
     },
-    { to: "/subscriptions", label: t("sidebar.nav.subscriptions"), icon: "subs", badge: subsCount > 0 ? String(subsCount) : undefined },
-    { to: "/request-logs", label: t("sidebar.nav.requestLogs"), icon: "logs" },
-    { to: "/statistics", label: t("sidebar.nav.statistics"), icon: "stats" },
-    { to: "/receipts", label: t("sidebar.nav.receipts"), icon: "receipts" },
-    {
-      to: "/updates",
-      label: t("sidebar.nav.updates"),
-      icon: "updates",
-      dot: hasUpdate,
-      dotLabelKey: "sidebar.updateAvailable",
-    },
-    { to: "/settings?tab=backup", label: t("sidebar.nav.backup"), icon: "backup", active: onBackupTab },
-    { to: "/settings", label: t("sidebar.nav.settings"), icon: "settings", active: onSettings && !onBackupTab },
-    { to: "/about", label: t("sidebar.nav.about"), icon: "about" },
   ];
 
   const [showLogout, setShowLogout] = useState(false);
@@ -150,30 +169,35 @@ export function Sidebar() {
        * 版本号只以手写小字出现在底部「更新内容」入口上 (已读时)。
        * .nav-list / .nav-extra 默认 display: contents 不参与布局, Win2000 画风把它们画成凹陷的列表框。 */}
       <div className="nav-list">
-        {items.map((it) => {
-          const badge = typeof it.badge === "function" ? it.badge() : it.badge;
-          return (
-            <NavLink
-              key={it.to}
-              to={it.to}
-              className={({ isActive }) => cn("nav-item", (it.active ?? isActive) && "active")}
-              aria-current={it.active === false ? false : undefined}
-            >
-              <span className="nav-icon">
-                <NavIcon name={it.icon} art={art} />
-              </span>
-              <span className="nav-label">{it.label}</span>
-              {badge && <span className="badge mono">{badge}</span>}
-              {!badge && it.dot && (
-                <NavDot
-                  art={art}
-                  tone={it.dotTone ?? "err"}
-                  label={t(it.dotLabelKey ?? "sidebar.updateAvailable")}
-                />
-              )}
-            </NavLink>
-          );
-        })}
+        {groups.map((group, gi) => (
+          <div className="nav-group" key={group.labelKey ?? `g${gi}`}>
+            {group.labelKey && <div className="nav-group-label">{t(group.labelKey)}</div>}
+            {group.items.map((it) => {
+              const badge = typeof it.badge === "function" ? it.badge() : it.badge;
+              return (
+                <NavLink
+                  key={it.to}
+                  to={it.to}
+                  className={({ isActive }) => cn("nav-item", (it.active ?? isActive) && "active")}
+                  aria-current={it.active === false ? false : undefined}
+                >
+                  <span className="nav-icon">
+                    <NavIcon name={it.icon} art={art} />
+                  </span>
+                  <span className="nav-label">{it.label}</span>
+                  {badge && <span className="badge mono">{badge}</span>}
+                  {!badge && it.dot && (
+                    <NavDot
+                      art={art}
+                      tone={it.dotTone ?? "err"}
+                      label={t(it.dotLabelKey ?? "sidebar.updateAvailable")}
+                    />
+                  )}
+                </NavLink>
+              );
+            })}
+          </div>
+        ))}
       </div>
       <div className="nav-footer">
         {/* 与品牌区下方对称的手画波浪线 */}

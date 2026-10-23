@@ -141,6 +141,7 @@ pub fn run() {
             commands::subscriptions::save_model_pool,
             commands::virtual_models::list_virtual_models,
             commands::virtual_models::update_virtual_model,
+            commands::virtual_models::list_model_pools,
             commands::requests::list_requests,
             commands::requests::export_requests_csv,
             commands::requests::export_requests_csv_text,
