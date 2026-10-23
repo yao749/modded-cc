@@ -30,6 +30,19 @@ pub enum UpstreamResponse {
 /// Idle limit of the production upstream client (see [`build_client`]).
 pub const UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// 从上游响应头解析 `Retry-After`, 作为状态机冷却时长的首选提示。
+///
+/// 两种合法格式都认 (纯秒数 / HTTP-date), 结果已 clamp 到 [30s, 2h]:
+/// 超范围或格式不认识 → None, 调用方回退到 type-specific 默认冷却。
+pub fn retry_after_secs(headers: &ReqHeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            crate::subscription::state_machine::parse_retry_after(s, chrono::Utc::now())
+        })
+}
+
 /// The production upstream client.
 ///
 /// `idle` is a read timeout, not a total one: it covers waiting for the response head and
@@ -189,5 +202,39 @@ mod tests {
         };
         assert!(err.is_timeout());
         assert_eq!(describe_error(&err), "等待上游数据超时, 连接已断开");
+    }
+
+    // ---- Retry-After 头解析 (喂状态机冷却用) ----
+
+    fn headers_with_retry_after(value: &str) -> ReqHeaderMap {
+        let mut h = ReqHeaderMap::new();
+        h.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn retry_after_header_seconds_form() {
+        assert_eq!(retry_after_secs(&headers_with_retry_after("120")), Some(120));
+    }
+
+    #[test]
+    fn retry_after_header_missing_is_none() {
+        assert_eq!(retry_after_secs(&ReqHeaderMap::new()), None);
+    }
+
+    #[test]
+    fn retry_after_header_garbage_and_out_of_range_are_none() {
+        // 格式不认识 / 太短 / 太长 → None, 调用方回退默认冷却
+        assert_eq!(retry_after_secs(&headers_with_retry_after("soon")), None);
+        assert_eq!(retry_after_secs(&headers_with_retry_after("1")), None);
+        assert_eq!(retry_after_secs(&headers_with_retry_after("86400")), None);
+    }
+
+    #[test]
+    fn retry_after_header_http_date_form() {
+        // 未来 20 分钟 → 在 clamp 范围内, 解析成剩余秒数
+        let when = (chrono::Utc::now() + chrono::Duration::minutes(20)).to_rfc2822();
+        let parsed = retry_after_secs(&headers_with_retry_after(&when)).expect("应解析出剩余秒数");
+        assert!((1100..=1210).contains(&parsed), "{parsed} 应接近 1200 秒");
     }
 }

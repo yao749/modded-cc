@@ -108,7 +108,7 @@ fn dispatch_result_to_probe<T>(res: Result<T, OAuthDispatchError>) -> ProbeResul
             message,
             note: None,
         },
-        Err(OAuthDispatchError::Upstream { status, message }) => ProbeResult {
+        Err(OAuthDispatchError::Upstream { status, message, retry_after_secs: _ }) => ProbeResult {
             ok: false,
             http_status: status,
             message,
@@ -187,8 +187,13 @@ async fn probe_systemone(client: &reqwest::Client, row: &SubscriptionRow, model:
     };
     let wire = out.wire;
     let r = match crate::proxy::upstream::send(client, &out.url, out.body.to_vec(), out.headers, false).await {
-        Ok(crate::proxy::upstream::UpstreamResponse::NonStreaming { status, body, body_text, .. }) => {
-            AttemptResult::Http { status, body, body_text }
+        Ok(crate::proxy::upstream::UpstreamResponse::NonStreaming { status, headers, body, body_text, .. }) => {
+            AttemptResult::Http {
+                status,
+                body,
+                body_text,
+                retry_after_secs: crate::proxy::upstream::retry_after_secs(&headers),
+            }
         }
         Ok(_) => return ProbeResult::noted(true, None, ProbeNote::Ok),
         Err(e) => return ProbeResult::noted(false, None, ProbeNote::Network { detail: e.to_string() }),
@@ -538,6 +543,7 @@ mod tests {
     fn dispatch_upstream_err_preserves_status_and_message() {
         let r = dispatch_result_to_probe::<()>(Err(OAuthDispatchError::Upstream {
             status: Some(400),
+            retry_after_secs: None,
             message: "bad request".into(),
         }));
         assert!(!r.ok);
@@ -547,6 +553,7 @@ mod tests {
         // 网络层错误 status=None 时透传 None。
         let r2 = dispatch_result_to_probe::<()>(Err(OAuthDispatchError::Upstream {
             status: None,
+            retry_after_secs: None,
             message: "网络错误".into(),
         }));
         assert!(!r2.ok);

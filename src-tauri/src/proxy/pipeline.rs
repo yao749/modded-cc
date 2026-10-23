@@ -254,6 +254,28 @@ pub(crate) fn routing_mode_gate(
     }
 }
 
+/// 把一次 attempt 的 dispatch 错误翻译成 (状态机事件, 是否值得 failover)。
+///
+/// Retry-After hint 只在真正拿到上游 HTTP 响应时存在: 由各 dispatcher 在
+/// `OAuthDispatchError::Upstream.retry_after_secs` 里带上来, 状态机据此决定冷却时长
+/// (clamp [30s, 2h], 缺失则回退 RateLimited 60s / QuotaExhausted 2h)。
+fn dispatch_err_to_event(err: &OAuthDispatchError) -> (state_machine::Event, bool) {
+    match err {
+        OAuthDispatchError::Auth(_) => (
+            state_machine::Event::HttpStatus { status: 401, retry_after_secs: None },
+            false,
+        ),
+        OAuthDispatchError::Upstream { status, retry_after_secs, .. } => {
+            let s = status.unwrap_or(502);
+            let retryable = matches!(classify_response(s, None), ShouldRetry::Yes(_));
+            (
+                state_machine::Event::HttpStatus { status: s, retry_after_secs: *retry_after_secs },
+                retryable,
+            )
+        }
+    }
+}
+
 pub async fn dispatch(
     state: &AppState,
     model: &str,
@@ -588,15 +610,7 @@ pub async fn dispatch(
                 }
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
-                        OAuthDispatchError::Upstream { status, .. } => {
-                            let s = status.unwrap_or(502);
-                            let retryable =
-                                matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
-                        }
-                    };
+                    let (event, retryable) = dispatch_err_to_event(&err);
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -707,15 +721,7 @@ pub async fn dispatch(
                 }
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
-                        OAuthDispatchError::Upstream { status, .. } => {
-                            let s = status.unwrap_or(502);
-                            let retryable =
-                                matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
-                        }
-                    };
+                    let (event, retryable) = dispatch_err_to_event(&err);
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -836,15 +842,7 @@ pub async fn dispatch(
                 }
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
-                        OAuthDispatchError::Upstream { status, .. } => {
-                            let s = status.unwrap_or(502);
-                            let retryable =
-                                matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
-                        }
-                    };
+                    let (event, retryable) = dispatch_err_to_event(&err);
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -976,15 +974,7 @@ pub async fn dispatch(
                 }
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
-                        OAuthDispatchError::Upstream { status, .. } => {
-                            let s = status.unwrap_or(502);
-                            let retryable =
-                                matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
-                        }
-                    };
+                    let (event, retryable) = dispatch_err_to_event(&err);
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1115,15 +1105,7 @@ pub async fn dispatch(
                 }
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false),
-                        OAuthDispatchError::Upstream { status, .. } => {
-                            let s = status.unwrap_or(502);
-                            let retryable =
-                                matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
-                        }
-                    };
+                    let (event, retryable) = dispatch_err_to_event(&err);
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1253,17 +1235,7 @@ pub async fn dispatch(
                 }
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let (event, retryable) = match &err {
-                        OAuthDispatchError::Auth(_) => {
-                            (state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }, false)
-                        }
-                        OAuthDispatchError::Upstream { status, .. } => {
-                            let s = status.unwrap_or(502);
-                            let retryable =
-                                matches!(classify_response(s, None), ShouldRetry::Yes(_));
-                            (state_machine::Event::HttpStatus { status: s, retry_after_secs: None }, retryable)
-                        }
-                    };
+                    let (event, retryable) = dispatch_err_to_event(&err);
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -2098,5 +2070,52 @@ mod tests {
         let resp = routing_mode_gate(VirtualModelName::Llm, mode)
             .expect("脏值模式下 pool 名应被拦截");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ---- dispatch 错误 → 状态机事件 (Retry-After 透传) ----
+
+    #[test]
+    fn upstream_error_carries_retry_after_into_event() {
+        let err = OAuthDispatchError::Upstream {
+            status: Some(429),
+            message: "rate limited".into(),
+            retry_after_secs: Some(600),
+        };
+        let (event, retryable) = dispatch_err_to_event(&err);
+        assert!(
+            matches!(
+                event,
+                state_machine::Event::HttpStatus { status: 429, retry_after_secs: Some(600) }
+            ),
+            "上游 Retry-After 必须原样带到事件里, 不能丢: {event:?}"
+        );
+        assert!(retryable, "429 应触发 failover");
+    }
+
+    #[test]
+    fn upstream_error_without_header_keeps_hint_none() {
+        let err = OAuthDispatchError::Upstream {
+            status: Some(429),
+            message: "rate limited".into(),
+            retry_after_secs: None,
+        };
+        let (event, _) = dispatch_err_to_event(&err);
+        assert!(
+            matches!(
+                event,
+                state_machine::Event::HttpStatus { status: 429, retry_after_secs: None }
+            ),
+            "没有 header 时保持 None, 让状态机走默认冷却: {event:?}"
+        );
+    }
+
+    #[test]
+    fn auth_error_maps_to_401_without_hint() {
+        let (event, retryable) = dispatch_err_to_event(&OAuthDispatchError::Auth("bad token".into()));
+        assert!(matches!(
+            event,
+            state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }
+        ));
+        assert!(!retryable, "auth 错误不该 failover");
     }
 }

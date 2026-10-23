@@ -68,9 +68,12 @@ pub enum OAuthDispatchError {
     /// access_token 拿不到 (refresh 也失败), 标订阅 auth_failed.
     Auth(String),
     /// 上游返回 4xx/5xx 或网络错误. 携带 status (可选) 与 message.
+    /// `retry_after_secs`: 上游响应头 Retry-After 解析结果 (已 clamp 到 [30s, 2h]),
+    /// 只有真正拿到 HTTP 响应的路径才有; 请求前置失败 (body 翻译 / header 构造等) 一律 None。
     Upstream {
         status: Option<u16>,
         message: String,
+        retry_after_secs: Option<u64>,
     },
 }
 
@@ -111,11 +114,13 @@ pub async fn dispatch_oauth_attempt(
     let translated_body =
         anthropic_to_responses(request_body, &extras).map_err(|e| OAuthDispatchError::Upstream {
             status: None,
+            retry_after_secs: None,
             message: format!("body 翻译失败: {e}"),
         })?;
     let body_bytes = serde_json::to_vec(&translated_body).map_err(|e| {
         OAuthDispatchError::Upstream {
             status: None,
+            retry_after_secs: None,
             message: format!("body 序列化失败: {e}"),
         }
     })?;
@@ -174,6 +179,7 @@ pub async fn dispatch_oauth_attempt(
         Err(upstream::UpstreamError::Reqwest(e)) => {
             return Err(OAuthDispatchError::Upstream {
                 status: None,
+                retry_after_secs: None,
                 message: format!("网络错误: {}", upstream::describe_error(&e)),
             })
         }
@@ -183,10 +189,11 @@ pub async fn dispatch_oauth_attempt(
         upstream::UpstreamResponse::Streaming { status, headers, stream } => {
             (status, headers, stream)
         }
-        upstream::UpstreamResponse::NonStreaming { status, body_text, .. } => {
+        upstream::UpstreamResponse::NonStreaming { status, headers, body_text, .. } => {
             // 上游强制流式, 走到这里说明 status 不是 2xx (upstream::send 把非 2xx 当 NonStreaming 处理).
             return Err(OAuthDispatchError::Upstream {
                 status: Some(status.as_u16()),
+                retry_after_secs: upstream::retry_after_secs(&headers),
                 message: body_text.unwrap_or_else(|| format!("HTTP {}", status.as_u16())),
             });
         }
@@ -205,6 +212,7 @@ pub async fn dispatch_oauth_attempt(
         }
         return Err(OAuthDispatchError::Upstream {
             status: Some(status.as_u16()),
+            retry_after_secs: upstream::retry_after_secs(&resp_headers),
             message: buf,
         });
     }
@@ -212,7 +220,7 @@ pub async fn dispatch_oauth_attempt(
     // 流首 peek: HTTP 200 但首帧就是 response.failed → 返回 Err 让 pipeline failover (issue #38)
     let stream = peek_responses_first_frame(stream)
         .await
-        .map_err(|message| OAuthDispatchError::Upstream { status: None, message })?;
+        .map_err(|message| OAuthDispatchError::Upstream { status: None, message, retry_after_secs: None })?;
 
     Ok(OAuthDispatchOk {
         upstream_status: status,
@@ -756,10 +764,12 @@ pub async fn dispatch_kiro_attempt(
     )
     .map_err(|e| OAuthDispatchError::Upstream {
         status: None,
+        retry_after_secs: None,
         message: format!("body 翻译失败: {e}"),
     })?;
     let body_bytes = serde_json::to_vec(&translated_body).map_err(|e| OAuthDispatchError::Upstream {
         status: None,
+        retry_after_secs: None,
         message: format!("body 序列化失败: {e}"),
     })?;
 
@@ -769,6 +779,7 @@ pub async fn dispatch_kiro_attempt(
     let auth_value = ReqHeaderValue::from_str(&format!("Bearer {access_token}"))
         .map_err(|e| OAuthDispatchError::Upstream {
             status: None,
+            retry_after_secs: None,
             message: format!("Authorization header 构造失败: {e}"),
         })?;
     headers.insert(reqwest::header::AUTHORIZATION, auth_value);
@@ -838,15 +849,17 @@ pub async fn dispatch_kiro_attempt(
         Err(upstream::UpstreamError::Reqwest(e)) => {
             return Err(OAuthDispatchError::Upstream {
                 status: None,
+                retry_after_secs: None,
                 message: format!("Kiro 网络错误: {}", upstream::describe_error(&e)),
             });
         }
     };
     let (status, resp_headers, stream) = match upstream_response {
         upstream::UpstreamResponse::Streaming { status, headers, stream } => (status, headers, stream),
-        upstream::UpstreamResponse::NonStreaming { status, body_text, .. } => {
+        upstream::UpstreamResponse::NonStreaming { status, headers, body_text, .. } => {
             return Err(OAuthDispatchError::Upstream {
                 status: Some(status.as_u16()),
+                retry_after_secs: upstream::retry_after_secs(&headers),
                 message: body_text.unwrap_or_else(|| format!("HTTP {}", status.as_u16())),
             });
         }
@@ -864,6 +877,7 @@ pub async fn dispatch_kiro_attempt(
         }
         return Err(OAuthDispatchError::Upstream {
             status: Some(status.as_u16()),
+            retry_after_secs: upstream::retry_after_secs(&resp_headers),
             message: buf,
         });
     }
@@ -1246,7 +1260,7 @@ pub fn build_error_response(err: &OAuthDispatchError) -> Response {
             Json(error_body("oauth_auth_failed", msg)),
         )
             .into_response(),
-        OAuthDispatchError::Upstream { status, message } => {
+        OAuthDispatchError::Upstream { status, message, retry_after_secs: _ } => {
             let code = status
                 .and_then(|s| StatusCode::from_u16(s).ok())
                 .unwrap_or(StatusCode::BAD_GATEWAY);

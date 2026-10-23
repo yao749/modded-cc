@@ -1,4 +1,4 @@
-﻿//! `POST /v1/systemone`: Jev (System One 决策协议) 的多上游网关。
+//! `POST /v1/systemone`: Jev (System One 决策协议) 的多上游网关。
 //!
 //! 协议原样透传、不翻译; 只服务 `model-jev` 虚拟模型, 只调度端点协议为 systemone 的订阅。
 //! 候选循环 [`run_candidates`] 不碰 `AppState`: 发请求 / 状态机 / 日志都经 [`AttemptSink`]
@@ -147,7 +147,9 @@ pub fn probe_body(model: &str) -> Value {
 
 #[derive(Debug, Clone)]
 pub enum AttemptResult {
-    Http { status: StatusCode, body: Value, body_text: Option<String> },
+    /// `retry_after_secs`: 上游响应头 Retry-After 解析结果 (已 clamp [30s, 2h]),
+    /// 只有真正收到 HTTP 响应才有; 本地构造的错误 (如 detail_result) 为 None。
+    Http { status: StatusCode, body: Value, body_text: Option<String>, retry_after_secs: Option<u64> },
     Network(String),
 }
 
@@ -163,7 +165,7 @@ fn error_type_for(status: StatusCode) -> &'static str {
 fn detail_result(status: StatusCode, error_type: &str, message: &str) -> AttemptResult {
     let body = error_body(error_type, message);
     let body_text = Some(body.to_string());
-    AttemptResult::Http { status, body, body_text }
+    AttemptResult::Http { status, body, body_text, retry_after_secs: None }
 }
 
 /// Map an upstream reply onto the standard System One shape (spec 2.1 / 3.3).
@@ -174,7 +176,7 @@ pub fn normalize_response(wire: SystemoneWire, r: AttemptResult) -> AttemptResul
                 // `success: false` is a failure even on 2xx; a missing flag counts as success.
                 let flagged_ok = body.get("success") != Some(&Value::Bool(false));
                 if let Some(result) = body.get("result").filter(|v| flagged_ok && v.is_object()) {
-                    return AttemptResult::Http { status, body: result.clone(), body_text: None };
+                    return AttemptResult::Http { status, body: result.clone(), body_text: None, retry_after_secs: None };
                 }
                 warn!(
                     status = status.as_u16(),
@@ -240,7 +242,7 @@ pub async fn run_candidates<S: AttemptSink + Send>(cands: &[Candidate], sink: &m
         let r = sink.send(c).await;
         sink.record(c, &r, retry_count).await;
         match r {
-            AttemptResult::Http { status, body, body_text } => {
+            AttemptResult::Http { status, body, body_text, .. } => {
                 if let ShouldRetry::No = classify_response(status.as_u16(), None) {
                     return LoopEnd::Done { index, status, body };
                 }
@@ -258,7 +260,10 @@ pub async fn run_candidates<S: AttemptSink + Send>(cands: &[Candidate], sink: &m
 pub fn state_event(r: &AttemptResult) -> state_machine::Event {
     match r {
         AttemptResult::Http { status, .. } if status.is_success() => state_machine::Event::RequestSucceeded,
-        AttemptResult::Http { status, .. } => state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: None },
+        AttemptResult::Http { status, retry_after_secs, .. } => state_machine::Event::HttpStatus {
+            status: status.as_u16(),
+            retry_after_secs: *retry_after_secs,
+        },
         AttemptResult::Network(_) => state_machine::Event::NetworkError,
     }
 }
@@ -293,7 +298,7 @@ pub fn log_entry(
     latency_ms: u64,
 ) -> RequestLogEntry {
     let (status, http_status, response_model_name, input, output, error_message, upstream_body) = match r {
-        AttemptResult::Http { status, body, body_text } => {
+        AttemptResult::Http { status, body, body_text, .. } => {
             let ok = status.is_success();
             (
                 if ok { RequestStatus::Success } else { RequestStatus::Error },
@@ -378,8 +383,13 @@ impl AttemptSink for LiveSink<'_> {
             )
             .await;
             let r = match result {
-                Ok(upstream::UpstreamResponse::NonStreaming { status, body, body_text, .. }) => {
-                    AttemptResult::Http { status, body, body_text }
+                Ok(upstream::UpstreamResponse::NonStreaming { status, headers, body, body_text, .. }) => {
+                    AttemptResult::Http {
+                        status,
+                        body,
+                        body_text,
+                        retry_after_secs: upstream::retry_after_secs(&headers),
+                    }
                 }
                 // is_streaming=false 时 upstream::send 不会返回 Streaming; 保守地当网络错误处理。
                 Ok(upstream::UpstreamResponse::Streaming { .. }) => {
@@ -746,7 +756,7 @@ mod tests {
     fn http(status: u16, body: Value) -> AttemptResult {
         let status = StatusCode::from_u16(status).unwrap();
         let body_text = (!status.is_success()).then(|| body.to_string());
-        AttemptResult::Http { status, body, body_text }
+        AttemptResult::Http { status, body, body_text, retry_after_secs: None }
     }
 
     fn ok_body() -> Value {
@@ -832,7 +842,7 @@ mod tests {
     fn cloudflare_success_envelope_is_unwrapped() {
         // spec 2.1 real bytes
         let body = serde_json::json!({"result":{"model":"clef-flash","answers":{"refund":{"type":"noul","noul":0.9803}},"usage":{"input_tokens":160,"output_tokens":0}},"success":true,"errors":[],"messages":[]});
-        let AttemptResult::Http { status, body, body_text } = normalize_response(SystemoneWire::CloudflareRun, http(200, body)) else { panic!() };
+        let AttemptResult::Http { status, body, body_text, retry_after_secs: None } = normalize_response(SystemoneWire::CloudflareRun, http(200, body)) else { panic!() };
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["answers"]["refund"]["noul"], 0.9803);
         assert_eq!(body["usage"]["input_tokens"], 160);
@@ -852,7 +862,7 @@ mod tests {
         ];
         for (status, code, msg, ty) in cases {
             let body = serde_json::json!({"errors":[{"message":msg,"code":code}],"success":false,"result":{},"messages":[]});
-            let AttemptResult::Http { status: s, body, body_text } = normalize_response(SystemoneWire::CloudflareRun, http(status, body)) else { panic!() };
+            let AttemptResult::Http { status: s, body, body_text, retry_after_secs: None } = normalize_response(SystemoneWire::CloudflareRun, http(status, body)) else { panic!() };
             assert_eq!(s.as_u16(), status);
             assert_eq!(body["detail"]["error_type"], ty);
             assert_eq!(body["detail"]["message"], format!("{msg} (cloudflare code {code})"));
@@ -877,7 +887,7 @@ mod tests {
     #[test]
     fn cloudflare_2xx_with_success_false_is_an_error() {
         let body = serde_json::json!({"success":false,"errors":[{"message":"AiError: something","code":5007}],"result":{},"messages":[]});
-        let AttemptResult::Http { status, body, body_text } = normalize_response(SystemoneWire::CloudflareRun, http(200, body)) else { panic!() };
+        let AttemptResult::Http { status, body, body_text, retry_after_secs: None } = normalize_response(SystemoneWire::CloudflareRun, http(200, body)) else { panic!() };
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["detail"]["error_type"], "api_error");
         assert_eq!(body["detail"]["message"], "AiError: something (cloudflare code 5007)");
