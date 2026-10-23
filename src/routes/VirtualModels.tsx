@@ -12,7 +12,7 @@ import { ProviderLogo } from "@/components/ProviderLogo";
 import { SortableSubscriptionList } from "@/components/SortableSubscriptionList";
 import { StarPrompt } from "@/components/StarPrompt";
 import { useSubscriptions } from "@/hooks/useSubscriptions";
-import { useProxyStatus } from "@/hooks/useSettings";
+import { useProxyStatus, useSettings } from "@/hooks/useSettings";
 import { useVirtualModels, useUpdateVirtualModel } from "@/hooks/useVirtualModels";
 import { isAnthropicPassthrough } from "@/lib/authTypes";
 import { customProviderLabel } from "@/lib/providerLabels";
@@ -32,6 +32,9 @@ export function VirtualModelsPage() {
   const { t } = useT();
   const subs = useSubscriptions();
   const vms = useVirtualModels();
+  // 路由模式决定这页只展示哪一套虚拟模型 (后端 list_virtual_models 已按模式过滤)
+  const settingsQuery = useSettings();
+  const poolMode = (settingsQuery.data?.routing_mode ?? "slots") === "pool";
 
   const subsMap = useMemo(() => {
     const m = new Map<string, SubscriptionDto>();
@@ -53,9 +56,15 @@ export function VirtualModelsPage() {
         <div className="page-header" style={{ marginBottom: 0 }}>
           <h1>{t("virtualModels.title")}</h1>
           <div className="subtitle">
-            {t("virtualModels.subtitle1")}
-            <span className="mono" style={{ color: "var(--ink-2)" }}> model-fallback</span>
-            {t("virtualModels.subtitle2")}
+            {poolMode ? (
+              t("virtualModels.poolSubtitle")
+            ) : (
+              <>
+                {t("virtualModels.subtitle1")}
+                <span className="mono" style={{ color: "var(--ink-2)" }}> model-fallback</span>
+                {t("virtualModels.subtitle2")}
+              </>
+            )}
           </div>
         </div>
         {/* 手写批注: 指向下方可拖拽排序的订阅行 */}

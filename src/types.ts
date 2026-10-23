@@ -656,6 +656,12 @@ export interface Settings {
   web_ui_auth_enabled: boolean;
   /** 终端界面 (cc-router-tui) 是否允许接入. 默认关, 与 web_ui_enabled 互相独立 */
   tui_enabled: boolean;
+  /**
+   * 路由模式: "slots" = 旧四槽 (fable/opus/sonnet/haiku), "pool" = 能力分类模型池。
+   * 与 `RoutingMode` (sequential/round_robin/sticky 调度策略) 是两个不相干的概念。
+   * 两套数据共存, 切模式只翻门禁: pipeline 与 /v1/models 都按它过滤。每请求读取, 即时生效。
+   */
+  routing_mode: GlobalRoutingMode;
   /** 导出用量小票时是否播放「小票机吐纸」动画, 默认 true */
   receipt_print_animation: boolean;
   /** 上次关闭「更新内容」弹窗时的 app 版本; null = 从没有此功能的老版本升上来。只读, 由 mark_release_notes_seen 写 */
@@ -663,6 +669,12 @@ export interface Settings {
 }
 
 export type UpdateSource = "international" | "china";
+
+/**
+ * 全局路由模式 (settings.routing_mode): 同一时刻只有一套生效。
+ * "slots" = 旧四槽体系; "pool" = 能力分类模型池。两套数据都保留, 切换只影响门禁与清单。
+ */
+export type GlobalRoutingMode = "slots" | "pool";
 
 export interface SettingsPatch {
   proxy_port?: number;
@@ -684,6 +696,7 @@ export interface SettingsPatch {
   web_ui_enabled?: boolean;
   web_ui_auth_enabled?: boolean;
   tui_enabled?: boolean;
+  routing_mode?: GlobalRoutingMode;
   receipt_print_animation?: boolean;
   // 注意: auth_token 不在 patch 里,必须通过 generateNewToken() 改
 }

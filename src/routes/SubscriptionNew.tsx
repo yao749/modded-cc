@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useProviders } from "@/hooks/useProviders";
+import { useSettings } from "@/hooks/useSettings";
 import { useCreateSubscription } from "@/hooks/useSubscriptions";
 import { useVirtualModels } from "@/hooks/useVirtualModels";
 import { useT } from "@/i18n";
@@ -178,6 +179,9 @@ export function SubscriptionNewPage() {
   const providers = useProviders();
   const createMut = useCreateSubscription();
   const vms = useVirtualModels();
+  // 全局路由模式: pool 模式下新建订阅仍填四槽, 但真正生效的是订阅详情里的能力分类池
+  const settingsQuery = useSettings();
+  const poolMode = (settingsQuery.data?.routing_mode ?? "slots") === "pool";
 
   const [importOpen, setImportOpen] = useState(false);
   const onboardingDoneByImportRef = useRef(false);
@@ -1170,6 +1174,11 @@ export function SubscriptionNewPage() {
                     点「获取模型列表」探测成功变下拉, 没点 / 失败就是手动输入 */}
                 {isCustom && (
                   <div style={{ marginBottom: 24 }}>
+                    {poolMode && !isSystemOne && (
+                      <div className="field-hint" style={{ marginTop: 0, marginBottom: 12 }}>
+                        {t("subscriptionNew.poolModeHint")}
+                      </div>
+                    )}
                     <div className="field-hint" style={{ marginTop: 0, marginBottom: 12 }}>
                       {t(isSystemOne ? "subscriptionNew.customSystemoneSlotsHint" : "subscriptionNew.slotsHint")}
                     </div>
@@ -1269,6 +1278,11 @@ export function SubscriptionNewPage() {
 
             {step === 2 && provider && (
               <>
+                {poolMode && !isSystemOne && (
+                  <div className="field-hint" style={{ marginTop: 0, marginBottom: 12 }}>
+                    {t("subscriptionNew.poolModeHint")}
+                  </div>
+                )}
                 <ModelSlotPicker
                   value={slots}
                   onChange={setSlots}

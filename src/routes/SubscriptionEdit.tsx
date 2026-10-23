@@ -34,6 +34,7 @@ import { api } from "@/api/tauri";
 import { KeyValueEditor, type KeyValueRow } from "@/components/KeyValueEditor";
 import { validateConnection, validateRequiredHeaders } from "@/lib/connectionValidation";
 import { useProviders } from "@/hooks/useProviders";
+import { useSettings } from "@/hooks/useSettings";
 import {
   useDeleteSubscription,
   useSetSubscriptionEnabled,
@@ -116,8 +117,9 @@ export function SubscriptionEditPage() {
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
-  /** 模型配置面板 Tab 切换: slot = 旧四槽, pool = 能力分类模型池 */
-  const [modelPanelMode, setModelPanelMode] = useState<"slot" | "pool">("slot");
+  // 全局路由模式决定展示哪套面板 (系统一订阅始终四槽): 与 pipeline 门禁同源, 避免编辑到会被拒的那套
+  const settingsQuery = useSettings();
+  const routingMode = settingsQuery.data?.routing_mode ?? "slots";
 
   // 能力分类模型池
   const poolQuery = useQuery({
@@ -541,44 +543,10 @@ export function SubscriptionEditPage() {
               <CardHeader>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%" }}>
                   <CardTitle>{t("subscriptionEdit.modelSlotsTitle")}</CardTitle>
-                  {!isSystemOne && (
-                    <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-2)" }}>
-                      <button
-                        type="button"
-                        onClick={() => setModelPanelMode("slot")}
-                        style={{
-                          padding: "4px 12px",
-                          fontSize: 12,
-                          fontWeight: modelPanelMode === "slot" ? 600 : 400,
-                          background: modelPanelMode === "slot" ? "var(--accent, #3b82f6)" : "transparent",
-                          color: modelPanelMode === "slot" ? "#fff" : "var(--ink)",
-                          border: "none",
-                          cursor: "pointer",
-                        }}
-                      >
-                        四槽模式
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setModelPanelMode("pool")}
-                        style={{
-                          padding: "4px 12px",
-                          fontSize: 12,
-                          fontWeight: modelPanelMode === "pool" ? 600 : 400,
-                          background: modelPanelMode === "pool" ? "var(--accent, #3b82f6)" : "transparent",
-                          color: modelPanelMode === "pool" ? "#fff" : "var(--ink)",
-                          border: "none",
-                          cursor: "pointer",
-                        }}
-                      >
-                        能力分类池
-                      </button>
-                    </div>
-                  )}
                 </div>
               </CardHeader>
               <CardContent>
-                {modelPanelMode === "slot" || isSystemOne ? (
+                {routingMode !== "pool" || isSystemOne ? (
                   <>
                     <ModelSlotPicker
                       value={slots}
@@ -617,11 +585,10 @@ export function SubscriptionEditPage() {
                       className="mt-3 text-xs text-muted-foreground"
                       style={{ lineHeight: 1.6 }}
                     >
-                      <b>两套体系说明：</b>此面板与四槽模式是两套独立的路由体系, 互不干扰。客户端请求
+                      <b>能力分类池：</b>客户端请求
                       <code>model-vision</code> / <code>model-llm</code> / <code>model-multimodal</code> /
                       <code>model-speech</code> / <code>model-embedding</code>
-                      会使用对应的能力分类池。请求 <code>model-fable</code> / <code>model-sonnet</code> 等旧四槽名则走四槽配置。
-                      切换面板只是改变编辑视图, 两边的数据都会保留并一起保存。
+                      会使用这里的配置。当前路由模式为「能力分类池」，四槽配置仍保存在库里，切换回四槽模式即可恢复。
                     </div>
                   </>
                 )}

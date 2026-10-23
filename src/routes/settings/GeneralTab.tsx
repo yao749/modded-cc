@@ -9,10 +9,11 @@ import {
 import { useT, type LanguagePref } from "@/i18n";
 import { useTheme, type ColorMode } from "@/hooks/useTheme";
 import { THEMES } from "@/themes";
-import type { UpdateSource } from "@/types";
+import type { GlobalRoutingMode, UpdateSource } from "@/types";
 import type { SettingsForm } from "./useSettingsForm";
 
 const COLOR_MODES: readonly ColorMode[] = ["system", "light", "dark"];
+const ROUTING_MODES: readonly GlobalRoutingMode[] = ["slots", "pool"];
 
 /** 通用: 语言 / 开机自启 / 更新源, 外观 (界面主题 / 明暗模式). */
 export function GeneralTab({ form }: { form: SettingsForm }) {
@@ -21,6 +22,51 @@ export function GeneralTab({ form }: { form: SettingsForm }) {
 
   return (
     <>
+      {/* 路由模式: 同一时刻只有一套生效, 另一套配置原样保留 */}
+      <div className="card section">
+        <div className="card-head">
+          <div className="card-title">{t("settings.section.routing")}</div>
+        </div>
+        <div className="card-body">
+          <div className="setting-row">
+            <div className="label-col">
+              {t("settings.routing.label")}
+              <div className="desc">{t("settings.routing.desc")}</div>
+            </div>
+            <div
+              className="radio-group"
+              role="radiogroup"
+              aria-label={t("settings.routing.label")}
+              style={{ display: "flex", maxWidth: 360 }}
+            >
+              {ROUTING_MODES.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={form.routingMode === m ? "on" : ""}
+                  onClick={() => void form.changeRoutingMode(m)}
+                  role="radio"
+                  aria-checked={form.routingMode === m}
+                  style={{ flex: 1 }}
+                >
+                  {t(`settings.routing.${m}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="setting-row">
+            <div
+              className="text-xs text-muted-foreground"
+              style={{ gridColumn: "1 / -1", lineHeight: 1.6 }}
+            >
+              {t(form.routingMode === "pool" ? "settings.routing.poolDesc" : "settings.routing.slotsDesc")}
+              <br />
+              {t("settings.routing.hint")}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="card section">
         <div className="card-head">
           <div className="card-title">{t("settings.section.language")}</div>
