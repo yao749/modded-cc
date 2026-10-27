@@ -78,14 +78,12 @@ pub async fn dispatch_gemini_interactions_attempt(
     let translated_body = anthropic_to_interactions(request_body, &real_model, &extras).map_err(
         |e| OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("body 翻译失败: {e}"),
         },
     )?;
     let body_bytes = serde_json::to_vec(&translated_body).map_err(|e| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("body 序列化失败: {e}"),
         }
     })?;
@@ -99,14 +97,12 @@ pub async fn dispatch_gemini_interactions_attempt(
     let auth_name = ReqHeaderName::try_from(header_name.as_str()).map_err(|_| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("auth header name {:?} 含非法字符", header_name),
         }
     })?;
     let auth_value = ReqHeaderValue::from_str(&api_key).map_err(|_| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: "API key 含非 ASCII 可见字符, 无法构造 header".into(),
         }
     })?;
@@ -158,7 +154,6 @@ pub async fn dispatch_gemini_interactions_attempt(
         Err(upstream::UpstreamError::Reqwest(e)) => {
             return Err(OAuthDispatchError::Upstream {
                 status: None,
-                retry_after_secs: None,
                 message: format!("网络错误: {}", upstream::describe_error(&e)),
             });
         }
@@ -168,7 +163,7 @@ pub async fn dispatch_gemini_interactions_attempt(
         upstream::UpstreamResponse::Streaming { status, headers, stream } => {
             (status, headers, stream)
         }
-        upstream::UpstreamResponse::NonStreaming { status, headers, body_text, .. } => {
+        upstream::UpstreamResponse::NonStreaming { status, body_text, .. } => {
             // 流式请求遇非 2xx 时 upstream::send 降级为 NonStreaming, body_text 带上游完整错误体。
             let message = body_text.unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
             if let Some(tx) = body_dump_tx.as_ref() {
@@ -180,7 +175,6 @@ pub async fn dispatch_gemini_interactions_attempt(
             }
             return Err(OAuthDispatchError::Upstream {
                 status: Some(status.as_u16()),
-                retry_after_secs: upstream::retry_after_secs(&headers),
                 message,
             });
         }
@@ -198,7 +192,6 @@ pub async fn dispatch_gemini_interactions_attempt(
         }
         return Err(OAuthDispatchError::Upstream {
             status: Some(status.as_u16()),
-            retry_after_secs: upstream::retry_after_secs(&resp_headers),
             message: buf,
         });
     }

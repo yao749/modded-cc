@@ -3,7 +3,7 @@ import { useProxyStatus, useRestartProxy, useSettings, useUpdateSettings } from 
 import { useT, type LanguagePref } from "@/i18n";
 import { webRestartWarning, webUrlAfterRestart } from "@/lib/proxyRestart";
 import { runtime } from "@/runtime";
-import type { GlobalRoutingMode, ProxyMode, RestartProxyResult, UpdateSource } from "@/types";
+import type { ProxyMode, RestartProxyResult, UpdateSource } from "@/types";
 import { errorText } from "@/lib/errorText";
 
 export function arraysEqual<T>(a: readonly T[], b: readonly T[]): boolean {
@@ -43,7 +43,6 @@ export function useSettingsForm() {
   const [webUiEnabled, setWebUiEnabled] = useState(false);
   const [webUiAuthEnabled, setWebUiAuthEnabled] = useState(true);
   const [tuiEnabled, setTuiEnabled] = useState(false);
-  const [routingMode, setRoutingMode] = useState<GlobalRoutingMode>("slots");
 
   // 仅在首次拿到 settings.data 时灌入本地 state. 后续 mutate refetch
   // 不再回灌, 否则会覆盖用户正在 input 里编辑但尚未 blur 的值 (port/cors origin 跳光标).
@@ -67,7 +66,6 @@ export function useSettingsForm() {
     setWebUiEnabled(settings.data.web_ui_enabled);
     setWebUiAuthEnabled(settings.data.web_ui_auth_enabled);
     setTuiEnabled(settings.data.tui_enabled);
-    setRoutingMode(settings.data.routing_mode ?? "slots");
     initializedRef.current = true;
   }, [settings.data]);
 
@@ -98,6 +96,10 @@ export function useSettingsForm() {
   }
   async function changeUpdateSource(next: UpdateSource) {
     await patch({ update_source: next });
+  }
+  // 与更新源一样不留本地副本: 更新页也有同一个开关, 两边都读 settings 缓存
+  async function changeAutoCheckUpdates(next: boolean) {
+    await patch({ auto_check_updates: next });
   }
   // 调试模式即时生效:pipeline 每次出站读 settings.debug_mode 决定是否落盘.
   async function changeDebugMode(next: boolean) {
@@ -155,11 +157,6 @@ export function useSettingsForm() {
   async function changeTuiEnabled(next: boolean) {
     setTuiEnabled(next);
     await patch({ tui_enabled: next });
-  }
-  // 即时生效: pipeline / /v1/models 每请求读 settings.routing_mode。
-  async function changeRoutingMode(next: GlobalRoutingMode) {
-    setRoutingMode(next);
-    await patch({ routing_mode: next });
   }
   async function changeCorsEnabled(next: boolean) {
     setCorsEnabled(next);
@@ -224,9 +221,9 @@ export function useSettingsForm() {
     webUiEnabled,
     webUiAuthEnabled,
     tuiEnabled,
-    routingMode,
     changeLanguage,
     changeUpdateSource,
+    changeAutoCheckUpdates,
     changeDebugMode,
     changeListenAll,
     changeMaxBodyMb,
@@ -240,7 +237,6 @@ export function useSettingsForm() {
     changeWebUiEnabled,
     changeWebUiAuthEnabled,
     changeTuiEnabled,
-    changeRoutingMode,
     changeCorsEnabled,
     changeCorsOrigin,
   };

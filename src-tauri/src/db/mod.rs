@@ -117,6 +117,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         27,
         include_str!("../../migrations/027_add_routing_group.sql"),
     ),
+    (
+        28,
+        include_str!("../../migrations/028_add_slot_schedules.sql"),
+    ),
 ];
 
 pub async fn init_pool(db_path: &Path) -> AppResult<SqlitePool> {
@@ -408,8 +412,7 @@ mod tests {
         run_migrations(&pool).await.expect("migrate fresh");
 
         let versions = applied_versions(&pool).await;
-        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
-        assert_eq!(versions, expected);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
         assert!(!has_column(&pool, "subscriptions", "supports_thinking_blocks").await);
         assert!(!has_column(&pool, "subscriptions", "thinking_block_field_name").await);
         assert!(has_column(&pool, "requests", "upstream_response_body").await);
@@ -435,6 +438,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(jev.0, 1);
+        // v25: 槽位分时段规则
+        assert!(has_column(&pool, "subscriptions", "slot_schedules").await);
         // v24: 订阅 url_params + systemone_wire
         assert!(has_column(&pool, "subscriptions", "url_params").await);
         assert!(has_column(&pool, "subscriptions", "systemone_wire").await);
@@ -451,48 +456,6 @@ mod tests {
         assert!(has_column(&pool, "request_stats_daily", "tool_use_request_count").await);
         assert!(has_column(&pool, "request_stats_daily", "tool_result_count").await);
         assert!(has_table(&pool, "tool_stats_daily").await);
-        // v25/26: 能力分类模型池 + per-model 输入模态
-        assert!(has_table(&pool, "subscription_model_pool").await);
-        assert!(has_column(&pool, "subscription_model_pool", "supported_inputs").await);
-    }
-
-    /// 回归测试: migrations/ 目录下的每个 .sql 文件都必须登记在 MIGRATIONS 数组里,
-    /// 且版本号连续无空洞。曾因 025/026 只落了文件忘了注册, 导致线上
-    /// `no such table: subscription_model_pool` — 此后由本测试守住。
-    #[test]
-    fn every_migration_file_is_registered() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-        let mut on_disk: Vec<u32> = std::fs::read_dir(&dir)
-            .expect("read migrations dir")
-            .filter_map(|e| e.ok())
-            .filter_map(|e| Some(e.file_name().to_str()?.to_string()))
-            .filter_map(|name| {
-                name.strip_suffix(".sql")
-                    .and_then(|stem| stem.split('_').next())
-                    .and_then(|v| v.parse::<u32>().ok())
-            })
-            .collect();
-        on_disk.sort_unstable();
-        on_disk.dedup();
-
-        let registered: Vec<u32> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
-
-        let missing: Vec<u32> = on_disk
-            .iter()
-            .copied()
-            .filter(|v| !registered.contains(v))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "migrations/ 里有文件没登记进 MIGRATIONS (db/mod.rs): {missing:?} — 启动时不会执行, 会出现 no such table"
-        );
-
-        // 版本号必须从 1 连续递增
-        let expected: Vec<u32> = (1..=on_disk.len() as u32).collect();
-        assert_eq!(
-            on_disk, expected,
-            "migrations/ 版本号不连续或有重号 — 补请按 next_version 顺序追加"
-        );
     }
 
     #[tokio::test]
@@ -507,8 +470,7 @@ mod tests {
         run_migrations(&pool).await.expect("migrate legacy");
 
         let versions = applied_versions(&pool).await;
-        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
-        assert_eq!(versions, expected); // baseline v=1, 然后跑增量
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]); // baseline v=1, 然后跑增量
         assert!(!has_column(&pool, "subscriptions", "supports_thinking_blocks").await);
         assert!(!has_column(&pool, "subscriptions", "thinking_block_field_name").await);
         assert!(has_column(&pool, "requests", "upstream_response_body").await);
@@ -524,8 +486,7 @@ mod tests {
         run_migrations(&pool).await.expect("third run");
 
         let versions = applied_versions(&pool).await;
-        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
-        assert_eq!(versions, expected); // 没有重复写
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]); // 没有重复写
     }
 
     /// 在 v4 schema 状态下插一条订阅 (含已 v7 移除的 supports_thinking_blocks 列)。
@@ -589,8 +550,10 @@ mod tests {
 
         assert!(has_table(&pool, "subscriptions").await);
         assert!(!has_table(&pool, "subscriptions_new").await);
-        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
-        assert_eq!(applied_versions(&pool).await, expected);
+        assert_eq!(
+            applied_versions(&pool).await,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+        );
 
         let count: (i64,) =
             sqlx::query_as("SELECT count(*) FROM subscriptions WHERE provider_id='deepseek'")
@@ -990,6 +953,57 @@ mod tests {
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_requests_latency'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(has_idx, 0, "idx_requests_latency 不应被创建 (p95 查询用不上, 只加写入开销)");
+    }
+
+    /// 确保 migrations/ 目录下每个 .sql 文件都在 MIGRATIONS 数组里注册了,
+    /// 且版本号是 1..=N 连续的。防止新增 SQL 文件后忘记注册, 或者版本号重复/跳号。
+    #[test]
+    fn every_migration_file_is_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations");
+
+        let mut files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read migrations dir {:?}: {e}", dir))
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|f| f.ends_with(".sql"))
+            .collect();
+        files.sort();
+
+        let registered: std::collections::HashSet<u32> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let max_v = *registered.iter().max().unwrap();
+
+        // 1. 每个 .sql 文件都有对应的 (version, _) 条目
+        for fname in &files {
+            let stem = fname.trim_end_matches(".sql");
+            let v: u32 = stem
+                .split('_')
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or_else(|_| panic!("cannot parse version from {fname}"));
+            assert!(
+                registered.contains(&v),
+                "migration file {fname} 未在 MIGRATIONS 数组注册"
+            );
+        }
+
+        // 2. MIGRATIONS 里没有重复/跳号
+        for v in 1..=max_v {
+            assert!(
+                registered.contains(&v),
+                "MIGRATIONS 数组缺少版本号 {v} (跳号)"
+            );
+        }
+
+        // 3. 数量一致 (不多不少)
+        assert_eq!(
+            files.len(),
+            MIGRATIONS.len(),
+            "migrations/ 文件数 ({}) != MIGRATIONS 注册数 ({})",
+            files.len(),
+            MIGRATIONS.len()
+        );
     }
 }
 

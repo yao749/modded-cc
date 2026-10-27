@@ -175,9 +175,9 @@ export interface ProviderInfo {
   };
   /**
    * 顶层的 display_name / description / compatibility_notes / endpoints[].label / .description 是中文,
-   * 英日文在这里 (后端保证三语齐全)。界面里不要直接读, 走 useProviders() —— 它已经按界面语言换好了。
+   * 繁中 / 英 / 日文在这里 (后端保证四语齐全)。界面里不要直接读, 走 useProviders() —— 它已经按界面语言换好了。
    */
-  translations: Record<"en" | "ja", ProviderText>;
+  translations: Record<"zh-Hant" | "en" | "ja", ProviderText>;
   url_params: UrlParamInfo[];
 }
 
@@ -191,8 +191,8 @@ export interface ProviderText {
   url_params: Record<string, { label: string; placeholder?: string }>;
 }
 
-/** 后端 provider::model::LocalizedText: 三语各一份。 */
-export type LocalizedText = Record<"zh" | "en" | "ja", string>;
+/** 后端 provider::model::LocalizedText: 四语各一份。 */
+export type LocalizedText = Record<"zh" | "zh-Hant" | "en" | "ja", string>;
 
 export interface ModelSlots {
   fable: string;
@@ -229,6 +229,35 @@ export interface SlotEfforts {
   opus?: SlotEffort;
   sonnet?: SlotEffort;
   haiku?: SlotEffort;
+}
+
+/** 四个可调度的模型槽位 (不含 jev / fallback)。 */
+export type FourSlot = "fable" | "opus" | "sonnet" | "haiku";
+
+/**
+ * 槽位分时段规则。days 是 ISO 星期 (1=周一..7=周日), 指规则「开始」那天;
+ * start > end 表示跨零点; end 可为 "24:00"。与 Rust `ScheduleRule` 对齐。
+ */
+export interface ScheduleRule {
+  days: number[];
+  start: string;
+  end: string;
+  model: string;
+  /** 这条时段生效时的思考强度; 缺失 = 跟随槽位 (`slot_efforts`)。与 Rust `ScheduleRule.effort` 对齐。 */
+  effort?: SlotEffort;
+}
+
+/** 每槽位的规则列表; 空列表的 key 后端不返回。与 Rust `SlotSchedules` 对齐。 */
+export type SlotSchedules = Partial<Record<FourSlot, ScheduleRule[]>>;
+
+/** 各槽位此刻生效的模型 (宿主机时钟); 未配置 / 空白为 null。 */
+export type SlotModelsNow = Record<FourSlot, string | null>;
+
+/** 宿主机本地时钟: weekday 1(周一)..7(周日), minute 0..1439。 */
+export interface HostClockDto {
+  weekday: number;
+  minute: number;
+  epoch_ms: number;
 }
 
 export type QuotaPeriod = "daily" | "weekly" | "monthly" | "total";
@@ -395,6 +424,10 @@ export interface SubscriptionDto {
   slot_efforts: SlotEfforts;
   /** 每周期 token 限额。字段缺失 = 该周期不限。后端总是带这个 key (可以是 {})。 */
   token_quotas: TokenQuotas;
+  /** 每槽位分时段模型规则。后端总是带这个 key (可以是 {})。 */
+  slot_schedules: SlotSchedules;
+  /** 各槽位此刻生效的模型 (宿主机时钟求值), 四个 key 总是都在。 */
+  slot_models_now: SlotModelsNow;
   /** 四周期用量快照, 固定按 daily/weekly/monthly/total 顺序返回 4 条。 */
   quota_usage: QuotaUsageDto[];
   enabled: boolean;
@@ -437,7 +470,7 @@ export interface SubscriptionDto {
   balance_cache?: BalanceCacheDto;
   /** 创建时写进 DB 的厂商名快照 (中文); 显示走 lib/providerText.ts::providerName。 */
   provider_display_name: string;
-  /** 内置厂商的三语名字 (后端按 yaml 现查); 自定义订阅与 yaml 已删的厂商没有。 */
+  /** 内置厂商的四语名字 (后端按 yaml 现查); 自定义订阅与 yaml 已删的厂商没有。 */
   provider_names?: LocalizedText;
   provider_icon: string;
   is_user_defined: boolean;
@@ -640,8 +673,8 @@ export interface Settings {
   cors_enabled: boolean;
   /** Access-Control-Allow-Origin 值,默认 "*" */
   cors_allow_origin: string;
-  /** 前端 UI 语言偏好: "system" 跟随系统 / "zh" / "en" / "ja"。默认 system */
-  preferred_language: "system" | "zh" | "en" | "ja";
+  /** 前端 UI 语言偏好: "system" 跟随系统 / "zh" / "zh-Hant" / "en" / "ja"。默认 system */
+  preferred_language: "system" | "zh" | "zh-Hant" | "en" | "ja";
   /**
    * 更新源选择: null=未设置(走 tauri.conf.json 默认 GitHub),
    * "international"=国际(GitHub) / "china"=中国大陆(阿里云 OSS)。
@@ -670,6 +703,8 @@ export interface Settings {
   routing_mode: GlobalRoutingMode;
   /** 导出用量小票时是否播放「小票机吐纸」动画, 默认 true */
   receipt_print_animation: boolean;
+  /** 启动时是否自动检查新版本, 默认 true; 关闭后只能手动检查 */
+  auto_check_updates: boolean;
   /** 上次关闭「更新内容」弹窗时的 app 版本; null = 从没有此功能的老版本升上来。只读, 由 mark_release_notes_seen 写 */
   last_seen_release_notes: string | null;
 }
@@ -695,7 +730,7 @@ export interface SettingsPatch {
   auth_enabled?: boolean;
   cors_enabled?: boolean;
   cors_allow_origin?: string;
-  preferred_language?: "system" | "zh" | "en" | "ja";
+  preferred_language?: "system" | "zh" | "zh-Hant" | "en" | "ja";
   update_source?: UpdateSource;
   debug_mode?: boolean;
   max_request_body_mb?: number;
@@ -704,6 +739,7 @@ export interface SettingsPatch {
   tui_enabled?: boolean;
   routing_mode?: GlobalRoutingMode;
   receipt_print_animation?: boolean;
+  auto_check_updates?: boolean;
   // 注意: auth_token 不在 patch 里,必须通过 generateNewToken() 改
 }
 
@@ -1106,7 +1142,7 @@ export interface ClaudeCodeWriteOutcome {
 }
 
 // === 更新内容 (src-tauri/src/release_notes) ===
-export type NotesLang = "zh" | "en" | "ja";
+export type NotesLang = "zh" | "zh-Hant" | "en" | "ja";
 
 export type NotesInline =
   | { kind: "text"; text: string }
@@ -1135,8 +1171,8 @@ export interface VersionNotes {
   version: string;
   date: string | null;
   codename: string | null;
-  /** zh 必有, en / ja 可缺 */
-  notes: { zh: NotesDoc } & Partial<Record<"en" | "ja", NotesDoc>>;
+  /** zh 必有, zh-Hant / en / ja 可缺 */
+  notes: { zh: NotesDoc } & Partial<Record<"zh-Hant" | "en" | "ja", NotesDoc>>;
 }
 
 export interface ReleaseNotesDto {

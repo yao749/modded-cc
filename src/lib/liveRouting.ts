@@ -14,12 +14,11 @@ export const CLIENT_ALIASES: Record<VirtualModelName, string[]> = {
   "model-haiku": ["model-haiku", "claude-haiku*", "gpt-*-luna"],
   "model-fallback": [],
   "model-jev": ["model-jev"],
-  // 能力分类模型池 —— 客户端直接用这些名字发请求
-  "model-vision": ["model-vision"],
-  "model-llm": ["model-llm"],
-  "model-multimodal": ["model-multimodal"],
-  "model-speech": ["model-speech"],
-  "model-embedding": ["model-embedding"],
+  "model-vision": [],
+  "model-llm": [],
+  "model-multimodal": [],
+  "model-speech": [],
+  "model-embedding": [],
 };
 
 /** 照抄 src-tauri/src/proxy/server.rs::build_router —— 唯一事实来源 */

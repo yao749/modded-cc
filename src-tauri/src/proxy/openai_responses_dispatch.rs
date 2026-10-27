@@ -112,7 +112,6 @@ pub async fn dispatch_openai_responses_attempt(
     let mut translated_body = anthropic_to_openai_responses(request_body, &extras).map_err(|e| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("body 翻译失败: {e}"),
         }
     })?;
@@ -122,7 +121,6 @@ pub async fn dispatch_openai_responses_attempt(
     let body_bytes = serde_json::to_vec(&translated_body).map_err(|e| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("body 序列化失败: {e}"),
         }
     })?;
@@ -137,7 +135,6 @@ pub async fn dispatch_openai_responses_attempt(
     let auth_name = ReqHeaderName::try_from(header_name.as_str()).map_err(|_| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("auth header name {:?} 含非法字符", header_name),
         }
     })?;
@@ -145,7 +142,6 @@ pub async fn dispatch_openai_responses_attempt(
     let auth_value = ReqHeaderValue::from_str(&auth_value_str).map_err(|_| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: "无法构造 Authorization header (API key 含不允许的字符: 控制符 / 非可见 ASCII)".into(),
         }
     })?;
@@ -196,7 +192,6 @@ pub async fn dispatch_openai_responses_attempt(
         Err(upstream::UpstreamError::Reqwest(e)) => {
             return Err(OAuthDispatchError::Upstream {
                 status: None,
-                retry_after_secs: None,
                 message: format!("网络错误: {}", upstream::describe_error(&e)),
             });
         }
@@ -204,7 +199,7 @@ pub async fn dispatch_openai_responses_attempt(
 
     // 5. 按 client_wants_streaming 分支处理
     match upstream_response {
-        upstream::UpstreamResponse::Streaming { status, headers, stream } => {
+        upstream::UpstreamResponse::Streaming { status, stream, .. } => {
             if !status.is_success() {
                 let mut buf = String::new();
                 let mut s = stream;
@@ -220,14 +215,13 @@ pub async fn dispatch_openai_responses_attempt(
                 }
                 return Err(OAuthDispatchError::Upstream {
                     status: Some(status.as_u16()),
-                    retry_after_secs: upstream::retry_after_secs(&headers),
                     message: truncate_error_body(buf),
                 });
             }
             // 流首 peek: HTTP 200 但首帧就是 response.failed → Err 让 pipeline failover (issue #38)
             let stream = peek_responses_first_frame(stream)
                 .await
-                .map_err(|message| OAuthDispatchError::Upstream { status: None, message, retry_after_secs: None })?;
+                .map_err(|message| OAuthDispatchError::Upstream { status: None, message })?;
             Ok(OpenaiResponsesDispatchOk {
                 transform_config,
                 payload: OpenaiResponsesPayload::Streaming(stream),
@@ -235,7 +229,6 @@ pub async fn dispatch_openai_responses_attempt(
         }
         upstream::UpstreamResponse::NonStreaming {
             status,
-            headers,
             body,
             body_text,
             ..
@@ -243,7 +236,6 @@ pub async fn dispatch_openai_responses_attempt(
             if !status.is_success() {
                 return Err(OAuthDispatchError::Upstream {
                     status: Some(status.as_u16()),
-                    retry_after_secs: upstream::retry_after_secs(&headers),
                     message: truncate_error_body(body_text.unwrap_or_else(|| body.to_string())),
                 });
             }
@@ -444,7 +436,6 @@ fn finalize_streaming(
         let state_event = if upstream_error.is_some() {
             state_machine::Event::UpstreamSseError {
                 is_quota_exhausted: false,
-                retry_after_secs: None,
             }
         } else {
             state_machine::Event::RequestSucceeded
@@ -742,7 +733,7 @@ mod tests {
         .await;
 
         match result {
-            Err(OAuthDispatchError::Upstream { status, message, retry_after_secs: _ }) => {
+            Err(OAuthDispatchError::Upstream { status, message }) => {
                 assert_eq!(status, None, "流内失败无 HTTP 状态, pipeline 按 502 分类重试");
                 assert!(
                     message.contains("The model failed to generate a response."),

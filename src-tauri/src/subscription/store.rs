@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
-use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -19,6 +18,7 @@ use crate::subscription::model::{
     SubscriptionRow, SubscriptionRuntime,
 };
 use crate::subscription::quota::{QuotaBucket, QuotaPeriod, QuotaUsage, TokenQuotas, ALL_PERIODS};
+use crate::subscription::schedule::SlotSchedules;
 
 /// 启动时从 DB 加载全部订阅，并初始化运行时状态。
 ///
@@ -39,7 +39,7 @@ pub async fn load_runtime(
                 model_discovery, balance_discovery,
                 provider_display_name, provider_icon, is_user_defined,
                 auth_type, oauth_metadata, slot_efforts, token_quotas, endpoint_protocol,
-                url_params, systemone_wire, routing_group
+                url_params, systemone_wire, slot_schedules, routing_group
          FROM subscriptions",
     )
     .fetch_all(pool)
@@ -151,6 +151,16 @@ fn row_to_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<SubscriptionRow> {
             TokenQuotas::default()
         }
     };
+    // slot_schedules 列在 migration 025 加, DEFAULT '{}' (= 没有时段规则). 同 token_quotas
+    // 走宽容降级: 解析失败只是规则丢失回退到各槽默认模型, 不该让整条订阅加载失败。
+    let slot_schedules_json: String = row.try_get("slot_schedules")?;
+    let slot_schedules: SlotSchedules = match serde_json::from_str::<SlotSchedules>(&slot_schedules_json) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, raw = %slot_schedules_json, "slot_schedules JSON 解析失败, 该订阅视为没有时段规则");
+            SlotSchedules::default()
+        }
+    };
     Ok(SubscriptionRow {
         id,
         provider_id: row.try_get("provider_id")?,
@@ -168,6 +178,7 @@ fn row_to_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<SubscriptionRow> {
             jev: row.try_get("model_slot_jev")?,
         },
         slot_efforts,
+        slot_schedules,
         token_quotas,
         enabled: {
             let v: i64 = row.try_get("enabled")?;
@@ -202,11 +213,7 @@ fn row_to_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<SubscriptionRow> {
             let v: i64 = row.try_get("is_user_defined")?;
             v != 0
         },
-        // routing_group (migration 027): 宽容降级——NULL / 坏值 → classic
-        routing_group: row
-            .try_get::<Option<String>, _>("routing_group")?
-            .filter(|g| g == "pool" || g == "classic")
-            .unwrap_or_else(|| "classic".to_string()),
+        routing_group: row.try_get("routing_group")?,
     })
 }
 
@@ -233,6 +240,7 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
     let oauth_json = serde_json::to_string(&sub.oauth_metadata)?;
     let slot_efforts_json = serde_json::to_string(&sub.slot_efforts)?;
     let token_quotas_json = serde_json::to_string(&sub.token_quotas)?;
+    let slot_schedules_json = serde_json::to_string(&sub.slot_schedules)?;
     let url_params_json = serde_json::to_string(&sub.url_params)?;
     sqlx::query(
         "INSERT INTO subscriptions (id, provider_id, endpoint_id, display_name, api_key,
@@ -244,13 +252,13 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
             model_discovery, balance_discovery,
             provider_display_name, provider_icon, is_user_defined,
             auth_type, oauth_metadata, slot_efforts, token_quotas, endpoint_protocol,
-            url_params, systemone_wire, routing_group)
+            url_params, systemone_wire, slot_schedules, routing_group)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, ?,
                  ?, ?, ?, ?, ?,
                  ?, ?, ?,
                  ?, ?, ?, ?, ?,
-                 ?, ?, ?)",
+                 ?, ?, ?, ?)",
     )
     .bind(sub.id.to_string())
     .bind(&sub.provider_id)
@@ -287,6 +295,7 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
     .bind(sub.endpoint_protocol.as_str())
     .bind(url_params_json)
     .bind(sub.systemone_wire.as_str())
+    .bind(slot_schedules_json)
     .bind(&sub.routing_group)
     .execute(&mut *conn)
     .await?;
@@ -331,6 +340,7 @@ pub async fn update_row(pool: &SqlitePool, sub: &SubscriptionRow) -> AppResult<(
     let balance_discovery_json = opt_to_json(sub.balance_discovery.as_ref())?;
     let slot_efforts_json = serde_json::to_string(&sub.slot_efforts)?;
     let token_quotas_json = serde_json::to_string(&sub.token_quotas)?;
+    let slot_schedules_json = serde_json::to_string(&sub.slot_schedules)?;
     let url_params_json = serde_json::to_string(&sub.url_params)?;
     sqlx::query(
         "UPDATE subscriptions SET
@@ -344,7 +354,9 @@ pub async fn update_row(pool: &SqlitePool, sub: &SubscriptionRow) -> AppResult<(
             required_headers = ?, forward_headers = ?, forward_client_headers = ?,
             model_discovery = ?, balance_discovery = ?,
             provider_display_name = ?, provider_icon = ?, is_user_defined = ?,
-            url_params = ?, systemone_wire = ?
+            url_params = ?, systemone_wire = ?,
+            slot_schedules = ?,
+            routing_group = ?
          WHERE id = ?",
     )
     .bind(&sub.endpoint_id)
@@ -375,6 +387,8 @@ pub async fn update_row(pool: &SqlitePool, sub: &SubscriptionRow) -> AppResult<(
     .bind(sub.is_user_defined as i64)
     .bind(url_params_json)
     .bind(sub.systemone_wire.as_str())
+    .bind(slot_schedules_json)
+    .bind(&sub.routing_group)
     .bind(sub.id.to_string())
     .execute(pool)
     .await?;
@@ -435,6 +449,33 @@ pub async fn delete(pool: &SqlitePool, id: &Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// 从能力分类模型池里取某订阅 + 某 capability 的全部启用模型, 按 priority 升序.
+pub async fn list_pool_models(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+    capability: &str,
+) -> AppResult<Vec<(String, Option<Vec<String>>)>> {
+    let rows = sqlx::query(
+        "SELECT model_name, supported_inputs FROM subscription_model_pool
+         WHERE subscription_id = ? AND capability = ? AND enabled = 1
+         ORDER BY priority ASC",
+    )
+    .bind(sub_id.to_string())
+    .bind(capability)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.try_get("model_name")?;
+        let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
+        let inputs: Option<Vec<String>> =
+            inputs_raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+        out.push((name, inputs));
+    }
+    Ok(out)
+}
+
 pub async fn load_model_cache(
     pool: &SqlitePool,
     subscription_id: &Uuid,
@@ -452,9 +493,7 @@ pub async fn load_model_cache(
     let Some(row) = row else { return Ok(None) };
     let fetched_at_ms: i64 = row.try_get("fetched_at")?;
     let json: String = row.try_get("models_json")?;
-    let mut models: Vec<ModelInfo> = serde_json::from_str(&json)?;
-    // 旧缓存行可能保存于排序逻辑生效前, 这里兜底排序 — 保证任何读取路径都稳定有序.
-    models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+    let models: Vec<ModelInfo> = serde_json::from_str(&json)?;
     Ok(Some(ModelCache {
         fetched_at: ms_to_dt(fetched_at_ms),
         models,
@@ -624,167 +663,6 @@ pub async fn save_quota_usage_snapshot(
     Ok(())
 }
 
-// ============== 能力分类模型池 CRUD ==============
-
-use serde_json as sj;
-
-/// 模型池中的一条记录: 某订阅下, 某模型, 归属于某能力分类, 在该分类池内的优先级.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelPoolEntry {
-    pub id: String,
-    pub subscription_id: Uuid,
-    pub capability: String,
-    pub model_name: String,
-    pub priority: i64,
-    pub enabled: bool,
-    /// 该模型支持的输入模态, 如 ["text"] / ["text","image"] / ["text","image","audio"].
-    /// 借鉴 DSH 的 input 字段. None 表示未声明, 路由时兜底当作 ["text"].
-    pub supported_inputs: Option<Vec<String>>,
-}
-
-/// 从 capability 推断默认的 supported_inputs (新建条目时用).
-pub fn default_inputs_for_capability(cap: &str) -> Vec<String> {
-    match cap {
-        "vision" | "multimodal" => vec!["text".into(), "image".into()],
-        "speech" => vec!["text".into(), "audio".into()],
-        _ => vec!["text".into()],
-    }
-}
-
-/// 一行 `subscription_model_pool` → [`ModelPoolEntry`].
-fn row_to_pool_entry(row: &sqlx::sqlite::SqliteRow) -> AppResult<ModelPoolEntry> {
-    let sub_id_str: String = row.try_get("subscription_id")?;
-    let sub = Uuid::parse_str(&sub_id_str)
-        .map_err(|e| AppError::internal(format!("invalid uuid: {e}")))?;
-    let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
-    let supported_inputs: Option<Vec<String>> = inputs_raw
-        .and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
-    Ok(ModelPoolEntry {
-        id: row.try_get("id")?,
-        subscription_id: sub,
-        capability: row.try_get("capability")?,
-        model_name: row.try_get("model_name")?,
-        priority: row.try_get("priority")?,
-        enabled: row.try_get::<i64, _>("enabled")? != 0,
-        supported_inputs,
-    })
-}
-
-/// 读某个订阅的全部模型池内容, 按 capability + priority 排序.
-pub async fn load_model_pool(
-    pool: &SqlitePool,
-    sub_id: Uuid,
-) -> AppResult<Vec<ModelPoolEntry>> {
-    let rows = sqlx::query(
-        "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
-         FROM subscription_model_pool
-         WHERE subscription_id = ?
-         ORDER BY capability ASC, priority ASC",
-    )
-    .bind(sub_id.to_string())
-    .fetch_all(pool)
-    .await?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(row_to_pool_entry(&row)?);
-    }
-    Ok(out)
-}
-
-/// 覆盖写某个订阅的模型池 —— 先删全部, 再批量插入. 一个事务完成.
-pub async fn save_model_pool(
-    pool: &SqlitePool,
-    sub_id: Uuid,
-    entries: &[ModelPoolEntry],
-) -> AppResult<()> {
-    let mut tx = pool.begin().await?;
-    save_model_pool_on(&mut tx, sub_id, entries).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// 同 [`save_model_pool`], 但跑在调用方的连接/事务上 (备份导入要和外层事务原子提交).
-pub async fn save_model_pool_on(
-    conn: &mut SqliteConnection,
-    sub_id: Uuid,
-    entries: &[ModelPoolEntry],
-) -> AppResult<()> {
-    sqlx::query("DELETE FROM subscription_model_pool WHERE subscription_id = ?")
-        .bind(sub_id.to_string())
-        .execute(&mut *conn)
-        .await?;
-
-    let now = Utc::now().timestamp_millis();
-    for e in entries {
-        let inputs_json = e
-            .supported_inputs
-            .as_ref()
-            .map(|v| sj::to_string(v).unwrap_or_else(|_| "[]".into()))
-            .unwrap_or_else(|| "[]".into());
-        sqlx::query(
-            "INSERT INTO subscription_model_pool
-             (id, subscription_id, capability, model_name, priority, enabled, supported_inputs, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&e.id)
-        .bind(sub_id.to_string())
-        .bind(&e.capability)
-        .bind(&e.model_name)
-        .bind(e.priority)
-        .bind(e.enabled as i64)
-        .bind(&inputs_json)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *conn)
-        .await?;
-    }
-    Ok(())
-}
-
-/// 读全部订阅的模型池 (备份导出用), 按订阅 + 能力 + 优先级排序.
-pub async fn load_all_model_pools(pool: &SqlitePool) -> AppResult<Vec<ModelPoolEntry>> {
-    let rows = sqlx::query(
-        "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
-         FROM subscription_model_pool
-         ORDER BY subscription_id ASC, capability ASC, priority ASC",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(row_to_pool_entry(&row)?);
-    }
-    Ok(out)
-}
-
-pub async fn list_pool_models(
-    pool: &SqlitePool,
-    sub_id: Uuid,
-    capability: &str,
-) -> AppResult<Vec<(String, Option<Vec<String>>)>> {
-    let rows = sqlx::query(
-        "SELECT model_name, supported_inputs FROM subscription_model_pool
-         WHERE subscription_id = ? AND capability = ? AND enabled = 1
-         ORDER BY priority ASC",
-    )
-    .bind(sub_id.to_string())
-    .bind(capability)
-    .fetch_all(pool)
-    .await?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let name: String = row.try_get("model_name")?;
-        let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
-        let inputs: Option<Vec<String>> =
-            inputs_raw.and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
-        out.push((name, inputs));
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,6 +745,35 @@ mod tests {
         let loaded = load_runtime(&pool).await.expect("load");
         let g = loaded.get(&row.id).unwrap().read().await;
         assert_eq!(g.row.slot_efforts.get(SubscriptionSlot::Opus), None);
+    }
+
+    #[tokio::test]
+    async fn slot_schedules_roundtrip_and_corrupt_json_degrades() {
+        use crate::subscription::schedule::ScheduleRule;
+        let pool = migrated_pool().await;
+        let mut row = SubscriptionRow::test_fixture("qoder", "default");
+        row.slot_schedules.opus = vec![
+            ScheduleRule { days: vec![1, 2, 3], start: "22:00".into(), end: "08:00".into(), model: "night".into(), effort: None },
+            ScheduleRule { days: vec![6, 7], start: "00:00".into(), end: "24:00".into(), model: "weekend".into(), effort: None },
+        ];
+        insert(&pool, &row).await.expect("insert");
+        let loaded = load_runtime(&pool).await.expect("load");
+        assert_eq!(loaded.get(&row.id).unwrap().read().await.row.slot_schedules, row.slot_schedules);
+
+        // update_row writes the column too
+        let mut updated = row.clone();
+        updated.slot_schedules.opus.truncate(1);
+        update_row(&pool, &updated).await.expect("update");
+        let loaded = load_runtime(&pool).await.expect("load");
+        assert_eq!(loaded.get(&row.id).unwrap().read().await.row.slot_schedules, updated.slot_schedules);
+
+        sqlx::query("UPDATE subscriptions SET slot_schedules = 'not json'")
+            .execute(&pool)
+            .await
+            .expect("corrupt");
+        let loaded = load_runtime(&pool).await.expect("load");
+        let rt = loaded.get(&row.id).expect("订阅不应被整条跳过");
+        assert!(rt.read().await.row.slot_schedules.is_empty());
     }
 
     /// 坏 JSON 走宽容降级: 订阅仍然加载得出来 (全 auto), 而不是从列表里消失。

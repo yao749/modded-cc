@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::format::{export_to_row, header_field, ExportFile, ExportSubscription, SecretsPlain, FIELD_API_KEY};
 use crate::commands::subscriptions::{
-    validate_base_url, validate_gemini_messages_path, validate_messages_path,
+    check_schedules_for, validate_base_url, validate_gemini_messages_path, validate_messages_path,
     validate_required_headers, validate_slot_efforts, validate_token_quotas,
 };
 use crate::error::{AppError, AppResult};
@@ -87,6 +87,7 @@ fn validate_entry(sub: &ExportSubscription) -> Result<(), String> {
         if sub.endpoint_protocol == EndpointProtocol::Systemone && sub.auth_type != AuthType::ApiKey {
             return Err(AppError::BadRequest("System One 端点只支持 api_key 鉴权".into()));
         }
+        check_schedules_for(sub.endpoint_protocol, &sub.slot_schedules)?;
         Ok(())
     }
     check(sub).map_err(|e| match e {
@@ -233,12 +234,6 @@ pub struct ImportReport {
     /// 跨类绑定 (对话订阅 ↔ model-jev) 被跳过的记录: name = 订阅名, reason = 原因。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_bindings: Vec<InvalidEntry>,
-    /// 恢复的能力分类池条目数。
-    #[serde(default)]
-    pub pools_imported: usize,
-    /// 池条目里非法 / 无法归属的记录 (capability 不认识, 订阅不落库等)。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped_pools: Vec<InvalidEntry>,
 }
 
 #[derive(Debug)]
@@ -247,8 +242,6 @@ pub struct ImportPlan {
     /// Full new binding list for each virtual model that changes.
     pub bindings: Vec<(VirtualModelName, Vec<Uuid>)>,
     pub modes: Vec<(VirtualModelName, RoutingMode)>,
-    /// 要恢复的能力分类池条目 (只含本次真正落库的订阅)。
-    pub pools: Vec<crate::subscription::store::ModelPoolEntry>,
     pub report: ImportReport,
 }
 
@@ -350,63 +343,7 @@ pub fn plan(
         }
     }
 
-    ImportPlan { inserts, bindings, modes, pools: plan_pools(file, &new_ids, &mut report), report }
-}
-
-/// 池条目: 只保留本次真正落库的订阅 (已存在的订阅不覆盖本地池配置)。
-/// capability 不在 5 类里 / 模型名为空 → 跳过并记入报告 (否则 DB CHECK 会让整次导入回滚)。
-fn plan_pools(
-    file: &ExportFile,
-    new_ids: &HashSet<Uuid>,
-    report: &mut ImportReport,
-) -> Vec<crate::subscription::store::ModelPoolEntry> {
-    use crate::subscription::store::ModelPoolEntry;
-    let mut out: Vec<ModelPoolEntry> = Vec::new();
-    let mut seen: HashSet<(Uuid, String, String, i64)> = HashSet::new();
-    for p in &file.model_pools {
-        if !new_ids.contains(&p.subscription_id) {
-            report.skipped_pools.push(InvalidEntry {
-                name: p.model_name.clone(),
-                reason: "订阅不在本次导入范围 (已存在或未通过校验)".into(),
-            });
-            continue;
-        }
-        if !crate::virtual_model::model::CapabilityCategory::all()
-            .iter()
-            .any(|c| c.as_str() == p.capability)
-        {
-            report.skipped_pools.push(InvalidEntry {
-                name: p.model_name.clone(),
-                reason: format!("未知能力分类 {}", p.capability),
-            });
-            continue;
-        }
-        if p.model_name.trim().is_empty() {
-            report.skipped_pools.push(InvalidEntry {
-                name: String::new(),
-                reason: "模型名为空".into(),
-            });
-            continue;
-        }
-        if !seen.insert((p.subscription_id, p.capability.clone(), p.model_name.clone(), p.priority)) {
-            report.skipped_pools.push(InvalidEntry {
-                name: p.model_name.clone(),
-                reason: "重复的池条目".into(),
-            });
-            continue;
-        }
-        out.push(ModelPoolEntry {
-            id: Uuid::new_v4().to_string(),
-            subscription_id: p.subscription_id,
-            capability: p.capability.clone(),
-            model_name: p.model_name.clone(),
-            priority: p.priority,
-            enabled: p.enabled,
-            supported_inputs: Some(p.supported_inputs.clone()).filter(|v| !v.is_empty()),
-        });
-    }
-    report.pools_imported = out.len();
-    out
+    ImportPlan { inserts, bindings, modes, report }
 }
 
 pub async fn apply(pool: &sqlx::SqlitePool, plan: &ImportPlan) -> AppResult<()> {
@@ -423,15 +360,6 @@ pub async fn apply(pool: &sqlx::SqlitePool, plan: &ImportPlan) -> AppResult<()> 
     for (name, mode) in &plan.modes {
         vm_store::save_mode_on(&mut tx, *name, *mode).await?;
     }
-    // 池条目按订阅分组写, 必须排在建订阅之后 (外键依赖)
-    let mut by_sub: HashMap<Uuid, Vec<&crate::subscription::store::ModelPoolEntry>> = HashMap::new();
-    for e in &plan.pools {
-        by_sub.entry(e.subscription_id).or_default().push(e);
-    }
-    for (sub_id, entries) in by_sub {
-        let owned: Vec<_> = entries.into_iter().cloned().collect();
-        sub_store::save_model_pool_on(&mut tx, sub_id, &owned).await?;
-    }
     tx.commit().await?;
     Ok(())
 }
@@ -444,6 +372,7 @@ mod tests {
     use crate::db::run_migrations;
     use crate::provider::model::AuthType;
     use crate::subscription::model::SubscriptionRow;
+    use crate::subscription::schedule::ScheduleRule;
     use sqlx::sqlite::SqlitePoolOptions;
 
     const PW: &str = "0123456789";
@@ -462,6 +391,13 @@ mod tests {
         a.messages_path = "/v1/messages".into();
         a.api_key = "sk-a".into();
         a.required_headers.insert("x-relay-key".into(), "hk".into());
+        a.slot_schedules.opus = vec![ScheduleRule {
+            days: vec![1, 2, 3, 4, 5],
+            start: "22:00".into(),
+            end: "08:00".into(),
+            model: "night-model".into(),
+            effort: None,
+        }];
         let mut b = SubscriptionRow::test_fixture("custom", "custom");
         b.display_name = "B".into();
         b.base_url = "http://127.0.0.1:11434".into();
@@ -480,7 +416,7 @@ mod tests {
             subscription_ids: rows.iter().map(|r| r.id).collect(),
         }];
         let secrets = with_secrets.then(|| SecretOptions { password: PW, auth_token: "tok", cost: KdfCost::FAST });
-        let file = build_export(&rows, &vms, &[], secrets, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&rows, &vms, secrets, "6.1.0", Utc::now()).unwrap();
         Fixture { rows, file }
     }
 
@@ -565,7 +501,7 @@ mod tests {
     fn builtin_subscription_without_secrets_gets_template_headers_back_from_the_registry() {
         let providers = Arc::new(crate::provider::loader::load_all().unwrap());
         let row = cloudflare_gateway_row(&providers);
-        let file = build_export(std::slice::from_ref(&row), &[], &[], None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(std::slice::from_ref(&row), &[], None, "6.1.0", Utc::now()).unwrap();
         let exported = &file.subscriptions[0];
         assert!(exported.redacted_headers.contains(&"cf-aig-authorization".to_string()), "前提: 无密码导出时模板头被当成敏感头去掉");
 
@@ -598,7 +534,7 @@ mod tests {
         row.endpoint_protocol = crate::provider::model::EndpointProtocol::Systemone;
         row.model_discovery.enabled = false;
         row.model_slots.jev = "clef-flash".into();
-        let file = build_export(std::slice::from_ref(&row), &[], &[], None, "6.3.1", Utc::now()).unwrap();
+        let file = build_export(std::slice::from_ref(&row), &[], None, "6.3.1", Utc::now()).unwrap();
         let plan = plan(&file, None, &empty_local(), Utc::now());
         let got = &plan.inserts[0];
         assert_eq!(got.provider_id, "custom-systemone");
@@ -613,7 +549,7 @@ mod tests {
     fn builtin_subscription_connection_comes_from_the_registry_not_the_file() {
         let providers = Arc::new(crate::provider::loader::load_all().unwrap());
         let row = cloudflare_gateway_row(&providers);
-        let mut file = build_export(std::slice::from_ref(&row), &[], &[], None, "6.1.0", Utc::now()).unwrap();
+        let mut file = build_export(std::slice::from_ref(&row), &[], None, "6.1.0", Utc::now()).unwrap();
         file.subscriptions[0].base_url = "https://evil.example/accounts/x/ai".into();
         file.subscriptions[0].required_headers.insert("cf-aig-gateway-id".into(), "other".into());
         let local = LocalState { providers, ..empty_local() };
@@ -627,7 +563,7 @@ mod tests {
         // The registry is empty here: same behaviour as before (redacted header kept blank).
         let providers = crate::provider::loader::load_all().unwrap();
         let row = cloudflare_gateway_row(&providers);
-        let file = build_export(std::slice::from_ref(&row), &[], &[], None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(std::slice::from_ref(&row), &[], None, "6.1.0", Utc::now()).unwrap();
         let got = &plan(&file, None, &empty_local(), Utc::now()).inserts[0];
         assert_eq!(got.required_headers.get("cf-aig-authorization").map(String::as_str), Some(""));
         assert_eq!(got.required_headers.get("cf-aig-gateway-id").map(String::as_str), Some("gw-1"));
@@ -741,6 +677,8 @@ mod tests {
         assert_eq!(a.enabled, orig.enabled);
         assert_eq!(a.created_at.timestamp_millis(), orig.created_at.timestamp_millis());
         assert_eq!(serde_json::to_value(&a.model_slots).unwrap(), serde_json::to_value(&orig.model_slots).unwrap());
+        assert_eq!(a.slot_schedules, orig.slot_schedules);
+        assert_eq!(a.slot_schedules.opus.len(), 1);
 
         let vms = vm_store::load_all(&dst).await.unwrap();
         assert_eq!(vms[&VirtualModelName::Opus].subscription_ids, vec![f.rows[0].id, f.rows[1].id]);
@@ -757,119 +695,6 @@ mod tests {
         plan.inserts.push(dup); // second insert hits the primary key
         assert!(apply(&dst, &plan).await.is_err());
         assert!(load_runtime(&dst).await.unwrap().is_empty(), "整体回滚");
-    }
-
-    // ---- P0: 能力分类模型池进备份 ----
-
-    #[tokio::test]
-    async fn pool_entries_survive_export_and_import() {
-        use crate::backup::export::pools_to_export;
-        use crate::subscription::store::{
-            load_all_model_pools, load_model_pool, save_model_pool, ModelPoolEntry,
-        };
-
-        let src = memory_pool().await;
-        let f = fixture(false);
-        for r in &f.rows {
-            crate::subscription::store::insert(&src, r).await.unwrap();
-        }
-        let sub_id = f.rows[0].id;
-        let entries = vec![
-            ModelPoolEntry {
-                id: Uuid::new_v4().to_string(),
-                subscription_id: sub_id,
-                capability: "llm".into(),
-                model_name: "glm-4-flash".into(),
-                priority: 0,
-                enabled: true,
-                supported_inputs: Some(vec!["text".into()]),
-            },
-            ModelPoolEntry {
-                id: Uuid::new_v4().to_string(),
-                subscription_id: sub_id,
-                capability: "vision".into(),
-                model_name: "glm-4v".into(),
-                priority: 1,
-                enabled: false,
-                supported_inputs: Some(vec!["text".into(), "image".into()]),
-            },
-        ];
-        save_model_pool(&src, sub_id, &entries).await.unwrap();
-
-        let loaded = load_all_model_pools(&src).await.unwrap();
-        assert_eq!(loaded.len(), 2, "前提: 源库确实写入了两条池配置");
-        let file = build_export(
-            &f.rows,
-            &[],
-            &pools_to_export(&loaded),
-            None,
-            "6.5.0",
-            Utc::now(),
-        )
-        .unwrap();
-        assert_eq!(file.model_pools.len(), 2, "池配置必须进导出文件");
-
-        let dst = memory_pool().await;
-        let plan = plan(&file, None, &empty_local(), Utc::now());
-        assert_eq!(plan.report.pools_imported, 2);
-        assert!(plan.report.skipped_pools.is_empty());
-        apply(&dst, &plan).await.unwrap();
-
-        let restored = load_model_pool(&dst, sub_id).await.unwrap();
-        assert_eq!(restored.len(), 2);
-        let llm = restored.iter().find(|e| e.capability == "llm").unwrap();
-        assert_eq!(llm.model_name, "glm-4-flash");
-        assert_eq!(llm.priority, 0);
-        assert!(llm.enabled);
-        assert_eq!(llm.supported_inputs, Some(vec!["text".to_string()]));
-        let vision = restored.iter().find(|e| e.capability == "vision").unwrap();
-        assert_eq!(vision.priority, 1);
-        assert!(!vision.enabled, "启停状态也要恢复");
-        assert_eq!(
-            vision.supported_inputs,
-            Some(vec!["text".to_string(), "image".to_string()])
-        );
-    }
-
-    #[test]
-    fn old_export_without_model_pools_field_still_imports() {
-        let f = fixture(false);
-        // fixture 的导出里没有池条目 → 字段被 skip_serializing 省略, 等同旧文件
-        let text = serde_json::to_string(&f.file).unwrap();
-        assert!(!text.contains("model_pools"), "前提: 空池不写字段");
-        let file = crate::backup::format::parse_file(&text).unwrap();
-        let plan = plan(&file, None, &empty_local(), Utc::now());
-        assert_eq!(plan.report.imported, 2);
-        assert!(plan.pools.is_empty());
-        assert_eq!(plan.report.pools_imported, 0);
-    }
-
-    #[test]
-    fn pool_entries_for_skipped_subscriptions_are_not_imported() {
-        use crate::backup::format::ExportPoolEntry;
-        let mut f = fixture(false);
-        let oauth_id = f.rows[2].id; // OAuth 订阅永远不导入
-        f.file.model_pools.push(ExportPoolEntry {
-            subscription_id: oauth_id,
-            capability: "llm".into(),
-            model_name: "gpt-x".into(),
-            priority: 0,
-            enabled: true,
-            supported_inputs: vec!["text".into()],
-        });
-        f.file.model_pools.push(ExportPoolEntry {
-            subscription_id: f.rows[0].id,
-            capability: "unknown_cap".into(),
-            model_name: "bogus".into(),
-            priority: 0,
-            enabled: true,
-            supported_inputs: vec![],
-        });
-        let plan = plan(&f.file, None, &empty_local(), Utc::now());
-        assert!(plan.pools.is_empty(), "两类非法条目都不该进计划");
-        assert_eq!(plan.report.skipped_pools.len(), 2);
-        assert!(plan.report.skipped_pools.iter().any(|e| e.reason.contains("导入范围")));
-        assert!(plan.report.skipped_pools.iter().any(|e| e.reason.contains("未知能力分类")));
     }
 
     fn find_mut<'a>(f: &'a mut Fixture, name: &str) -> &'a mut ExportSubscription {
@@ -911,7 +736,7 @@ mod tests {
     #[test]
     fn each_create_time_rule_is_enforced() {
         type Mutate = fn(&mut ExportSubscription);
-        let cases: [(&str, Mutate); 8] = [
+        let cases: [(&str, Mutate); 10] = [
             ("base_url", |s| s.base_url = "a.example".into()),
             ("messages_path", |s| s.messages_path = "no-slash".into()),
             ("models url", |s| s.model_discovery.url = Some("file:///etc/passwd".into())),
@@ -928,6 +753,25 @@ mod tests {
             }),
             ("slot effort", |s| s.slot_efforts.opus = Some("turbo".into())),
             ("zero quota", |s| s.token_quotas.daily = Some(0)),
+            ("bad schedule time", |s| {
+                s.slot_schedules.sonnet = vec![ScheduleRule {
+                    days: vec![1],
+                    start: "08:15".into(),
+                    end: "09:00".into(),
+                    model: "m".into(),
+                    effort: None,
+                }];
+            }),
+            ("systemone schedule", |s| {
+                s.endpoint_protocol = EndpointProtocol::Systemone;
+                s.slot_schedules.opus = vec![ScheduleRule {
+                    days: vec![1],
+                    start: "08:00".into(),
+                    end: "09:00".into(),
+                    model: "m".into(),
+                    effort: None,
+                }];
+            }),
         ];
         for (what, mutate) in cases {
             let mut f = fixture(false);
@@ -939,6 +783,52 @@ mod tests {
                 "{what} should make B invalid"
             );
         }
+    }
+
+    #[test]
+    fn systemone_schedule_skip_reason_names_system_one() {
+        let mut f = fixture(false);
+        {
+            let b = find_mut(&mut f, "B");
+            b.endpoint_protocol = EndpointProtocol::Systemone;
+            b.slot_schedules.opus = vec![ScheduleRule {
+                days: vec![1],
+                start: "08:00".into(),
+                end: "09:00".into(),
+                model: "m".into(),
+                effort: None,
+            }];
+        }
+        let p = preview(&f.file, &empty_local());
+        let b = p.subscriptions.iter().find(|s| s.display_name == "B").unwrap();
+        assert_eq!(b.status, PreviewStatus::SkipInvalid);
+        assert!(b.invalid_reason.as_deref().unwrap().contains("System One"), "{:?}", b.invalid_reason);
+    }
+
+    #[test]
+    fn schedule_errors_name_the_slot_and_old_files_import_with_none() {
+        let mut f = fixture(false);
+        find_mut(&mut f, "B").slot_schedules.haiku = vec![ScheduleRule {
+            days: vec![1],
+            start: "08:15".into(),
+            end: "09:00".into(),
+            model: "m".into(),
+            effort: None,
+        }];
+        let p = preview(&f.file, &empty_local());
+        let b = p.subscriptions.iter().find(|s| s.display_name == "B").unwrap();
+        assert_eq!(b.status, PreviewStatus::SkipInvalid);
+        assert!(b.invalid_reason.as_deref().unwrap().contains("haiku"), "{:?}", b.invalid_reason);
+
+        // An export written before slot_schedules existed has no such key at all.
+        let mut json = serde_json::to_value(&fixture(false).file).unwrap();
+        for s in json["subscriptions"].as_array_mut().unwrap() {
+            s.as_object_mut().unwrap().remove("slot_schedules");
+        }
+        let old: ExportFile = serde_json::from_value(json).unwrap();
+        let plan = plan(&old, None, &empty_local(), Utc::now());
+        assert!(plan.report.skipped_invalid.is_empty(), "{:?}", plan.report.skipped_invalid);
+        assert!(plan.inserts.iter().all(|r| r.slot_schedules.is_empty()));
     }
 
     #[test]

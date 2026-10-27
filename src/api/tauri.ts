@@ -17,6 +17,7 @@ import type {
   EventFilters,
   ExportSummary,
   HeatmapDayDto,
+  HostClockDto,
   ImportOptions,
   ImportPreview,
   ImportReport,
@@ -180,6 +181,9 @@ export const api = {
   // release notes
   getReleaseNotes: () => invoke<ReleaseNotesDto>("get_release_notes"),
   markReleaseNotesSeen: () => invoke<void>("mark_release_notes_seen"),
+
+  // 宿主机墙钟 (分时段规则按它生效)
+  getHostClock: () => invoke<HostClockDto>("get_host_clock"),
 
   // settings / proxy
   getSettings: () => invoke<Settings>("get_settings"),

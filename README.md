@@ -1,103 +1,29 @@
-<p align="center">  
-  <img src="assets/icon.png" alt="cc-router logo" width="160" height="160" />  
+<p align="center">
+  <img src="assets/icon.png" alt="cc-router logo" width="160" height="160" />
 </p>
 
-<h1 align="center">cc-router · 魔改版</h1>
+<h1 align="center">cc-router</h1>
 
-<div align="center">
-
-**🛠️ AI 辅助魔改版本 — 基于上游 v6.4.0**
-
-**原始项目**: [finch-xu/cc-router](https://github.com/finch-xu/cc-router) · **原始作者**: finch-xu  
-**原始版本**: v6.4.0 (commit `9e609a2`) · **上游文档**: [ccrouter.app](https://ccrouter.app)
-
-</div>
-
----
-
-> **关于本项目**
->
-> 这是基于上游 [cc-router](https://github.com/finch-xu/cc-router) v6.4.0 的二次开发版本，所有新增功能均通过 AI 辅助（Trae IDE）设计与实现。原始代码架构、设计稿与绝大部分功能来自 finch-xu 先生的开源工作。本版本**不隶属于原项目**，也不是原项目的官方分支。
->
-> 原始项目采用 **MIT License**，本版本同样遵循 MIT License 发布。
->
-> **如果你觉得有用，请优先给上游仓库点 Star 🌟**：<https://github.com/finch-xu/cc-router>
-
-### 📌 原始版本功能（全部保留，未删减）
-
-上游 v6.4.0 的完整功能：
-
-- **虚拟模型四槽路由**：`model-fable` / `model-opus` / `model-sonnet` / `model-haiku` / `model-fallback` / `model-jev` 共 6 个虚拟模型名，按「能力等级」将请求路由到订阅的对应槽位
-- **三协议入口**：Anthropic Messages / OpenAI Responses / OpenAI Chat Completions / System One
-- **三协议出口**：支持 Anthropic / OpenAI / Gemini / OAuth（ChatGPT / Kiro）/ System One
-- **顺序 / 轮询 / 会话亲和**三种调度模式
-- **自动模型发现**（`/v1/models`），Cloudflare / Gemini / OpenAI 三种 envelope 格式
-- **桌面 GUI / 网页界面 / 终端 TUI** 三种管理界面
-- **用量小票 / Token 统计 / 余额查询 / 导入导出备份**
-- **本地 HTTPS、Claude Desktop App 接入**等完整功能
-
-### ✨ 本版本新增功能（AI 魔改）
-
-#### 1. 能力分类模型池（与四槽共存）
-
-打破「等级槽位」的单一维度，新增基于**能力类型**的模型池体系，与旧四槽完全并存互不干扰。
-
-**5 个能力分类虚拟模型**：
-
-| 虚拟模型名 | 能力分类 | 说明 |
-|---|---|---|
-| `model-vision` | 视觉模型 | 图像生成/编辑/理解 |
-| `model-llm` | 大语言模型 | 文本生成/对话 |
-| `model-multimodal` | 多模态模型 | 同时支持文本+图像输入输出 |
-| `model-speech` | 语音模型 | TTS/ASR |
-| `model-embedding` | 向量嵌入 | Embedding 生成 |
-
-路由按虚拟模型名分道：`model-sonnet` 继续走旧四槽路径，`model-vision` 走新模型池路径。
-
-**模型池数据模型**：`subscription_model_pool` 新表，每条记录包含 `(subscription_id, capability, model_name, priority, enabled)`。同一订阅、同一能力分类下可配多个模型，按优先级（priority ASC）排序；首选模型 4xx/5xx 时自动降级到下一个。
-
-**自动能力推断**：`/v1/models` 拉回的模型列表不再硬过滤（旧版只保留对话模型，embedding/语音/视觉被丢弃），现在全部保留，并通过模型名关键词 + 上游原生标签（Cloudflare `task.name` / Gemini `supportedGenerationMethods`）自动推断每个模型所属的能力分类，前端用户可在此基础上调整分类和优先级。
-
-**数据库迁移**：`migrations/025_add_model_pool.sql` — 新增一张表和两个索引，旧 schema 不动。
-
-#### 2. 连接测试优先使用 Fable 槽（pick_test_model 改动）
-
-订阅添加完后的「测试连接」按钮，原来从 `sonnet → haiku → opus` 里挑一个模型测试，**刻意跳过了 Fable 槽**。本版本调整为 **`fable → sonnet → haiku → opus`**，优先用用户自定义槽位的模型来验证连通性。
-
-#### 3. 后端模型发现保留全量能力标签
-
-原始 `model_discovery` 在解析 Cloudflare / Gemini 响应时硬过滤掉了 embedding、Image Generation、非 generateContent 的模型。本版本去掉了这层过滤，改为：
-- 只保留绝对不能直接用的（Clef 决策模型、LoRA 基类）
-- 其余全部返回，附带 `native_capabilities`（上游原生标签）和 `inferred_capability`（自动推断的能力分类）
-
-### 🔒 向后兼容
-
-- 旧四槽路由完全不受影响，所有现有订阅数据不需要迁移
-- 能力分类模型池为新增路径，未配置模型池的订阅在收到 `model-vision` 等请求时会被跳过（503 summary 里能看到原因）
-- 原始 License、项目结构、绝大部分代码完全保留
-
----
-
-<p align="center">  
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>  
-  <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square\&logo=tauri\&logoColor=white" alt="Tauri 2">  
-  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square\&logo=rust\&logoColor=white" alt="Rust 1.90+">  
-  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square\&logo=react\&logoColor=white" alt="React 19">  
-  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square\&logo=typescript\&logoColor=white" alt="TypeScript 5">  
-  <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square\&logo=tailwindcss\&logoColor=white" alt="Tailwind CSS">  
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">  
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
+  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+">
+  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white" alt="React 19">
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5">
+  <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
 </p>
 
-<p align="center">  
-  <strong>中文</strong> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a>  
+<p align="center">
+  <strong>简体中文</strong> · <a href="README.zh-Hant.md">繁體中文</a> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a>
 </p>
 
-<p align="center">  
-  <a href="https://ccrouter.app/docs/" target="\_blank" rel="noopener">📖 中文文档</a> ·  
-  <a href="https://ccrouter.app/en/docs/" target="\_blank" rel="noopener">📖 English Docs</a> ·  
-  <a href="https://ccrouter.app/ja/docs/" target="\_blank" rel="noopener">📖 日本語ドキュメント</a> ·  
-  <a href="https://deepwiki.com/finch-xu/cc-router" target="\_blank" rel="noopener">🤖 DeepWiki</a> ·  
-  <a href="https://ccrouter.app" target="\_blank" rel="noopener">🌐 官方网站ccrouter.app</a>  
+<p align="center">
+  <a href="https://ccrouter.app/docs/" target="_blank" rel="noopener">📖 中文文档</a> ·
+  <a href="https://ccrouter.app/en/docs/" target="_blank" rel="noopener">📖 English Docs</a> ·
+  <a href="https://ccrouter.app/ja/docs/" target="_blank" rel="noopener">📖 日本語ドキュメント</a> ·
+  <a href="https://deepwiki.com/finch-xu/cc-router" target="_blank" rel="noopener">🤖 DeepWiki</a> ·
+  <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 官方网站ccrouter.app</a>
 </p>
 
 本地运行的大模型聚合网关，GUI桌面端app，零代码部署，把零散的 `Token Plan`、`Coding Plan`、大模型 API 额度聚合成一个虚拟 Plan，一键接入 Claude Code、Claude Desktop App、OpenClaw、OpenCode、Codex 等工具 —— 省钱！省 Token！完全本地运行！
@@ -141,36 +67,36 @@
 - **出口三协议，订阅一站调度** —— 内置 24 家厂商预设（DeepSeek、Qwen、Kimi、MiMo、MiniMax、GLM、Claude、OpenAI、Gemini 等），任何 Anthropic / OpenAI / Gemini 兼容端点也能直接配进来
 - **聚合所有模型Token** —— 顺序 / 轮询 / 会话亲和、自动切换、故障转移
 - **用量小票** —— token 用量一键导出成一张「超市小票」样式的消费凭证，晒图、留档都方便
-- **三语完整翻译** —— 简体中文 / English / 日本語，可跟随系统或在设置页手动切换
+- **四语完整翻译** —— 简体中文 / 繁體中文 / English / 日本語，可跟随系统或在设置页手动切换
 - **桌面 / 网页 / 终端三种界面** —— 除了桌面 GUI，还能在浏览器里打开与桌面完全相同的[网页界面](#网页界面可选默认关闭)，或用[终端 TUI 界面](#终端界面可选默认关闭)在命令行里管理订阅、查看实时路由与请求日志
 - **虚拟模型多别名** —— fable / opus / sonnet / haiku 四个槽位各识别多种命名，以 opus 为例，`model-opus` / `claude-opus-4-7` / `anthropic/model-opus` / `anthropic/claude-opus-4-7` 都路由到同一虚拟模型，工具用什么命名都不挑
 - **本地 HTTPS** —— 一键生成自签 CA 与服务器证书，让只支持 HTTPS 的客户端也能接入 cc-router，详见[配置教程](https://ccrouter.app/docs/claude-desktop-integration/)
 - **接入 Claude Desktop App** —— 借助本地 HTTPS 与虚拟模型别名，Anthropic 官方桌面端可直接走 cc-router 聚合的多家订阅，详见[配置教程](https://ccrouter.app/docs/claude-desktop-integration/)
 
-<table align="center">  
-  <tr>  
-    <td align="center" width="50%"><img src="assets/screenshots/zh/routing.png" alt="cc-router 实时路由页截图" />   <sub><b>实时路由</b> · 请求流向一图看全</sub></td>  
-    <td align="center" width="50%"><img src="assets/screenshots/zh/models.png" alt="cc-router 虚拟模型配置页截图" />   <sub><b>虚拟模型</b> · 拖拽排订阅优先级</sub></td>  
-  </tr>  
-  <tr>  
-    <td align="center" width="50%"><img src="assets/screenshots/zh/logs.png" alt="cc-router 请求日志页截图" />   <sub><b>请求日志</b> · 每次请求的模型、耗时与 token</sub></td>  
-    <td align="center" width="50%"><img src="assets/screenshots/zh/receipts.png" alt="cc-router 用量小票页截图" />   <sub><b>用量小票</b> · token 用量导出成小票</sub></td>  
-  </tr>  
-  <tr>  
-    <td align="center" width="50%"><img src="assets/screenshots/zh/tui-overview.png" alt="cc-router 终端界面总览页截图" />   <sub><b>终端界面总览</b> · 订阅健康与额度一屏看完</sub></td>  
-    <td align="center" width="50%"><img src="assets/screenshots/zh/tui-log-detail.png" alt="cc-router 终端界面请求详情截图" />   <sub><b>终端界面请求详情</b> · 单次请求的完整记录</sub></td>  
-  </tr>  
+<table align="center">
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/zh/routing.png" alt="cc-router 实时路由页截图" /><br /><sub><b>实时路由</b> · 请求流向一图看全</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/zh/models.png" alt="cc-router 虚拟模型配置页截图" /><br /><sub><b>虚拟模型</b> · 拖拽排订阅优先级</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/zh/logs.png" alt="cc-router 请求日志页截图" /><br /><sub><b>请求日志</b> · 每次请求的模型、耗时与 token</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/zh/receipts.png" alt="cc-router 用量小票页截图" /><br /><sub><b>用量小票</b> · token 用量导出成小票</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/zh/tui-overview.png" alt="cc-router 终端界面总览页截图" /><br /><sub><b>终端界面总览</b> · 订阅健康与额度一屏看完</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/zh/tui-log-detail.png" alt="cc-router 终端界面请求详情截图" /><br /><sub><b>终端界面请求详情</b> · 单次请求的完整记录</sub></td>
+  </tr>
 </table>
 
 ## 接入指南
 
 下方这些 AI Agent / Coding Agent 工具都能接入 cc-router，用上你手里的全部大模型 Plan：
 
-<p>  
-<a href="https://ccrouter.app/docs/getting-started/" target="\_blank" rel="noopener">Claude Code cli</a> ·   
-<a href="https://ccrouter.app/docs/claude-desktop-integration/" target="\_blank" rel="noopener">Claude Desktop App</a> ·   
-<a href="https://ccrouter.app/docs/codex-integration/" target="\_blank" rel="noopener">OpenAI Codex cli</a> ·   
-<a href="https://ccrouter.app/docs/codex-integration/" target="\_blank" rel="noopener">OpenAI Codex Desktop App</a> · OpenCode · OpenClaw · Kimi code cli · pi coding agent 等，还有很多。  
+<p>
+<a href="https://ccrouter.app/docs/getting-started/" target="_blank" rel="noopener">Claude Code cli</a> · 
+<a href="https://ccrouter.app/docs/claude-desktop-integration/" target="_blank" rel="noopener">Claude Desktop App</a> · 
+<a href="https://ccrouter.app/docs/codex-integration/" target="_blank" rel="noopener">OpenAI Codex cli</a> · 
+<a href="https://ccrouter.app/docs/codex-integration/" target="_blank" rel="noopener">OpenAI Codex Desktop App</a> · OpenCode · OpenClaw · Kimi code cli · pi coding agent 等，还有很多。
 </p>
 
 ## 安装使用
@@ -179,17 +105,17 @@
 2. 添加各家厂商的订阅，给虚拟模型绑定真实模型并选好调度模式。
 3. 把生成的配置粘到 Claude Code 等工具里即可使用。
 
-| 系统      | 架构            | 安装包                                 | 下载                                                                                                                                                                                           |
-| ------- | ------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS   | Apple Silicon | `cc-router_macOS-arm64.dmg`         | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-arm64.dmg) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_macOS-arm64.dmg)                 |
-| macOS   | Intel         | `cc-router_macOS-x64.dmg`           | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-x64.dmg) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_macOS-x64.dmg)                     |
-| Windows | x64           | `cc-router_windows-x64-setup.exe`   | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64-setup.exe) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64-setup.exe)     |
-| Windows | x64 (MSI)     | `cc-router_windows-x64.msi`         | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64.msi) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64.msi)                 |
-| Windows | arm64         | `cc-router_windows-arm64-setup.exe` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-arm64-setup.exe) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_windows-arm64-setup.exe) |
-| Linux   | x64           | `cc-router_linux-x64.AppImage`      | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.AppImage) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.AppImage)           |
-| Linux   | x64           | `cc-router_linux-x64.deb`           | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.deb) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.deb)                     |
-| Linux   | arm64         | `cc-router_linux-arm64.AppImage`    | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.AppImage) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.AppImage)       |
-| Linux   | arm64         | `cc-router_linux-arm64.deb`         | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.deb) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.deb)                 |
+| 系统 | 架构 | 安装包 | 下载 |
+|---|---|---|---|
+| macOS | Apple Silicon | `cc-router_macOS-arm64.dmg` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-arm64.dmg) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_macOS-arm64.dmg) |
+| macOS | Intel | `cc-router_macOS-x64.dmg` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-x64.dmg) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_macOS-x64.dmg) |
+| Windows | x64 | `cc-router_windows-x64-setup.exe` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64-setup.exe) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64-setup.exe) |
+| Windows | x64 (MSI) | `cc-router_windows-x64.msi` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64.msi) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64.msi) |
+| Windows | arm64 | `cc-router_windows-arm64-setup.exe` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-arm64-setup.exe) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_windows-arm64-setup.exe) |
+| Linux | x64 | `cc-router_linux-x64.AppImage` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.AppImage) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.AppImage) |
+| Linux | x64 | `cc-router_linux-x64.deb` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.deb) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.deb) |
+| Linux | arm64 | `cc-router_linux-arm64.AppImage` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.AppImage) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.AppImage) |
+| Linux | arm64 | `cc-router_linux-arm64.deb` | [全球下载](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.deb) · [中国下载](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.deb) |
 
 > 两个地址内容完全相同，中国大陆用户选「中国下载」更快。链接始终指向最新版本，历史版本见 [Releases](https://github.com/finch-xu/cc-router/releases)。Linux 推荐 AppImage，支持应用内自动更新；deb 需手动重新下载升级。
 
@@ -221,14 +147,13 @@
 
 虚拟模型和别名：
 
-| 虚拟模型           | 别名                                                                                                      |
-| -------------- | ------------------------------------------------------------------------------------------------------- |
-| `model-fable`  | `anthropic/model-fable` `anthropic/claude-fable*` `claude-fable*` `gpt-*-astra` `openai/gpt-*-astra`    |
-| `model-opus`   | `anthropic/model-opus` `anthropic/claude-opus*` `claude-opus*` `gpt-*-sol` `openai/gpt-*-sol`           |
-| `model-sonnet` | `anthropic/model-sonnet` `anthropic/claude-sonnet*` `claude-sonnet*` `gpt-*-terra` `openai/gpt-*-terra` |
-| `model-haiku`  | `anthropic/model-haiku` `anthropic/claude-haiku*` `claude-haiku*` `gpt-*-luna` `openai/gpt-*-luna`      |
-| `model-jev`    | `anthropic/model-jev` `openai/model-jev`（只在 `/v1/systemone` 入口可用，对话入口收到会返回 400）                         |
-
+| 虚拟模型 | 别名 |
+|---|---|
+|  `model-fable` |  `anthropic/model-fable` `anthropic/claude-fable*` `claude-fable*` `gpt-*-astra` `openai/gpt-*-astra` |
+|  `model-opus` |  `anthropic/model-opus` `anthropic/claude-opus*` `claude-opus*` `gpt-*-sol` `openai/gpt-*-sol` |
+|  `model-sonnet` |  `anthropic/model-sonnet` `anthropic/claude-sonnet*` `claude-sonnet*` `gpt-*-terra` `openai/gpt-*-terra` |
+|  `model-haiku` |  `anthropic/model-haiku` `anthropic/claude-haiku*` `claude-haiku*` `gpt-*-luna` `openai/gpt-*-luna` |
+|  `model-jev` |  `anthropic/model-jev` `openai/model-jev`（只在 `/v1/systemone` 入口可用，对话入口收到会返回 400） |
 
 > `claude-opus*` 的含义是模糊匹配，你可以传入任意符合规则的模型名，都会被归一为虚拟模型`model-opus`，比如 `claude-opus-4-8` `claude-opus-4-7-20260101` `claude-opus-100` 都没问题。`gpt-*-sol` 这类按档位段匹配：`gpt-6-sol` `gpt-6.1-sol` `gpt-5.6-sol-20261201` 都命中 sol 档（astra/terra/luna 同理）。只认档位名：`gpt-5.5` 这类纯版本号和 `gpt-*-mini` 不映射，会落到 `model-fallback`。
 
@@ -241,14 +166,13 @@ cc-router 夹在你的工具和大模型厂商中间：工具从**入口**连进
 三个对话入口共用同一套订阅、虚拟模型、限额与会话亲和；第四个入口 `/v1/systemone` 专供 Jev 决策模型，只调度 `model-jev`。请求日志的「入口接口」一栏能看到每条请求从哪个入口进来。按你的工具支持的协议展开对应一节：
 
 <details>
-
 <summary><b>Anthropic Messages</b> <code>/v1/messages</code> —— Claude Code、Claude Desktop、OpenCode、OpenClaw、pi、Kimi code cli 等</summary>
 
-| 配置项      | 填写                                                                                                                   |
-| -------- | -------------------------------------------------------------------------------------------------------------------- |
-| Base URL | `http://127.0.0.1:23456`（不带 `/v1`，工具会自己拼 `/v1/messages`）                                                             |
-| 鉴权       | `x-api-key: <token>` 或 `Authorization: Bearer <token>`，对应 Claude Code 的 `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` |
-| 模型名      | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku`，或上方别名表里的任意写法（含 `anthropic/` 前缀）                        |
+| 配置项 | 填写 |
+|---|---|
+| Base URL | `http://127.0.0.1:23456`（不带 `/v1`，工具会自己拼 `/v1/messages`） |
+| 鉴权 | `x-api-key: <token>` 或 `Authorization: Bearer <token>`，对应 Claude Code 的 `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` |
+| 模型名 | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku`，或上方别名表里的任意写法（含 `anthropic/` 前缀） |
 
 - 这是主入口，请求原样透传不做协议翻译，thinking、`output_config.effort`、`cache_control`、图片、工具调用全部按 Anthropic 原生语义工作。
 - Claude Code 的完整 env 示例见上方「在 Claude Code 中使用」；Claude Desktop 需要本地 HTTPS，见[配置教程](https://ccrouter.app/docs/claude-desktop-integration/)。
@@ -258,14 +182,13 @@ cc-router 夹在你的工具和大模型厂商中间：工具从**入口**连进
 </details>
 
 <details>
-
 <summary><b>OpenAI Responses</b> <code>/v1/responses</code> —— Codex CLI、Codex Desktop App 及其他 Responses 客户端</summary>
 
-| 配置项      | 填写                                                                                                                                                |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Base URL | `http://127.0.0.1:23456/v1`                                                                                                                       |
-| API Key  | cc-router 设置页里的 token，Codex 从 `OPENAI_API_KEY` 或 `~/.codex/auth.json` 读取                                                                          |
-| 模型名      | `gpt-*-astra` / `gpt-*-sol` / `gpt-*-terra` / `gpt-*-luna` 档位名（如 `gpt-6-sol`，可带 `openai/` 前缀），分别落到 fable / opus / sonnet / haiku；也接受 `model-*` 写法 |
+| 配置项 | 填写 |
+|---|---|
+| Base URL | `http://127.0.0.1:23456/v1` |
+| API Key | cc-router 设置页里的 token，Codex 从 `OPENAI_API_KEY` 或 `~/.codex/auth.json` 读取 |
+| 模型名 | `gpt-*-astra` / `gpt-*-sol` / `gpt-*-terra` / `gpt-*-luna` 档位名（如 `gpt-6-sol`，可带 `openai/` 前缀），分别落到 fable / opus / sonnet / haiku；也接受 `model-*` 写法 |
 
 `~/.codex/config.toml` 片段（app 内「接入指南 → Codex」有完整步骤，之后用 `codex -p cc-router` 启动）：
 
@@ -290,16 +213,15 @@ model = "model-sonnet"
 </details>
 
 <details>
-
 <summary><b>OpenAI Chat Completions</b> <code>/v1/chat/completions</code> —— Open WebUI、Cherry Studio、Cline、LobeChat 等</summary>
 
 Open WebUI、Cherry Studio、Cline、LobeChat 等只支持 OpenAI Chat Completions 的工具，把「OpenAI 兼容」端点指向 cc-router 即可：
 
-| 配置项      | 填写                                                                                                                                                        |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Base URL | `http://127.0.0.1:23456/v1`（有的工具要求不带 `/v1`，按工具提示调整）                                                                                                       |
-| API Key  | cc-router 设置页里的 token（关闭鉴权时随便填一个非空值）                                                                                                                      |
-| 模型名      | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku`，或 `gpt-6-astra` / `gpt-6-sol` / `gpt-6-terra` / `gpt-6-luna` 等档位别名，从 `GET /v1/models` 可直接拉取 |
+| 配置项 | 填写 |
+|---|---|
+| Base URL | `http://127.0.0.1:23456/v1`（有的工具要求不带 `/v1`，按工具提示调整） |
+| API Key | cc-router 设置页里的 token（关闭鉴权时随便填一个非空值） |
+| 模型名 | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku`，或 `gpt-6-astra` / `gpt-6-sol` / `gpt-6-terra` / `gpt-6-luna` 等档位别名，从 `GET /v1/models` 可直接拉取 |
 
 行为说明：
 
@@ -314,16 +236,15 @@ Open WebUI、Cherry Studio、Cline、LobeChat 等只支持 OpenAI Chat Completio
 </details>
 
 <details>
-
 <summary><b>Jev System One</b> <code>/v1/systemone</code> —— 你自己的代码、Agent 框架，或任何能发 HTTP 请求的程序</summary>
 
 Jev（System One）是一类结构化决策模型：请求给出一段状态 `state` 和一组问题 `questions`，响应按问题逐个返回结构化答案 `answers`，不生成对话文本。cc-router 把多家上游的 Key 聚合在独立的虚拟模型 `model-jev` 下，协议原样透传、不做翻译。
 
-| 配置项  | 填写                                                         |
-| ---- | ---------------------------------------------------------- |
-| 接口地址 | `http://127.0.0.1:23456/v1/systemone`（写完整路径）               |
-| 鉴权   | `Authorization: Bearer <token>`，`x-api-key: <token>` 也可以   |
-| 模型名  | `model-jev`（可带 `anthropic/` / `openai/` 前缀），也可以直接写上游的真实模型名 |
+| 配置项 | 填写 |
+|---|---|
+| 接口地址 | `http://127.0.0.1:23456/v1/systemone`（写完整路径） |
+| 鉴权 | `Authorization: Bearer <token>`，`x-api-key: <token>` 也可以 |
+| 模型名 | `model-jev`（可带 `anthropic/` / `openai/` 前缀），也可以直接写上游的真实模型名 |
 
 命令行验证：
 
@@ -356,7 +277,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 出口按协议分三类，另有一类走 OAuth 登录的订阅账号，以及只服务 `model-jev` 的 System One 接入点。内置厂商预设和自定义端点走的是同一条路，区别只是内置预设已经替你填好地址、鉴权方式和模型列表。完整内置清单以 app 内「添加订阅」页为准，描述文件在 [`src-tauri/providers/`](src-tauri/providers/)，欢迎 PR 补充。
 
 <details>
-
 <summary><b>Anthropic Messages 兼容</b> —— 主路径，请求原样透传</summary>
 
 - 内置：Anthropic 官方、DeepSeek、智谱 GLM、Moonshot Kimi、MiniMax、小米 MiMo、阿里云百炼、火山方舟、腾讯云、百度千帆、阶跃星辰、魔搭 ModelScope、优云智算、Fireworks、OpenRouter、Requesty、xAI Grok、Aiberm、Ollama 等，覆盖各家的 Token Plan / Coding Plan / Agent Plan 订阅与按量付费 API
@@ -366,7 +286,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 </details>
 
 <details>
-
 <summary><b>OpenAI 兼容</b> <code>/v1/responses</code> · <code>/v1/chat/completions</code> —— 协议翻译</summary>
 
 - 内置：OpenAI 官方 API（GPT-5 / o3 / 4.1 等 reasoning 模型）
@@ -377,7 +296,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 </details>
 
 <details>
-
 <summary><b>Gemini 兼容</b> <code>generateContent</code> · <code>/v1beta/interactions</code> —— 协议翻译</summary>
 
 - 内置：Google AI Studio（generateContent，按量付费 + 免费 quota）、Google Gemini Interactions API（新统一接口）
@@ -387,7 +305,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 </details>
 
 <details>
-
 <summary><b>订阅账号出口（OAuth）</b> —— Codex（ChatGPT Plus/Pro）、Kiro（AWS）</summary>
 
 - 不用 API Key，通过 OAuth 设备码登录，把 ChatGPT 订阅 / Kiro 免费 Claude 额度当作出口
@@ -396,7 +313,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 </details>
 
 <details>
-
 <summary><b>Jev System One</b> <code>/v1/systemone</code> —— 只服务 <code>model-jev</code>，原样透传</summary>
 
 - 内置：TypeSafe、OpenRouter（System One 接入点）、Ollama 0.35+（本地 System One 接入点）、Cloudflare Clef；在「添加订阅」里选对应厂商的 System One 接入点即可
@@ -416,18 +332,17 @@ curl http://127.0.0.1:23456/v1/systemone \
 - **能做什么** —— 总览、订阅（启停 / 测试连接 / 刷新模型与余额 / 改槽位 / 新建 / 删除）、虚拟模型、实时路由、请求日志；按 `?` 查看全部键位。界面语言跟随桌面 app 的语言设置（改了之后重开终端界面生效）
 - **已知限制** —— 终端至少 80×24；部分符号属于「模糊宽度」字符，在东亚语言环境下可能按两列显示导致错位，遇到时在终端设置里打开「模糊宽度字符按窄字符（单宽）显示」一类的选项；新建 OAuth 类订阅与修改 API Key 仍需在桌面 app 里完成
 
-<table align="center">  
-  <tr>  
-    <td width="33%"><img src="assets/screenshots/zh/tui-overview.png" alt="cc-router 终端界面总览页截图" /></td>  
-    <td width="33%"><img src="assets/screenshots/zh/tui-subscriptions.png" alt="cc-router 终端界面订阅页截图" /></td>  
-    <td width="33%"><img src="assets/screenshots/zh/tui-log-detail.png" alt="cc-router 终端界面请求详情截图" /></td>  
-  </tr>  
+<table align="center">
+  <tr>
+    <td width="33%"><img src="assets/screenshots/zh/tui-overview.png" alt="cc-router 终端界面总览页截图" /></td>
+    <td width="33%"><img src="assets/screenshots/zh/tui-subscriptions.png" alt="cc-router 终端界面订阅页截图" /></td>
+    <td width="33%"><img src="assets/screenshots/zh/tui-log-detail.png" alt="cc-router 终端界面请求详情截图" /></td>
+  </tr>
 </table>
 
 ## 常见问题&使用场景
 
 <details>
-
 <summary>cc-router 解决了什么问题？</summary>
 
 **没有 cc-router 时**：AI Agent（Claude Code / OpenCode 等）一次只能接一家厂商，小额度订阅在关键时刻断流，得手动切配置——体验糟糕。
@@ -444,7 +359,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 </details>
 
 <details>
-
 <summary><code>model-opus</code> / <code>model-sonnet</code> / <code>model-haiku</code> 三个虚拟模型是干啥的？</summary>
 
 Claude Code 按任务难度分三档：opus 做规划、sonnet 写代码、haiku 跑工具调用。
@@ -460,7 +374,6 @@ CC 请求来了就按映射转发，不用再频繁改 `~/.claude/settings.json`
 </details>
 
 <details>
-
 <summary>有多个 Coding Plan 怎么搭配？</summary>
 
 举例：订阅 A = GLM-5 / MiniMax-2.7 / DeepSeek-Flash，订阅 B = DeepSeek-V4-Pro / MiniMax-2.7 / GLM-5。
@@ -471,7 +384,6 @@ CC 请求来了就按映射转发，不用再频繁改 `~/.claude/settings.json`
 </details>
 
 <details>
-
 <summary>调度模式：顺序、轮询还是会话亲和？</summary>
 
 - **顺序** —— 用完 A 再切 B。命中缓存好、能榨干小额度订阅，**推荐给两个小额 GLM Coding Plan 这类场景**
@@ -510,7 +422,6 @@ pnpm tauri build
 ## Windows 开发环境注意事项
 
 <details>
-
 <summary>在 Windows 上开发或打包遇到问题时展开（能省几小时）</summary>
 
 **1. 必须用 MSVC toolchain，不能用 GNU**

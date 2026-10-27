@@ -40,6 +40,7 @@ use crate::proxy::transform::openai_chat_completions::ChatCompletionsExtras;
 use crate::proxy::transform::openai_responses::CodexExtras;
 use crate::state::AppState;
 use crate::subscription::model::SubscriptionRow;
+use crate::subscription::schedule::WallClock;
 use crate::virtual_model::SubscriptionSlot;
 
 #[derive(Debug)]
@@ -108,12 +109,33 @@ fn dispatch_result_to_probe<T>(res: Result<T, OAuthDispatchError>) -> ProbeResul
             message,
             note: None,
         },
-        Err(OAuthDispatchError::Upstream { status, message, retry_after_secs: _ }) => ProbeResult {
+        // 有状态码 = 上游 HTTP 错误, message 是原始错误体 (可能为空): 与透传家族同款格式化。
+        // 无状态码 = cc-router 自己写的网络 / 翻译错误文案, 原样保留。
+        Err(OAuthDispatchError::Upstream { status: Some(s), message }) => ProbeResult {
             ok: false,
-            http_status: status,
+            http_status: Some(s),
+            message: http_failure_message(s, &message),
+            note: None,
+        },
+        Err(OAuthDispatchError::Upstream { status: None, message }) => ProbeResult {
+            ok: false,
+            http_status: None,
             message,
             note: None,
         },
+    }
+}
+
+/// 上游非 2xx 时给用户看的失败文案: `HTTP 4xx: <错误体前 300 字>`, 错误体为空时只有 `HTTP 4xx`。
+/// 三条探测路径 (透传 / 翻译类 dispatch / System One) 共用, 保证失败原因永远不为空 (issue #63)。
+fn http_failure_message(status: u16, body: &str) -> String {
+    let prefix = format!("HTTP {status}");
+    let snippet: String = body.trim().chars().take(300).collect();
+    // 部分 dispatch 在上游没给错误体时已自行填了 "HTTP 4xx", 不重复拼。
+    if snippet.is_empty() || snippet == prefix {
+        prefix
+    } else {
+        format!("{prefix}: {snippet}")
     }
 }
 
@@ -158,16 +180,10 @@ async fn probe(
             if status.is_success() {
                 ProbeResult::noted(true, Some(status_u16), ProbeNote::Ok)
             } else {
-                let snippet: String = body_text.chars().take(300).collect();
-                let message = if snippet.is_empty() {
-                    format!("HTTP {status_u16}")
-                } else {
-                    format!("HTTP {status_u16}: {snippet}")
-                };
                 ProbeResult {
                     ok: false,
                     http_status: Some(status_u16),
-                    message,
+                    message: http_failure_message(status_u16, &body_text),
                     note: None,
                 }
             }
@@ -187,13 +203,8 @@ async fn probe_systemone(client: &reqwest::Client, row: &SubscriptionRow, model:
     };
     let wire = out.wire;
     let r = match crate::proxy::upstream::send(client, &out.url, out.body.to_vec(), out.headers, false).await {
-        Ok(crate::proxy::upstream::UpstreamResponse::NonStreaming { status, headers, body, body_text, .. }) => {
-            AttemptResult::Http {
-                status,
-                body,
-                body_text,
-                retry_after_secs: crate::proxy::upstream::retry_after_secs(&headers),
-            }
+        Ok(crate::proxy::upstream::UpstreamResponse::NonStreaming { status, body, body_text, .. }) => {
+            AttemptResult::Http { status, body, body_text }
         }
         Ok(_) => return ProbeResult::noted(true, None, ProbeNote::Ok),
         Err(e) => return ProbeResult::noted(false, None, ProbeNote::Network { detail: e.to_string() }),
@@ -204,8 +215,7 @@ async fn probe_systemone(client: &reqwest::Client, row: &SubscriptionRow, model:
             if status.is_success() {
                 ProbeResult::noted(true, Some(s), ProbeNote::Ok)
             } else {
-                let snippet: String = body_text.unwrap_or_default().chars().take(300).collect();
-                let message = if snippet.is_empty() { format!("HTTP {s}") } else { format!("HTTP {s}: {snippet}") };
+                let message = http_failure_message(s, &body_text.unwrap_or_default());
                 ProbeResult { ok: false, http_status: Some(s), message, note: None }
             }
         }
@@ -222,7 +232,7 @@ async fn probe_systemone(client: &reqwest::Client, row: &SubscriptionRow, model:
 /// `is_streaming=false` → 各 dispatch 走非流式 collector;无客户端转发头,故
 /// `forward_headers`/`client_headers` 传空。`sub_id` 取自 `row.id`。
 ///
-/// `slot`: `model` 来自哪个订阅槽位 (由 [`pick_test_model`] 给出)。用来取该槽位的 forced
+/// `slot`: `model` 来自哪个订阅槽位 (由 [`pick_test_model_at`] 给出)。用来取该槽位的 forced
 /// effort, 让探测的 effort 与真实 dispatch 一致 —— 否则用户给"只接受某一档的模型"固定了档位,
 /// 探测却发 yaml 默认档触发上游 400, UI 就会谎报"连接不通"。example_models 兜底时传 None。
 pub async fn probe_subscription(
@@ -230,12 +240,12 @@ pub async fn probe_subscription(
     row: &SubscriptionRow,
     model: &str,
     slot: Option<SubscriptionSlot>,
+    at: WallClock,
 ) -> ProbeResult {
     let sub_id = row.id;
     let mut body = ping_body(model);
-    let forced_effort: Option<String> = slot
-        .and_then(|s| row.slot_efforts.get(s))
-        .map(str::to_string);
+    let forced_effort: Option<String> =
+        slot.and_then(|s| probe_effort(row, s, model, at));
 
     // System One 订阅的 auth_type 也是 ApiKey, 必须先于 match 分流, 否则会被当成 Anthropic 发 ping_body。
     if row.endpoint_protocol == crate::provider::model::EndpointProtocol::Systemone {
@@ -399,14 +409,46 @@ pub async fn probe_subscription(
     }
 }
 
-/// 选一个 model 名用于探测请求, 并一并返回它来自哪个槽位。优先 fable → sonnet → haiku → opus
-/// (Fable 是用户自定义槽, 最贴近实际使用场景), 都为空时退到订阅 snapshot 的
-/// model_discovery.example_models[0]。"(pending)" 是 SubscriptionNewPage 两步向导留下的占位, 跳过。
+/// 探测 `model` 时该带的思考强度, 与真实请求同规则: 它是此刻生效的那条时段规则的模型 →
+/// 规则自带的强度 (没有则槽位级); 它是 [`pick_test_model_at`] 退到的「第一条规则」的模型 →
+/// 那条规则的强度 (没有则槽位级); 其余 (默认模型) → 槽位级。
+fn probe_effort(row: &SubscriptionRow, slot: SubscriptionSlot, model: &str, at: WallClock) -> Option<String> {
+    let now = crate::subscription::schedule::effective_choice(
+        row.model_slots.get(slot),
+        row.slot_schedules.get(slot),
+        at,
+    );
+    let rule_effort = match now {
+        Some((m, e)) if m == model => e,
+        _ => row
+            .slot_schedules
+            .get(slot)
+            .iter()
+            .find(|r| r.model.trim() == model)
+            .filter(|_| row.model_slots.get(slot).trim() != model)
+            .and_then(|r| r.effort.as_deref()),
+    };
+    rule_effort.or_else(|| row.slot_efforts.get(slot)).map(str::to_string)
+}
+
+/// 选一个 model 名用于探测请求, 并一并返回它来自哪个槽位。优先 sonnet → haiku → opus
+/// (CC 主用 sonnet), 都为空时退到订阅 snapshot 的 model_discovery.example_models[0]。
+/// "(pending)" 是 SubscriptionNewPage 两步向导留下的占位, 跳过。
+/// 每个槽位内依次取: 此刻生效模型 (时段规则 → 默认) → 默认模型 → 第一条规则的模型 ——
+/// 探测验证的是连通性, 不该因为「现在不在时段内」而测不了。
 ///
 /// 返回槽位是为了让 [`probe_subscription`] 能取该槽位的 forced effort —— 否则用户给"只接受
 /// 某一档的模型"固定了档位, 探测却发 yaml 默认档, 上游 400, UI 谎报"连接不通"。
 /// example_models 兜底时没有对应槽位, 返回 None。
-pub fn pick_test_model(row: &SubscriptionRow) -> Option<(String, Option<SubscriptionSlot>)> {
+///
+/// 注: 刻意不遍历 fable (保持既有行为不变) —— 探测只验证连通性, 用最弱可用的槽位即可。
+/// 代价是只给 fable 槽设了 effort 的订阅, 探测不会带上那个 effort。
+///
+/// `at`: 本机挂钟时刻, 调用方取一次后同时传给 [`probe_subscription`] (测试用固定值)。
+pub fn pick_test_model_at(
+    row: &SubscriptionRow,
+    at: WallClock,
+) -> Option<(String, Option<SubscriptionSlot>)> {
     // System One 订阅不用四槽: Jev 槽优先, 否则端点 example_models (创建时已快照进 model_discovery)。
     if row.endpoint_protocol == crate::provider::model::EndpointProtocol::Systemone {
         return row
@@ -417,15 +459,27 @@ pub fn pick_test_model(row: &SubscriptionRow) -> Option<(String, Option<Subscrip
             .map(|m| (m, None));
     }
 
-    for (s, slot) in [
-        (&row.model_slots.fable, SubscriptionSlot::Fable),
-        (&row.model_slots.sonnet, SubscriptionSlot::Sonnet),
-        (&row.model_slots.haiku, SubscriptionSlot::Haiku),
-        (&row.model_slots.opus, SubscriptionSlot::Opus),
+    let usable = |m: &str| {
+        let m = m.trim();
+        (!m.is_empty() && m != "(pending)").then(|| m.to_string())
+    };
+    for slot in [
+        SubscriptionSlot::Sonnet,
+        SubscriptionSlot::Haiku,
+        SubscriptionSlot::Opus,
     ] {
-        let trimmed = s.trim();
-        if !trimmed.is_empty() && trimmed != "(pending)" {
-            return Some((trimmed.to_string(), Some(slot)));
+        let picked = row
+            .slot_model_at(slot, at)
+            .and_then(usable)
+            .or_else(|| usable(row.model_slots.get(slot)))
+            .or_else(|| {
+                row.slot_schedules
+                    .get(slot)
+                    .first()
+                    .and_then(|r| usable(&r.model))
+            });
+        if let Some(m) = picked {
+            return Some((m, Some(slot)));
         }
     }
     row.model_discovery
@@ -435,17 +489,16 @@ pub fn pick_test_model(row: &SubscriptionRow) -> Option<(String, Option<Subscrip
         .map(|m| (m, None))
 }
 
-/// [`pick_test_model`] 的 async 包装: 先用四槽 + example_models 挑 model, 都空时退到
-/// 模型池 (default capability = "llm") 取第一个 enabled 模型名. 用在探测连通性和
-/// recheck_worker 定期巡检两处 — 池组订阅四槽本来就全空, 原来的 sync 版本总是 None.
+/// 与 [`pick_test_model_at`] 同款, 但当四槽和 example_models 都空时退到能力池 (llm)。
+/// 给 pool 分组的订阅在没有经典槽位配置时也能探测连通性。
 pub async fn pick_test_model_with_pool_fallback(
     state: &AppState,
     row: &SubscriptionRow,
 ) -> Option<(String, Option<SubscriptionSlot>)> {
-    if let Some(m) = pick_test_model(row) {
+    let at = WallClock::now();
+    if let Some(m) = pick_test_model_at(row, at) {
         return Some(m);
     }
-    // 四槽和 example_models 都空了, 试试能力池
     match crate::subscription::store::list_pool_models(&state.db, row.id, "llm").await {
         Ok(models) if !models.is_empty() => Some((models[0].0.clone(), None)),
         _ => None,
@@ -482,22 +535,11 @@ mod tests {
     // ---------- pick_test_model 返回槽位 ----------
 
     #[test]
-    fn pick_test_model_returns_fable_slot_first() {
+    fn pick_test_model_returns_sonnet_slot() {
         let row = SubscriptionRow::test_fixture("anthropic", "default");
         // fixture: fable="d", opus="a", sonnet="b", haiku="c"
-        // Fable 优先于 sonnet/haiku/opus
         assert_eq!(
-            pick_test_model(&row),
-            Some(("d".to_string(), Some(SubscriptionSlot::Fable)))
-        );
-    }
-
-    #[test]
-    fn pick_test_model_falls_back_to_sonnet_when_fable_empty() {
-        let mut row = SubscriptionRow::test_fixture("anthropic", "default");
-        row.model_slots.fable = String::new();
-        assert_eq!(
-            pick_test_model(&row),
+            pick_test_model_at(&row, noon()),
             Some(("b".to_string(), Some(SubscriptionSlot::Sonnet)))
         );
     }
@@ -505,10 +547,9 @@ mod tests {
     #[test]
     fn pick_test_model_falls_back_to_haiku_slot() {
         let mut row = SubscriptionRow::test_fixture("anthropic", "default");
-        row.model_slots.fable = String::new();
         row.model_slots.sonnet = String::new();
         assert_eq!(
-            pick_test_model(&row),
+            pick_test_model_at(&row, noon()),
             Some(("c".to_string(), Some(SubscriptionSlot::Haiku)))
         );
     }
@@ -516,10 +557,9 @@ mod tests {
     #[test]
     fn pick_test_model_skips_pending_placeholder() {
         let mut row = SubscriptionRow::test_fixture("anthropic", "default");
-        row.model_slots.fable = "(pending)".into();
         row.model_slots.sonnet = "(pending)".into();
         assert_eq!(
-            pick_test_model(&row),
+            pick_test_model_at(&row, noon()),
             Some(("c".to_string(), Some(SubscriptionSlot::Haiku)))
         );
     }
@@ -534,7 +574,7 @@ mod tests {
         row.model_slots.haiku = String::new();
         row.model_discovery.example_models = vec!["example-model".into()];
         assert_eq!(
-            pick_test_model(&row),
+            pick_test_model_at(&row, noon()),
             Some(("example-model".to_string(), None))
         );
     }
@@ -560,21 +600,43 @@ mod tests {
     fn dispatch_upstream_err_preserves_status_and_message() {
         let r = dispatch_result_to_probe::<()>(Err(OAuthDispatchError::Upstream {
             status: Some(400),
-            retry_after_secs: None,
             message: "bad request".into(),
         }));
         assert!(!r.ok);
         assert_eq!(r.http_status, Some(400));
-        assert_eq!(r.message, "bad request");
+        assert_eq!(r.message, "HTTP 400: bad request");
 
-        // 网络层错误 status=None 时透传 None。
+        // 网络层错误 status=None 时透传 None, 文案是 cc-router 自己写的, 原样保留。
         let r2 = dispatch_result_to_probe::<()>(Err(OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: "网络错误".into(),
         }));
         assert!(!r2.ok);
         assert_eq!(r2.http_status, None);
+        assert_eq!(r2.message, "网络错误");
+    }
+
+    /// issue #63: 翻译类上游回空错误体时, 失败原因不能是空串。
+    #[test]
+    fn dispatch_upstream_err_with_empty_body_still_explains_failure() {
+        for body in ["", "  \n"] {
+            let r = dispatch_result_to_probe::<()>(Err(OAuthDispatchError::Upstream {
+                status: Some(502),
+                message: body.into(),
+            }));
+            assert_eq!(r.message, "HTTP 502");
+        }
+    }
+
+    #[test]
+    fn http_failure_message_formats_and_dedupes_prefix() {
+        assert_eq!(http_failure_message(404, "not found"), "HTTP 404: not found");
+        // dispatch 在没有错误体时已填了 "HTTP 4xx", 不拼成 "HTTP 403: HTTP 403"。
+        assert_eq!(http_failure_message(403, "HTTP 403"), "HTTP 403");
+        // 错误体截到 300 个字符 (按字符, 不切坏多字节)。
+        let long = "错".repeat(400);
+        let m = http_failure_message(500, &long);
+        assert_eq!(m.chars().count(), "HTTP 500: ".chars().count() + 300);
     }
 
     #[test]
@@ -583,8 +645,91 @@ mod tests {
         row.endpoint_protocol = crate::provider::model::EndpointProtocol::Systemone;
         row.model_slots.sonnet = "should-not-be-used".into();
         row.model_discovery.example_models = vec!["clef-flash".into()];
-        assert_eq!(pick_test_model(&row), Some(("clef-flash".to_string(), None)));
+        assert_eq!(pick_test_model_at(&row, noon()), Some(("clef-flash".to_string(), None)));
         row.model_slots.jev = "clef-pro".into();
-        assert_eq!(pick_test_model(&row), Some(("clef-pro".to_string(), None)));
+        assert_eq!(pick_test_model_at(&row, noon()), Some(("clef-pro".to_string(), None)));
+    }
+
+    // ---------- pick_test_model_at + slot time schedule ----------
+
+    use crate::subscription::schedule::{ScheduleRule, WallClock};
+
+    fn noon() -> WallClock {
+        WallClock { weekday: 3, minute: 12 * 60 }
+    }
+
+    fn evening() -> WallClock {
+        WallClock { weekday: 3, minute: 20 * 60 }
+    }
+
+    /// 探测的思考强度与真实请求同规则: 此刻命中的规则强度优先; 退到第一条规则的模型时用那条的强度。
+    #[test]
+    fn probe_effort_follows_rule_effort() {
+        let mut row = SubscriptionRow::test_fixture("anthropic", "default");
+        row.model_slots.sonnet = String::new();
+        row.slot_efforts.sonnet = Some("low".into());
+        let mut r = night_rule("night-model");
+        r.effort = Some("max".into());
+        row.slot_schedules.sonnet = vec![r];
+        // 夜里命中规则 → 规则强度
+        assert_eq!(probe_effort(&row, SubscriptionSlot::Sonnet, "night-model", evening()), Some("max".into()));
+        // 白天没有生效模型, pick_test_model_at 退到第一条规则 → 仍用那条规则的强度
+        assert_eq!(pick_test_model_at(&row, noon()), Some(("night-model".into(), Some(SubscriptionSlot::Sonnet))));
+        assert_eq!(probe_effort(&row, SubscriptionSlot::Sonnet, "night-model", noon()), Some("max".into()));
+        // 规则不带强度 → 槽位级
+        row.slot_schedules.sonnet[0].effort = None;
+        assert_eq!(probe_effort(&row, SubscriptionSlot::Sonnet, "night-model", evening()), Some("low".into()));
+        // 默认模型生效 → 槽位级
+        row.model_slots.sonnet = "day-model".into();
+        row.slot_schedules.sonnet[0].effort = Some("max".into());
+        assert_eq!(probe_effort(&row, SubscriptionSlot::Sonnet, "day-model", noon()), Some("low".into()));
+    }
+
+    fn night_rule(model: &str) -> ScheduleRule {
+        ScheduleRule {
+            days: vec![1, 2, 3, 4, 5, 6, 7],
+            start: "18:00".into(),
+            end: "08:00".into(),
+            model: model.into(),
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn pick_test_model_uses_first_rule_when_outside_window_and_default_blank() {
+        let mut row = SubscriptionRow::test_fixture("anthropic", "default");
+        row.model_slots.sonnet = String::new();
+        row.slot_schedules.sonnet = vec![night_rule("night-1"), night_rule("night-2")];
+        // haiku still has a default ("c"), but sonnet is tried first and has a rule model
+        assert_eq!(
+            pick_test_model_at(&row, noon()),
+            Some(("night-1".to_string(), Some(SubscriptionSlot::Sonnet)))
+        );
+    }
+
+    #[test]
+    fn pick_test_model_uses_rule_model_inside_window() {
+        let mut row = SubscriptionRow::test_fixture("anthropic", "default");
+        // default "b" is set, but the rule covers 20:00
+        row.slot_schedules.sonnet = vec![night_rule("night")];
+        assert_eq!(
+            pick_test_model_at(&row, evening()),
+            Some(("night".to_string(), Some(SubscriptionSlot::Sonnet)))
+        );
+        assert_eq!(
+            pick_test_model_at(&row, noon()),
+            Some(("b".to_string(), Some(SubscriptionSlot::Sonnet)))
+        );
+    }
+
+    #[test]
+    fn pick_test_model_skips_blank_slot_without_rules() {
+        let mut row = SubscriptionRow::test_fixture("anthropic", "default");
+        row.model_slots.sonnet = "  ".into();
+        row.model_slots.haiku = String::new();
+        assert_eq!(
+            pick_test_model_at(&row, noon()),
+            Some(("a".to_string(), Some(SubscriptionSlot::Opus)))
+        );
     }
 }

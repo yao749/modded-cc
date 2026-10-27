@@ -104,12 +104,13 @@ use crate::commands::receipts::ReceiptRange;
 use crate::commands::requests::RequestLogFilters;
 use crate::commands::statistics::{BreakdownBy, StatsRange};
 use crate::commands::subscriptions::{
-    CreateSubscriptionInput, ProbeCustomModelsInput, SaveModelPoolInput, SubscriptionPatch,
+    CreateSubscriptionInput, ProbeCustomModelsInput, SubscriptionPatch,
 };
 use crate::commands::virtual_models::UpdateVirtualModelInput;
 use crate::settings::model::SettingsPatch;
 use crate::subscription::model::KiroDisguise;
 use crate::subscription::quota::TokenQuotas;
+use crate::subscription::schedule::SlotSchedules;
 
 /// 网页 / TUI 通道上被拒绝的 command 的统一回复。
 const DESKTOP_ONLY: &str = "此操作只能在桌面 app 里执行";
@@ -119,7 +120,7 @@ web_commands! {
     // providers
     list_providers() => commands::providers::list_providers(st).await,
     // subscriptions
-    list_subscriptions(group: Option<String>) => commands::subscriptions::list_subscriptions(st, args.group).await,
+    list_subscriptions() => commands::subscriptions::list_subscriptions(st).await,
     get_subscription(id: String) => commands::subscriptions::get_subscription(st, args.id).await,
     create_subscription(input: CreateSubscriptionInput) => commands::subscriptions::create_subscription(st, args.input).await,
     update_subscription(id: String, patch: SubscriptionPatch) => commands::subscriptions::update_subscription(st, args.id, args.patch).await,
@@ -127,15 +128,13 @@ web_commands! {
     delete_subscription(id: String) => commands::subscriptions::delete_subscription(st, args.id).await,
     set_subscription_enabled(id: String, enabled: bool) => commands::subscriptions::set_subscription_enabled(st, args.id, args.enabled).await,
     test_connection(id: String) => commands::subscriptions::test_connection(st, args.id).await,
-    test_pool_connection(id: String, capability: String) => commands::subscriptions::test_pool_connection(st, args.id, args.capability).await,
     refresh_model_list(id: String) => commands::subscriptions::refresh_model_list(st, args.id).await,
     probe_custom_models(input: ProbeCustomModelsInput) => commands::subscriptions::probe_custom_models(st, args.input).await,
     refresh_subscription_balance(id: String) => commands::subscriptions::refresh_subscription_balance(st, args.id).await,
     update_token_quotas(id: String, quotas: TokenQuotas) => commands::subscriptions::update_token_quotas(st, args.id, args.quotas).await,
+    update_slot_schedules(id: String, schedules: SlotSchedules) => commands::subscriptions::update_slot_schedules(st, args.id, args.schedules).await,
+    get_host_clock() => commands::subscriptions::get_host_clock().await,
     reset_total_quota_usage(id: String) => commands::subscriptions::reset_total_quota_usage(st, args.id).await,
-    // 能力分类模型池
-    load_model_pool(subscription_id: String) => commands::subscriptions::load_model_pool(st, args.subscription_id).await,
-    save_model_pool(input: SaveModelPoolInput) => commands::subscriptions::save_model_pool(st, args.input).await,
     // ChatGPT OAuth
     start_chatgpt_device_flow() => commands::oauth::start_chatgpt_device_flow(st).await,
     poll_chatgpt_device_code(device_code: String) => commands::oauth::poll_chatgpt_device_code(st, args.device_code).await,
@@ -153,7 +152,6 @@ web_commands! {
     // virtual models
     list_virtual_models() => commands::virtual_models::list_virtual_models(st).await,
     update_virtual_model(name: String, input: UpdateVirtualModelInput) => commands::virtual_models::update_virtual_model(st, args.name, args.input).await,
-    list_model_pools() => commands::virtual_models::list_model_pools(st).await,
     // request logs
     list_requests(page: u32, page_size: u32, filters: Option<RequestLogFilters>) => commands::requests::list_requests(st, args.page, args.page_size, args.filters).await,
     export_requests_csv(path: String, filters: Option<RequestLogFilters>) => commands::requests::export_requests_csv(st, args.path, args.filters).await,

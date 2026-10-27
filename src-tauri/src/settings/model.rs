@@ -105,15 +105,13 @@ pub struct Settings {
     /// 中间件每请求读取, 开关不需要重启. 与 web_ui_enabled 互相独立.
     #[serde(default)]
     pub tui_enabled: bool,
-    /// 路由模式: "slots" (旧四槽, 默认, 向后兼容) 或 "pool" (能力分类模型池).
-    /// 两套数据共存不删除, 切模式只是翻转门禁: slots 模式下 model-llm 等池名会被 400,
-    /// pool 模式下 model-opus / model-sonnet 等旧名会被 400.
-    /// pipeline.rs 每请求读取, 开关不需要重启.
-    #[serde(default = "default_routing_mode")]
-    pub routing_mode: String,
     /// 导出用量小票时是否播放「小票机吐纸」动画. 默认开. 纯前端偏好, 后端不读.
     #[serde(default = "default_receipt_print_animation")]
     pub receipt_print_animation: bool,
+    /// 启动时是否自动检查新版本. 默认开 (老 settings.json 缺字段也视为开, 保持升级前行为).
+    /// 关闭后只在用户手动检查 (更新页按钮 / 托盘「检查更新」) 时联网. 纯前端偏好, 后端不读.
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
     /// 上次关闭「更新内容」弹窗时的 app 版本 (见 release_notes)。None = 从没有此功能的老版本升级上来,
     /// 或 settings.json 解析失败被重置; 全新安装由 settings::load_or_default 初始化为当前版本, 新用户不会被弹。
     /// 刻意不进 SettingsPatch: 只由 mark_release_notes_seen 写入当前版本。
@@ -156,10 +154,10 @@ fn default_max_request_body_mb() -> u32 {
 fn default_web_ui_auth_enabled() -> bool {
     true
 }
-fn default_routing_mode() -> String {
-    "slots".into()
-}
 fn default_receipt_print_animation() -> bool {
+    true
+}
+fn default_auto_check_updates() -> bool {
     true
 }
 
@@ -186,8 +184,8 @@ impl Default for Settings {
             web_ui_enabled: false,
             web_ui_auth_enabled: default_web_ui_auth_enabled(),
             tui_enabled: false,
-            routing_mode: default_routing_mode(),
             receipt_print_animation: default_receipt_print_animation(),
+            auto_check_updates: default_auto_check_updates(),
             last_seen_release_notes: None,
         }
     }
@@ -214,8 +212,8 @@ pub struct SettingsPatch {
     pub web_ui_enabled: Option<bool>,
     pub web_ui_auth_enabled: Option<bool>,
     pub tui_enabled: Option<bool>,
-    pub routing_mode: Option<String>,
     pub receipt_print_animation: Option<bool>,
+    pub auto_check_updates: Option<bool>,
 }
 
 impl Settings {
@@ -277,16 +275,11 @@ impl Settings {
         if let Some(p) = patch.tui_enabled {
             self.tui_enabled = p;
         }
-        if let Some(p) = patch.routing_mode {
-            // 只接受 "slots" / "pool", 脏值静默回落到默认 (apply_patch 里不报错, 让 patch 整体成功).
-            if p == "slots" || p == "pool" {
-                self.routing_mode = p;
-            } else {
-                self.routing_mode = default_routing_mode();
-            }
-        }
         if let Some(p) = patch.receipt_print_animation {
             self.receipt_print_animation = p;
+        }
+        if let Some(p) = patch.auto_check_updates {
+            self.auto_check_updates = p;
         }
     }
 }
@@ -579,5 +572,25 @@ mod tests {
         assert!(!s.receipt_print_animation);
         s.apply_patch(SettingsPatch::default());
         assert!(!s.receipt_print_animation);
+    }
+
+    #[test]
+    fn legacy_settings_json_without_auto_check_updates_loads_as_true() {
+        // 老版本 settings.json 没有这个字段, 升级后仍然启动即查 (保持原行为)
+        let s: Settings = serde_json::from_str(r#"{"proxy_port": 23456}"#).unwrap();
+        assert!(s.auto_check_updates);
+        assert!(Settings::default().auto_check_updates);
+    }
+
+    #[test]
+    fn apply_patch_sets_auto_check_updates() {
+        let mut s = Settings::default();
+        s.apply_patch(SettingsPatch {
+            auto_check_updates: Some(false),
+            ..SettingsPatch::default()
+        });
+        assert!(!s.auto_check_updates);
+        s.apply_patch(SettingsPatch::default());
+        assert!(!s.auto_check_updates);
     }
 }

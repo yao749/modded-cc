@@ -168,6 +168,20 @@ impl VirtualModelName {
         }
     }
 
+    /// 真正对应四槽路由的 slot, fallback / jev / 能力分类都返回 None。
+    /// 供 upstream 的 schedule 过滤和 model rewriting 使用。
+    pub fn four_slot(self) -> Option<SubscriptionSlot> {
+        match self {
+            VirtualModelName::Fallback | VirtualModelName::Jev => None,
+            VirtualModelName::Vision
+            | VirtualModelName::Llm
+            | VirtualModelName::Multimodal
+            | VirtualModelName::Speech
+            | VirtualModelName::Embedding => None,
+            other => Some(other.slot()),
+        }
+    }
+
     pub fn is_fallback(self) -> bool {
         matches!(self, VirtualModelName::Fallback)
     }

@@ -199,7 +199,7 @@ pub(crate) fn routing_mode_gate(
     vm_name: VirtualModelName,
     routing_mode: &str,
 ) -> Option<Response> {
-    use crate::virtual_model::RoutingParadigm;
+    use crate::virtual_model::model::RoutingParadigm;
 
     let paradigm = vm_name.paradigm();
     // 池范式与 Jev 不受模式影响: 池是独立体系, 任何模式下都能用
@@ -234,21 +234,17 @@ pub(crate) fn routing_mode_gate(
 }
 
 /// 把一次 attempt 的 dispatch 错误翻译成 (状态机事件, 是否值得 failover)。
-///
-/// Retry-After hint 只在真正拿到上游 HTTP 响应时存在: 由各 dispatcher 在
-/// `OAuthDispatchError::Upstream.retry_after_secs` 里带上来, 状态机据此决定冷却时长
-/// (clamp [30s, 2h], 缺失则回退 RateLimited 60s / QuotaExhausted 2h)。
 fn dispatch_err_to_event(err: &OAuthDispatchError) -> (state_machine::Event, bool) {
     match err {
         OAuthDispatchError::Auth(_) => (
-            state_machine::Event::HttpStatus { status: 401, retry_after_secs: None },
+            state_machine::Event::HttpStatus(401),
             false,
         ),
-        OAuthDispatchError::Upstream { status, retry_after_secs, .. } => {
+        OAuthDispatchError::Upstream { status, .. } => {
             let s = status.unwrap_or(502);
             let retryable = matches!(classify_response(s, None), ShouldRetry::Yes(_));
             (
-                state_machine::Event::HttpStatus { status: s, retry_after_secs: *retry_after_secs },
+                state_machine::Event::HttpStatus(s),
                 retryable,
             )
         }
@@ -269,15 +265,6 @@ pub async fn dispatch(
     let is_capability_based = vm_name.is_capability_based();
 
     if let Some(resp) = jev_only_via_systemone(vm_name) {
-        return Ok(resp);
-    }
-
-    // 1b. 路由模式门禁 (默认 slots, 脏值回落到 slots)
-    let routing_mode = {
-        let guard = state.settings.read().await;
-        guard.routing_mode.clone()
-    };
-    if let Some(resp) = routing_mode_gate(vm_name, &routing_mode) {
         return Ok(resp);
     }
 
@@ -307,7 +294,7 @@ pub async fn dispatch(
         _ => None,
     };
     let subs_map = state.subscriptions.read().await.clone();
-    let order = build_candidate_order(&vm_config, &subs_map, Utc::now(), pinned).await;
+    let order = build_candidate_order(&vm_config, &subs_map, Utc::now(), crate::subscription::schedule::WallClock::now(), pinned).await;
     drop(subs_map);
 
     if order.candidate_ids.is_empty() {
@@ -1431,15 +1418,14 @@ pub async fn dispatch(
                     ));
                 }
                 let should_retry = classify_response(status.as_u16(), None);
-                // 状态机事件 (透传 API Key 家族): 429 的 Retry-After 同样要喂给冷却
-                let retry_after = upstream::retry_after_secs(&resp_headers);
+                // 状态机事件 (透传 API Key 家族)
                 let event = match should_retry {
-                    ShouldRetry::Yes(_) => state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: retry_after },
+                    ShouldRetry::Yes(_) => state_machine::Event::HttpStatus(status.as_u16()),
                     ShouldRetry::No => {
                         if status.is_success() {
                             state_machine::Event::RequestSucceeded
                         } else {
-                            state_machine::Event::HttpStatus { status: status.as_u16(), retry_after_secs: retry_after }
+                            state_machine::Event::HttpStatus(status.as_u16())
                         }
                     }
                 };
@@ -1537,10 +1523,7 @@ pub async fn dispatch(
                 // 流式：若非 2xx 按非流式错误处理
                 if !status.is_success() {
                     emit_attempt_finished(state, sub_id, vm_name, false);
-                    let event = state_machine::Event::HttpStatus {
-                        status: status.as_u16(),
-                        retry_after_secs: upstream::retry_after_secs(&resp_headers),
-                    };
+                    let event = state_machine::Event::HttpStatus(status.as_u16());
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1577,7 +1560,7 @@ pub async fn dispatch(
                             &state.app_handle,
                             &state.event_log_tx,
                             rt.clone(),
-                            state_machine::Event::UpstreamSseError { is_quota_exhausted, retry_after_secs: None },
+                            state_machine::Event::UpstreamSseError { is_quota_exhausted },
                         )
                         .await;
 
@@ -2069,50 +2052,39 @@ mod tests {
         assert!(routing_mode_gate(VirtualModelName::Llm, mode).is_none());
     }
 
-    // ---- dispatch 错误 → 状态机事件 (Retry-After 透传) ----
+    // ---- dispatch 错误 → 状态机事件 ----
 
     #[test]
-    fn upstream_error_carries_retry_after_into_event() {
+    fn upstream_error_maps_to_http_status_event() {
         let err = OAuthDispatchError::Upstream {
             status: Some(429),
             message: "rate limited".into(),
-            retry_after_secs: Some(600),
         };
         let (event, retryable) = dispatch_err_to_event(&err);
         assert!(
-            matches!(
-                event,
-                state_machine::Event::HttpStatus { status: 429, retry_after_secs: Some(600) }
-            ),
-            "上游 Retry-After 必须原样带到事件里, 不能丢: {event:?}"
+            matches!(event, state_machine::Event::HttpStatus(429)),
+            "上游 429 必须映射为 HttpStatus(429): {event:?}"
         );
         assert!(retryable, "429 应触发 failover");
     }
 
     #[test]
-    fn upstream_error_without_header_keeps_hint_none() {
+    fn upstream_error_without_status_defaults_to_502() {
         let err = OAuthDispatchError::Upstream {
-            status: Some(429),
-            message: "rate limited".into(),
-            retry_after_secs: None,
+            status: None,
+            message: "network glitch".into(),
         };
         let (event, _) = dispatch_err_to_event(&err);
         assert!(
-            matches!(
-                event,
-                state_machine::Event::HttpStatus { status: 429, retry_after_secs: None }
-            ),
-            "没有 header 时保持 None, 让状态机走默认冷却: {event:?}"
+            matches!(event, state_machine::Event::HttpStatus(502)),
+            "无 status 时默认 502: {event:?}"
         );
     }
 
     #[test]
-    fn auth_error_maps_to_401_without_hint() {
+    fn auth_error_maps_to_401() {
         let (event, retryable) = dispatch_err_to_event(&OAuthDispatchError::Auth("bad token".into()));
-        assert!(matches!(
-            event,
-            state_machine::Event::HttpStatus { status: 401, retry_after_secs: None }
-        ));
+        assert!(matches!(event, state_machine::Event::HttpStatus(401)));
         assert!(!retryable, "auth 错误不该 failover");
     }
 }

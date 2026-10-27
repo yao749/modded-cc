@@ -1,46 +1,46 @@
 # 第三方组件声明 (Third-Party Notices)
 
-cc-router 本体以 MIT 许可证发布 (见 [LICENSE](LICENSE))。本文件声明项目使用的第三方  
+cc-router 本体以 MIT 许可证发布 (见 [LICENSE](LICENSE))。本文件声明项目使用的第三方
 组件及其许可证。
 
-> 字体部分由 `scripts/collect-receipt-fonts.mjs` 从 `node_modules` 生成, 请勿手工编辑。  
+> 字体部分由 `scripts/collect-receipt-fonts.mjs` 从 `node_modules` 生成, 请勿手工编辑。
 > 许可证正文保留英文原文 —— 译本不具法律效力。
 
 ## 字体 (Fonts)
 
-cc-router 使用以下 12 款字体, **全部为 SIL Open Font License 1.1 (OFL-1.1)**,  
+cc-router 使用以下 12 款字体, **全部为 SIL Open Font License 1.1 (OFL-1.1)**,
 均取自 [Google Fonts](https://github.com/google/fonts) 经由 [Fontsource](https://fontsource.org) 分发。
 
-| 字体                 | 用途                             | 版权声明                                                                                                   |
-| ------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| Archivo            | 小票 (CDN 按需加载)                  | Copyright 2020 The Archivo Project Authors (<https://github.com/Omnibus-Type/Archivo>)                 |
-| Archivo Narrow     | 小票 (CDN 按需加载)                  | Copyright 2019 The Archivo Narrow Project Authors (<https://github.com/Omnibus-Type/ArchivoNarrow>)    |
-| Caveat             | 界面 (随安装包分发)<br />小票 (CDN 按需加载) | Copyright 2014 The Caveat Project Authors (<https://github.com/googlefonts/caveat>)                    |
-| Cormorant Garamond | 小票 (CDN 按需加载)                  | Copyright 2015 The Cormorant Project Authors (github.com/CatharsisFonts/Cormorant)                     |
-| Courier Prime      | 小票 (CDN 按需加载)                  | Copyright 2015 The Courier Prime Project Authors (<https://github.com/quoteunquoteapps/CourierPrime>). |
-| DotGothic16        | 小票 (CDN 按需加载)                  | Copyright 2020 The DotGothic16 Project Authors (<https://github.com/fontworks-fonts/DotGothic16/>)     |
-| IBM Plex Mono      | 小票 (CDN 按需加载)                  | Copyright 2017 IBM Corp. All rights reserved.                                                          |
-| Instrument Sans    | 界面 (随安装包分发)                    | Copyright 2022 The Instrument Sans Project Authors (<https://github.com/Instrument/instrument-sans>)   |
-| JetBrains Mono     | 界面 (随安装包分发)                    | Copyright 2020 The JetBrains Mono Project Authors (<https://github.com/JetBrains/JetBrainsMono>)       |
-| Newsreader         | 界面 (随安装包分发)                    | Copyright 2020 The Newsreader Project Authors (<http://github.com/productiontype/Newsreader>)          |
-| Oswald             | 小票 (CDN 按需加载)                  | Copyright 2016 The Oswald Project Authors (<https://github.com/googlefonts/OswaldFont>)                |
-| Space Mono         | 小票 (CDN 按需加载)                  | Copyright 2016 The Space Mono Project Authors (<https://github.com/googlefonts/spacemono>)             |
+| 字体 | 用途 | 版权声明 |
+| --- | --- | --- |
+| Archivo | 小票 (CDN 按需加载) | Copyright 2020 The Archivo Project Authors (https://github.com/Omnibus-Type/Archivo) |
+| Archivo Narrow | 小票 (CDN 按需加载) | Copyright 2019 The Archivo Narrow Project Authors (https://github.com/Omnibus-Type/ArchivoNarrow) |
+| Caveat | 界面 (随安装包分发)<br>小票 (CDN 按需加载) | Copyright 2014 The Caveat Project Authors (https://github.com/googlefonts/caveat) |
+| Cormorant Garamond | 小票 (CDN 按需加载) | Copyright 2015 The Cormorant Project Authors (github.com/CatharsisFonts/Cormorant) |
+| Courier Prime | 小票 (CDN 按需加载) | Copyright 2015 The Courier Prime Project Authors (https://github.com/quoteunquoteapps/CourierPrime). |
+| DotGothic16 | 小票 (CDN 按需加载) | Copyright 2020 The DotGothic16 Project Authors (https://github.com/fontworks-fonts/DotGothic16/) |
+| IBM Plex Mono | 小票 (CDN 按需加载) | Copyright 2017 IBM Corp. All rights reserved. |
+| Instrument Sans | 界面 (随安装包分发) | Copyright 2022 The Instrument Sans Project Authors (https://github.com/Instrument/instrument-sans) |
+| JetBrains Mono | 界面 (随安装包分发) | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) |
+| Newsreader | 界面 (随安装包分发) | Copyright 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader) |
+| Oswald | 小票 (CDN 按需加载) | Copyright 2016 The Oswald Project Authors (https://github.com/googlefonts/OswaldFont) |
+| Space Mono | 小票 (CDN 按需加载) | Copyright 2016 The Space Mono Project Authors (https://github.com/googlefonts/spacemono) |
 
 **分发方式**:
 
-- **界面字体** (`src/fonts.ts`): 拉丁子集的 woff2 由 Vite 打进前端构建产物, 随安装包  
-  分发 (网页界面也从同一份产物提供), 离线可用。这构成 OFL 意义上的字体再分发, 其第 2  
-  条要求随附版权声明与许可证全文 —— 即本文件; 本文件同时经 `tauri.conf.json` 的  
+- **界面字体** (`src/fonts.ts`): 拉丁子集的 woff2 由 Vite 打进前端构建产物, 随安装包
+  分发 (网页界面也从同一份产物提供), 离线可用。这构成 OFL 意义上的字体再分发, 其第 2
+  条要求随附版权声明与许可证全文 —— 即本文件; 本文件同时经 `tauri.conf.json` 的
   `bundle.resources` 随安装包分发。
-- **小票字体** (`src/components/receipts/themes/`): 字体文件既不在本仓库中, 也不随安装包  
-  分发 —— `src/receipt-fonts.css` 的 `@font-face` 仅引用公共 CDN (jsDelivr 主源 /  
-  npmmirror 兜底), 由 WebView 按需加载, 离线时回退系统字体; 导出的小票 HTML 同样只内嵌  
+- **小票字体** (`src/components/receipts/themes/`): 字体文件既不在本仓库中, 也不随安装包
+  分发 —— `src/receipt-fonts.css` 的 `@font-face` 仅引用公共 CDN (jsDelivr 主源 /
+  npmmirror 兜底), 由 WebView 按需加载, 离线时回退系统字体; 导出的小票 HTML 同样只内嵌
   `@font-face` 规则而非字体数据。此处列出是为了向字体作者署名。
 
-以上字体**均未声明 Reserved Font Name (RFN)** (生成脚本逐一检查), 因此衍生版本 (例如  
+以上字体**均未声明 Reserved Font Name (RFN)** (生成脚本逐一检查), 因此衍生版本 (例如
 界面字体所用的拉丁字符子集) 可继续使用原字体名。
 
-OFL 同时明确豁免了用字体产出的文档 (见正文 PREAMBLE 末句): 用户从 cc-router 导出的  
+OFL 同时明确豁免了用字体产出的文档 (见正文 PREAMBLE 末句): 用户从 cc-router 导出的
 小票 HTML / PNG / PDF 不受 OFL 约束。
 
 ## 许可证全文 (OFL-1.1)
@@ -138,6 +138,6 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ## 其他依赖
 
-前端 npm 依赖见 [`package.json`](package.json) 与 `pnpm-lock.yaml`, Rust 依赖见  
-[`src-tauri/Cargo.toml`](src-tauri/Cargo.toml) 与 `Cargo.lock`; 各自许可证随包分发,  
+前端 npm 依赖见 [`package.json`](package.json) 与 `pnpm-lock.yaml`, Rust 依赖见
+[`src-tauri/Cargo.toml`](src-tauri/Cargo.toml) 与 `Cargo.lock`; 各自许可证随包分发,
 未在此逐一转录。

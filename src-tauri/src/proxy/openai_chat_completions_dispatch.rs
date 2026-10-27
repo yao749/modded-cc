@@ -156,7 +156,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
         anthropic_to_openai_chat(request_body, &effective_config, &extras).map_err(|e| {
             OAuthDispatchError::Upstream {
                 status: None,
-                retry_after_secs: None,
                 message: format!("body 翻译失败: {e}"),
             }
         })?;
@@ -172,7 +171,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
     let body_bytes = serde_json::to_vec(&translated_body).map_err(|e| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("body 序列化失败: {e}"),
         }
     })?;
@@ -187,7 +185,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
     let auth_name = ReqHeaderName::try_from(header_name.as_str()).map_err(|_| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: format!("auth header name {:?} 含非法字符", header_name),
         }
     })?;
@@ -195,7 +192,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
     let auth_value = ReqHeaderValue::from_str(&auth_value_str).map_err(|_| {
         OAuthDispatchError::Upstream {
             status: None,
-            retry_after_secs: None,
             message: "无法构造 Authorization header (API key 含不允许的字符: 控制符 / 非可见 ASCII)"
                 .into(),
         }
@@ -243,7 +239,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
         Err(upstream::UpstreamError::Reqwest(e)) => {
             return Err(OAuthDispatchError::Upstream {
                 status: None,
-                retry_after_secs: None,
                 message: format!("网络错误: {}", upstream::describe_error(&e)),
             });
         }
@@ -251,7 +246,7 @@ pub async fn dispatch_openai_chat_completions_attempt(
 
     // 4. 按 client_wants_streaming 分支处理
     match upstream_response {
-        upstream::UpstreamResponse::Streaming { status, headers, stream } => {
+        upstream::UpstreamResponse::Streaming { status, stream, .. } => {
             if !status.is_success() {
                 let mut buf = String::new();
                 let mut s = stream;
@@ -267,7 +262,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
                 }
                 return Err(OAuthDispatchError::Upstream {
                     status: Some(status.as_u16()),
-                    retry_after_secs: upstream::retry_after_secs(&headers),
                     message: truncate_error_body(buf),
                 });
             }
@@ -279,7 +273,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
         }
         upstream::UpstreamResponse::NonStreaming {
             status,
-            headers,
             body,
             body_text,
             ..
@@ -287,7 +280,6 @@ pub async fn dispatch_openai_chat_completions_attempt(
             if !status.is_success() {
                 return Err(OAuthDispatchError::Upstream {
                     status: Some(status.as_u16()),
-                    retry_after_secs: upstream::retry_after_secs(&headers),
                     message: truncate_error_body(body_text.unwrap_or_else(|| body.to_string())),
                 });
             }
@@ -535,7 +527,7 @@ fn finalize_streaming(
                 message,
                 http_status: hs,
             } => (
-                state_machine::Event::HttpStatus { status: *hs, retry_after_secs: None },
+                state_machine::Event::HttpStatus(*hs),
                 RequestStatus::Error,
                 Some(*hs),
                 Some(message.clone()),
@@ -945,7 +937,7 @@ mod tests {
         .await;
 
         match result {
-            Err(OAuthDispatchError::Upstream { status, message, retry_after_secs: _ }) => {
+            Err(OAuthDispatchError::Upstream { status, message }) => {
                 assert_eq!(status, Some(401));
                 assert!(message.contains("invalid api key"));
             }

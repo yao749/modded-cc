@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, RwLock};
@@ -24,24 +24,11 @@ use crate::subscription::last_error::LastError;
 use crate::subscription::model::{SubscriptionRuntime, SubscriptionState};
 use crate::subscription::store;
 
-/// Retry-After 冷却的 clamp 范围: 秒.
-/// 上游给 1 秒 (突发 429) 太短, 给 86400 (24h) 太长, 都不适合直接信.
-/// 猜长比猜短安全: 冷却到期才会自动复活, recheck_worker ping 成功会走 UserManualReset 提前复活.
-pub const RETRY_AFTER_MIN_SECS: u64 = 30;
-pub const RETRY_AFTER_MAX_SECS: u64 = 7200; // 2h
-
-/// 默认冷却秒数:
-/// - RateLimited (RPM/TPM 类): 上游没给 Retry-After 时默认 60s (RPM 真的一分钟就恢复)
-/// - QuotaExhausted (日/月配额): 上游没给 Retry-After 时默认 2h (猜长比猜短安全, recheck ping 会补刀)
-pub const DEFAULT_RATE_LIMITED_SECS: u64 = 60;
-pub const DEFAULT_QUOTA_EXHAUSTED_SECS: u64 = 7200;
-
 /// 外部事件驱动状态机。
 #[derive(Debug, Clone)]
 pub enum Event {
     RequestSucceeded,
-    /// 上游 HTTP 状态码 + 可选 Retry-After header 解析结果 (None = 没 header / 解析失败 / 被 clamp 掉).
-    HttpStatus { status: u16, retry_after_secs: Option<u64> },
+    HttpStatus(u16),
     NetworkError,
     CooldownExpired,
     UserEnable,
@@ -52,11 +39,7 @@ pub enum Event {
     UserManualReset,
     /// 上游 HTTP 200 但 SSE 流首事件是 `event: error` (智谱 1302/1308 这类业务限流).
     /// `is_quota_exhausted=true` → QuotaExhausted (长冷却); false → RateLimited (短冷却).
-    UpstreamSseError {
-        is_quota_exhausted: bool,
-        /// 可选 Retry-After hint (有些 SSE error 响应 body 里也带 reset 时间).
-        retry_after_secs: Option<u64>,
-    },
+    UpstreamSseError { is_quota_exhausted: bool },
 }
 
 /// 状态转换结果。
@@ -137,7 +120,7 @@ pub fn apply<'a>(
 fn describe_event(e: &Event) -> &'static str {
     match e {
         Event::RequestSucceeded => "request_succeeded",
-        Event::HttpStatus { .. } => "http_status",
+        Event::HttpStatus(_) => "http_status",
         Event::NetworkError => "network_error",
         Event::CooldownExpired => "cooldown_expired",
         Event::UserEnable => "user_enable",
@@ -148,53 +131,6 @@ fn describe_event(e: &Event) -> &'static str {
     }
 }
 
-/// 解析 HTTP `Retry-After` header 为秒数, 支持两种合法格式:
-/// - 纯数字秒数: `"60"` → 60
-/// - HTTP-date (RFC 2822): `"Wed, 21 Oct 2015 07:28:00 GMT"` → 到那个时间点的剩余秒数
-///
-/// 结果会被 clamp 到 [30s, 2h], 超出范围的静默回退到 None.
-/// 声明了但格式不认识 → None (让调用方走默认值).
-pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<u64> {
-    let trimmed = value.trim();
-    // 形式 1: 纯数字秒数
-    if let Ok(secs) = trimmed.parse::<u64>() {
-        return clamp_retry_after(secs);
-    }
-    // 形式 2: HTTP-date (RFC 2822 / IMF-fixdate) — chrono 内置 parser 直接支持 "Wed, 22 Oct 2025 12:30:00 GMT"
-    if let Ok(dt) = DateTime::parse_from_rfc2822(trimmed) {
-        let utc_dt = dt.with_timezone(&Utc);
-        let delta = utc_dt.timestamp() - now.timestamp();
-        if delta <= 0 {
-            return None;
-        }
-        return clamp_retry_after(delta as u64);
-    }
-    // 形式 3: RFC 3339 / ISO 8601 — 某些上游用
-    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
-        let utc_dt = dt.with_timezone(&Utc);
-        let delta = utc_dt.timestamp() - now.timestamp();
-        if delta <= 0 {
-            return None;
-        }
-        return clamp_retry_after(delta as u64);
-    }
-    None // 格式不认识, 回退默认值
-}
-
-fn clamp_retry_after(secs: u64) -> Option<u64> {
-    if secs < RETRY_AFTER_MIN_SECS || secs > RETRY_AFTER_MAX_SECS {
-        None
-    } else {
-        Some(secs)
-    }
-}
-
-/// 把 Retry-After hint (None 或 Some) 和默认值合成最终冷却秒数.
-/// 上游给的值如果在 clamp 范围内就优先信 header, 否则走 type-specific 默认值.
-fn resolve_cooldown_secs(retry_after_secs: Option<u64>, default_secs: u64) -> u64 {
-    retry_after_secs.unwrap_or(default_secs)
-}
-
 fn transition(
     rt: &mut SubscriptionRuntime,
     event: &Event,
@@ -203,8 +139,6 @@ fn transition(
     let prev_state = rt.state;
     let id = rt.row.id;
     let mut last_error_update: Option<String> = None;
-    // 本次事件携带的 Retry-After hint (如果有), 供后面 match new_state 时决定冷却秒数.
-    let mut pending_retry_after: Option<u64> = None;
 
     let new_state = match (rt.state, event) {
         // healthy ==================================
@@ -214,15 +148,13 @@ fn transition(
             rt.last_error_message = None;
             SubscriptionState::Healthy
         }
-        (SubscriptionState::Healthy, Event::HttpStatus { status, retry_after_secs }) => {
-            pending_retry_after = *retry_after_secs;
-            classify_http(*status, rt, &mut last_error_update)
+        (SubscriptionState::Healthy, Event::HttpStatus(s)) => {
+            classify_http(*s, rt, &mut last_error_update)
         }
         (SubscriptionState::Healthy, Event::NetworkError) => {
             bump_transient(rt, LastError::Network, &mut last_error_update)
         }
-        (SubscriptionState::Healthy, Event::UpstreamSseError { is_quota_exhausted, retry_after_secs }) => {
-            pending_retry_after = *retry_after_secs;
+        (SubscriptionState::Healthy, Event::UpstreamSseError { is_quota_exhausted }) => {
             let err = if *is_quota_exhausted {
                 LastError::UpstreamQuotaExhausted
             } else {
@@ -310,16 +242,15 @@ fn transition(
         rt.row.updated_at = now;
         match new_state {
             SubscriptionState::RateLimited => {
-                // 优先信上游 Retry-After header (clamp 后), 没给/解析失败/超出范围 → 默认 60s (RPM 一分钟就恢复).
-                let secs = resolve_cooldown_secs(pending_retry_after, DEFAULT_RATE_LIMITED_SECS);
-                rt.cooldown_until = Some(now + chrono::Duration::seconds(secs as i64));
-                schedule_cooldown = Some(Duration::from_secs(secs));
+                // 短期 RPM/TPM 限流: 60s 冷却即可
+                rt.cooldown_until = Some(now + chrono::Duration::seconds(60));
+                schedule_cooldown = Some(Duration::from_secs(60));
             }
             SubscriptionState::QuotaExhausted => {
-                // 优先信上游 Retry-After header, 没给 → 默认 2h (猜长比猜短安全, recheck ping 会提前复活).
-                let secs = resolve_cooldown_secs(pending_retry_after, DEFAULT_QUOTA_EXHAUSTED_SECS);
-                rt.cooldown_until = Some(now + chrono::Duration::seconds(secs as i64));
-                schedule_cooldown = Some(Duration::from_secs(secs));
+                // 5h/月度配额耗尽: 30min 冷却避免来回切换浪费请求.
+                // 不解析 message 里的精确 reset 时间, 文本格式 fragile.
+                rt.cooldown_until = Some(now + chrono::Duration::seconds(1800));
+                schedule_cooldown = Some(Duration::from_secs(1800));
             }
             SubscriptionState::TransientError => {
                 let secs = match rt.transient_error_level {
@@ -422,7 +353,7 @@ mod tests {
     #[test]
     fn healthy_to_rate_limited_on_429() {
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus { status: 429, retry_after_secs: None });
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(429));
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::RateLimited);
         assert!(rt.cooldown_until.is_some());
@@ -431,7 +362,7 @@ mod tests {
     #[test]
     fn healthy_to_auth_failed_on_401() {
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus { status: 401, retry_after_secs: None });
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(401));
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::AuthFailed);
     }
@@ -441,7 +372,7 @@ mod tests {
         // 即便 retry.rs 把 400 改为可重试,state_machine 应保留「不冷却」语义
         // 避免客户端 bug 把所有订阅冷却。
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus { status: 400, retry_after_secs: None });
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(400));
         assert!(!t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
         assert!(rt.cooldown_until.is_none());
@@ -453,7 +384,7 @@ mod tests {
         // 404/422 等同 400 的语义: 跳下家但不冷却
         let mut rt = runtime();
         for status in [404, 422, 410, 408] {
-            let (t, _, _) = transition(&mut rt, &Event::HttpStatus { status, retry_after_secs: None });
+            let (t, _, _) = transition(&mut rt, &Event::HttpStatus(status));
             assert!(!t.state_changed, "status {} should not change state", status);
             assert_eq!(rt.state, SubscriptionState::Healthy);
             assert!(rt.cooldown_until.is_none());
@@ -465,11 +396,11 @@ mod tests {
     fn transient_error_after_three_fives() {
         let mut rt = runtime();
         for _ in 0..2 {
-            let (t, _, _) = transition(&mut rt, &Event::HttpStatus { status: 500, retry_after_secs: None });
+            let (t, _, _) = transition(&mut rt, &Event::HttpStatus(500));
             assert!(!t.state_changed);
             assert_eq!(rt.state, SubscriptionState::Healthy);
         }
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus { status: 500, retry_after_secs: None });
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(500));
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::TransientError);
     }
@@ -478,7 +409,7 @@ mod tests {
     fn exponential_backoff_levels() {
         let mut rt = runtime();
         for _ in 0..3 {
-            transition(&mut rt, &Event::HttpStatus { status: 500, retry_after_secs: None });
+            transition(&mut rt, &Event::HttpStatus(500));
         }
         assert_eq!(rt.state, SubscriptionState::TransientError);
         let cooldown = rt.cooldown_until.unwrap();
@@ -490,7 +421,7 @@ mod tests {
     fn cooldown_expired_returns_to_healthy() {
         let mut rt = runtime();
         for _ in 0..3 {
-            transition(&mut rt, &Event::HttpStatus { status: 500, retry_after_secs: None });
+            transition(&mut rt, &Event::HttpStatus(500));
         }
         let (t, _, _) = transition(&mut rt, &Event::CooldownExpired);
         assert!(t.state_changed);
@@ -510,7 +441,7 @@ mod tests {
     #[test]
     fn request_success_resets_error_count() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus { status: 500, retry_after_secs: None });
+        transition(&mut rt, &Event::HttpStatus(500));
         transition(&mut rt, &Event::RequestSucceeded);
         assert_eq!(rt.consecutive_errors, 0);
     }
@@ -518,7 +449,7 @@ mod tests {
     #[test]
     fn auth_failed_only_clears_on_user_key_update() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus { status: 401, retry_after_secs: None });
+        transition(&mut rt, &Event::HttpStatus(401));
         assert_eq!(rt.state, SubscriptionState::AuthFailed);
         let (t, _, _) = transition(&mut rt, &Event::CooldownExpired);
         assert!(!t.state_changed);
@@ -530,7 +461,7 @@ mod tests {
     #[test]
     fn manual_reset_revives_from_auth_failed() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus { status: 401, retry_after_secs: None });
+        transition(&mut rt, &Event::HttpStatus(401));
         assert_eq!(rt.state, SubscriptionState::AuthFailed);
         assert!(rt.row.is_auth_failed);
 
@@ -544,7 +475,7 @@ mod tests {
     #[test]
     fn manual_reset_clears_rate_limited_cooldown() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus { status: 429, retry_after_secs: None });
+        transition(&mut rt, &Event::HttpStatus(429));
         assert_eq!(rt.state, SubscriptionState::RateLimited);
         assert!(rt.cooldown_until.is_some());
 
@@ -558,7 +489,7 @@ mod tests {
     fn manual_reset_clears_transient_error_level() {
         let mut rt = runtime();
         for _ in 0..3 {
-            transition(&mut rt, &Event::HttpStatus { status: 500, retry_after_secs: None });
+            transition(&mut rt, &Event::HttpStatus(500));
         }
         assert_eq!(rt.state, SubscriptionState::TransientError);
         assert!(rt.transient_error_level > 0);
@@ -596,7 +527,7 @@ mod tests {
         let mut rt = runtime();
         let (t, _, _) = transition(
             &mut rt,
-            &Event::UpstreamSseError { is_quota_exhausted: false, retry_after_secs: None },
+            &Event::UpstreamSseError { is_quota_exhausted: false },
         );
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::RateLimited);
@@ -609,12 +540,12 @@ mod tests {
         let mut rt = runtime();
         let (t, _, _) = transition(
             &mut rt,
-            &Event::UpstreamSseError { is_quota_exhausted: true, retry_after_secs: None },
+            &Event::UpstreamSseError { is_quota_exhausted: true },
         );
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::QuotaExhausted);
         let cooldown_secs = (rt.cooldown_until.unwrap() - Utc::now()).num_seconds();
-        assert!((7198..=7202).contains(&cooldown_secs), "quota_exhausted default 2h, got {cooldown_secs}");
+        assert!((1798..=1802).contains(&cooldown_secs), "quota_exhausted 30min, got {cooldown_secs}");
     }
 
     #[test]
@@ -623,111 +554,11 @@ mod tests {
         let mut rt = runtime();
         transition(
             &mut rt,
-            &Event::UpstreamSseError { is_quota_exhausted: true, retry_after_secs: None },
+            &Event::UpstreamSseError { is_quota_exhausted: true },
         );
         assert_eq!(rt.state, SubscriptionState::QuotaExhausted);
         let (t, _, _) = transition(&mut rt, &Event::CooldownExpired);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
-    }
-
-    // ---------- retry_after header 优先测试 ----------
-
-    #[test]
-    fn rate_limited_uses_retry_after_header_not_default() {
-        // 上游给了 Retry-After: 300 (5min), 应优先用 300 而非默认 60s
-        let mut rt = runtime();
-        transition(
-            &mut rt,
-            &Event::HttpStatus { status: 429, retry_after_secs: Some(300) },
-        );
-        assert_eq!(rt.state, SubscriptionState::RateLimited);
-        let cooldown_secs = (rt.cooldown_until.unwrap() - Utc::now()).num_seconds();
-        assert!((298..=302).contains(&cooldown_secs), "should use header 300, got {cooldown_secs}");
-    }
-
-    #[test]
-    fn quota_exhausted_uses_retry_after_header_not_default() {
-        // 上游给了 Retry-After: 1800 (30min), 应优先用 1800 而非默认 2h
-        let mut rt = runtime();
-        transition(
-            &mut rt,
-            &Event::HttpStatus { status: 429, retry_after_secs: Some(1800) },
-        );
-        assert_eq!(rt.state, SubscriptionState::RateLimited); // 429 是 RateLimited, QuotaExhausted 需 SSE error
-        // 换一个: 429 但 retry_after 带 QuotaExhausted 状态需要 UpstreamSseError
-        let mut rt2 = runtime();
-        transition(
-            &mut rt2,
-            &Event::UpstreamSseError { is_quota_exhausted: true, retry_after_secs: Some(1800) },
-        );
-        assert_eq!(rt2.state, SubscriptionState::QuotaExhausted);
-        let cooldown_secs = (rt2.cooldown_until.unwrap() - Utc::now()).num_seconds();
-        assert!((1798..=1802).contains(&cooldown_secs), "should use header 1800, got {cooldown_secs}");
-    }
-}
-
-// ---------- parse_retry_after 函数级测试 (不在 mod tests 里, 直接 pub fn) ----------
-
-#[cfg(test)]
-mod parse_retry_after_tests {
-    use super::*;
-    use chrono::TimeZone;
-
-    #[test]
-    fn parse_seconds_form() {
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        assert_eq!(parse_retry_after("60", now), Some(60));
-        assert_eq!(parse_retry_after("  120  ", now), Some(120)); // 空白容忍
-    }
-
-    #[test]
-    fn parse_http_date_form() {
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        // IMF-fixdate: Wed, 22 Oct 2025 12:30:00 GMT → 30min = 1800s
-        assert_eq!(parse_retry_after("Wed, 22 Oct 2025 12:30:00 GMT", now), Some(1800));
-    }
-
-    #[test]
-    fn parse_iso8601_form() {
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        // RFC3339/ISO8601 形式 — 某些上游用这个
-        assert_eq!(parse_retry_after("2025-10-22T12:15:00Z", now), Some(900)); // 15min = 900s
-    }
-
-    #[test]
-    fn clamps_too_short() {
-        // 1 秒太短 → 低于 MIN 30s → None, 调用方走默认值
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        assert_eq!(parse_retry_after("1", now), None);
-        assert_eq!(parse_retry_after("10", now), None);
-        assert_eq!(parse_retry_after("29", now), None);
-        assert_eq!(parse_retry_after("30", now), Some(30)); // 边界值 OK
-    }
-
-    #[test]
-    fn clamps_too_long() {
-        // 24h 太长 → 超过 MAX 2h → None
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        assert_eq!(parse_retry_after("86400", now), None);
-        assert_eq!(parse_retry_after("7201", now), None);
-        assert_eq!(parse_retry_after("7200", now), Some(7200)); // 边界值 OK
-    }
-
-    #[test]
-    fn garbage_falls_back_to_none() {
-        // 格式不认 → None, 调用方走默认值
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        assert_eq!(parse_retry_after("not a number", now), None);
-        assert_eq!(parse_retry_after("tomorrow", now), None);
-        assert_eq!(parse_retry_after("", now), None);
-        assert_eq!(parse_retry_after("  ", now), None);
-    }
-
-    #[test]
-    fn expired_date_returns_none() {
-        // HTTP-date 是过去时间 → 无意义, 回退默认值
-        let now = Utc.with_ymd_and_hms(2025, 10, 22, 12, 0, 0).unwrap();
-        assert_eq!(parse_retry_after("Tue, 21 Oct 2025 12:00:00 GMT", now), None);
     }
 }

@@ -9,64 +9,22 @@ import {
 import { useT, type LanguagePref } from "@/i18n";
 import { useTheme, type ColorMode } from "@/hooks/useTheme";
 import { THEMES } from "@/themes";
-import type { GlobalRoutingMode, UpdateSource } from "@/types";
+import type { UpdateSource } from "@/types";
 import type { SettingsForm } from "./useSettingsForm";
+import { useWizard } from "@/components/onboarding/wizardStore";
+import { useOnboardingState } from "@/components/onboarding/useOnboardingState";
 
 const COLOR_MODES: readonly ColorMode[] = ["system", "light", "dark"];
-const ROUTING_MODES: readonly GlobalRoutingMode[] = ["slots", "pool"];
 
-/** 通用: 语言 / 开机自启 / 更新源, 外观 (界面主题 / 明暗模式). */
+/** 通用: 语言 / 开机自启 / 更新源 / 自动检查更新, 外观 (界面主题 / 明暗模式). */
 export function GeneralTab({ form }: { form: SettingsForm }) {
   const { t } = useT();
   const { mode, setMode, themeId, setThemeId } = useTheme();
+  const wizard = useWizard();
+  const onboarding = useOnboardingState();
 
   return (
     <>
-      {/* 路由模式: 同一时刻只有一套生效, 另一套配置原样保留 */}
-      <div className="card section">
-        <div className="card-head">
-          <div className="card-title">{t("settings.section.routing")}</div>
-        </div>
-        <div className="card-body">
-          <div className="setting-row">
-            <div className="label-col">
-              {t("settings.routing.label")}
-              <div className="desc">{t("settings.routing.desc")}</div>
-            </div>
-            <div
-              className="radio-group"
-              role="radiogroup"
-              aria-label={t("settings.routing.label")}
-              style={{ display: "flex", maxWidth: 360 }}
-            >
-              {ROUTING_MODES.map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  className={form.routingMode === m ? "on" : ""}
-                  onClick={() => void form.changeRoutingMode(m)}
-                  role="radio"
-                  aria-checked={form.routingMode === m}
-                  style={{ flex: 1 }}
-                >
-                  {t(`settings.routing.${m}`)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="setting-row">
-            <div
-              className="text-xs text-muted-foreground"
-              style={{ gridColumn: "1 / -1", lineHeight: 1.6 }}
-            >
-              {t(form.routingMode === "pool" ? "settings.routing.poolDesc" : "settings.routing.slotsDesc")}
-              <br />
-              {t("settings.routing.hint")}
-            </div>
-          </div>
-        </div>
-      </div>
-
       <div className="card section">
         <div className="card-head">
           <div className="card-title">{t("settings.section.language")}</div>
@@ -86,11 +44,29 @@ export function GeneralTab({ form }: { form: SettingsForm }) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="system">{t("settings.language.system")}</SelectItem>
-                <SelectItem value="zh">中文</SelectItem>
+                <SelectItem value="zh">简体中文</SelectItem>
+                <SelectItem value="zh-Hant">繁體中文</SelectItem>
                 <SelectItem value="en">English</SelectItem>
                 <SelectItem value="ja">日本語</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div className="setting-row">
+            <div className="label-col">
+              {t("settings.onboarding.label")}
+              <div className="desc">{t("settings.onboarding.desc")}</div>
+            </div>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                // 还没走完: 接着上次的进度 (清掉会丢下窗口建的订阅); 已完成: 从头再走一遍
+                if (onboarding.data?.completed) wizard.reset();
+                wizard.reopen();
+              }}
+            >
+              {t("settings.onboarding.reopen")}
+            </button>
           </div>
           <div className="setting-row">
             <div className="label-col">{t("settings.proxy.autostart.label")}</div>
@@ -116,6 +92,17 @@ export function GeneralTab({ form }: { form: SettingsForm }) {
                 <SelectItem value="china">{t("settings.update.source.china")}</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div className="setting-row">
+            <div className="label-col">
+              {t("settings.update.autoCheck.label")}
+              <div className="desc">{t("settings.update.autoCheck.desc")}</div>
+            </div>
+            <Toggle
+              checked={form.settings.data?.auto_check_updates ?? true}
+              onChange={(v) => void form.changeAutoCheckUpdates(v)}
+              aria-label={t("settings.update.autoCheck.label")}
+            />
           </div>
         </div>
       </div>

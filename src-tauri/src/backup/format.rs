@@ -12,6 +12,7 @@ use crate::provider::model::{
 };
 use crate::subscription::model::{ModelSlots, OAuthMetadata, SlotEfforts, SubscriptionRow};
 use crate::subscription::quota::TokenQuotas;
+use crate::subscription::schedule::SlotSchedules;
 use crate::virtual_model::model::{RoutingMode, VirtualModelName};
 
 pub const FORMAT: &str = "cc-router-export";
@@ -33,9 +34,6 @@ pub struct ExportFile {
     pub subscriptions: Vec<ExportSubscription>,
     #[serde(default)]
     pub virtual_models: Vec<ExportVirtualModel>,
-    /// 能力分类模型池条目. 旧备份文件没有该字段 → 空 vec (P0 之前池配置完全不在备份范围).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_pools: Vec<ExportPoolEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<SecretsEnvelope>,
 }
@@ -50,6 +48,8 @@ pub struct ExportSubscription {
     pub model_slots: ModelSlots,
     #[serde(default)]
     pub slot_efforts: SlotEfforts,
+    #[serde(default)]
+    pub slot_schedules: SlotSchedules,
     #[serde(default)]
     pub token_quotas: TokenQuotas,
     pub enabled: bool,
@@ -82,7 +82,7 @@ pub struct ExportSubscription {
     pub provider_icon: String,
     #[serde(default)]
     pub is_user_defined: bool,
-    /// 路由分组: classic / pool. 默认空串 → 导入时宽容当作 classic (migration 027).
+    /// 路由分组: classic / pool. 默认 classic 兼容老导出文件.
     #[serde(default)]
     pub routing_group: String,
     /// Whether the source row had a non-empty api_key. Local models (Ollama etc.) legitimately
@@ -124,26 +124,6 @@ pub struct ExportVirtualModel {
     pub mode: RoutingMode,
     #[serde(default)]
     pub subscription_ids: Vec<Uuid>,
-}
-
-/// 一条能力分类模型池配置 (行 = 订阅 × 能力 × 模型 × 优先级).
-/// 不导出库内 id / 时间戳: 恢复时重新生成, 避免与目标库既有行冲突。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExportPoolEntry {
-    pub subscription_id: Uuid,
-    pub capability: String,
-    pub model_name: String,
-    #[serde(default)]
-    pub priority: i64,
-    #[serde(default = "pool_entry_enabled_default")]
-    pub enabled: bool,
-    /// 该模型的输入模态声明; 缺省 = 未声明 (路由时按 ["text"] 兜底)。
-    #[serde(default)]
-    pub supported_inputs: Vec<String>,
-}
-
-fn pool_entry_enabled_default() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +218,7 @@ pub fn subscription_to_export(row: &SubscriptionRow) -> (ExportSubscription, Ext
         oauth_metadata: _, // never exported: refresh tokens rotate and are single-use
         model_slots,
         slot_efforts,
+        slot_schedules,
         token_quotas,
         enabled,
         is_auth_failed: _, // runtime state
@@ -281,6 +262,7 @@ pub fn subscription_to_export(row: &SubscriptionRow) -> (ExportSubscription, Ext
         auth_type: *auth_type,
         model_slots: model_slots.clone(),
         slot_efforts: slot_efforts.clone(),
+        slot_schedules: slot_schedules.clone(),
         token_quotas: token_quotas.clone(),
         enabled: *enabled,
         created_at: *created_at,
@@ -329,6 +311,7 @@ pub fn export_to_row(
         oauth_metadata: OAuthMetadata::default(),
         model_slots: sub.model_slots.clone(),
         slot_efforts: sub.slot_efforts.clone(),
+        slot_schedules: sub.slot_schedules.clone(),
         token_quotas: sub.token_quotas.clone(),
         enabled,
         is_auth_failed: false,
@@ -350,7 +333,7 @@ pub fn export_to_row(
         provider_display_name: sub.provider_display_name.clone(),
         provider_icon: sub.provider_icon.clone(),
         is_user_defined: sub.is_user_defined,
-        routing_group: if sub.routing_group == "pool" { "pool" } else { "classic" }.into(),
+        routing_group: sub.routing_group.clone(),
     }
 }
 

@@ -766,7 +766,7 @@ pub async fn systemone(
     systemone::dispatch(&state, body, model, &ctx).await
 }
 
-/// `GET /v1/models` 返回的四槽范式清单: 虚拟模型名 + 各写法的代表性别名。
+/// `GET /v1/models` 返回的固定清单: 虚拟模型名 + 各写法的代表性别名。
 /// 每一项都必须能被 `VirtualModelName::parse` 解析到四个对话虚拟模型之一 (单测锁住)。
 const MODEL_IDS: &[&str] = &[
     // Anthropic 风格虚拟模型名 + 版本别名 (claude-* 前缀匹配, 每档放 5.5 与 6 两个代表名)
@@ -807,48 +807,17 @@ const MODEL_IDS: &[&str] = &[
     "openai/gpt-6-luna",
 ];
 
-/// `GET /v1/models` 在 pool 模式下返回的能力分类池清单。
-/// 池名没有版本别名与厂商前缀变种, 只有 5 个规范名。
-const MODEL_IDS_POOL: &[&str] = &[
-    "model-vision",
-    "model-llm",
-    "model-multimodal",
-    "model-speech",
-    "model-embedding",
-];
-
-/// 按 routing_mode 选择对外暴露的模型清单。
-/// 模型池是独立体系 (2026-10-23 修订): **任何模式都广告池名**;
-/// 四槽名在 pool 模式下隐藏 (门禁同款判定), slots 模式 (默认+脏值) 下两者都列出。
-/// 与 pipeline.rs::routing_mode_gate 同一套判定, 保证「菜单」和「厨房」一致。
-fn advertised_model_ids(routing_mode: &str) -> Vec<&'static str> {
-    match routing_mode {
-        // pool 模式: 只用池名 (四槽被门禁拦, 菜单不摆)
-        "pool" => MODEL_IDS_POOL.to_vec(),
-        // slots 模式 (默认 + 脏值): 四槽 + 池全列出 —— 池独立于模式, 永远可用
-        _ => MODEL_IDS.iter().chain(MODEL_IDS_POOL).copied().collect(),
-    }
-}
-
 /// GET /v1/models
 /// 返回 cc-router 对外暴露的固定模型清单, 无鉴权 (与 /health 同级在 auth_layer 直通).
 ///
 /// schema 是 **Anthropic /v1/models + OpenAI /v1/models 超集**: 同时填两边的字段
 /// (`type`+`object`, `display_name`+`owned_by`, `created_at`+`created`),
 /// 两边 SDK 都按 `extra: allow` 忽略未知字段, 共用同一路径对客户端透明。
-/// 清单随 settings.routing_mode 变化 (每请求读取, 切模式热生效):
-/// slots 范式返回四槽名 + 别名, pool 范式返回 5 个能力分类池名。
-pub async fn models(State(state): State<AppState>) -> Response {
+pub async fn models() -> Response {
     const CREATED_AT_ISO: &str = "2026-01-01T00:00:00Z"; // Anthropic 字段 (ISO 字符串)
     const CREATED_UNIX: i64 = 1_767_225_600; // OpenAI 字段 (Unix 秒, 同一时刻)
 
-    let routing_mode = {
-        let guard = state.settings.read().await;
-        guard.routing_mode.clone()
-    };
-    let ids = advertised_model_ids(&routing_mode);
-
-    let data: Vec<serde_json::Value> = ids
+    let data: Vec<serde_json::Value> = MODEL_IDS
         .iter()
         .map(|id| {
             json!({
@@ -872,15 +841,15 @@ pub async fn models(State(state): State<AppState>) -> Response {
         "data": data,
         // Anthropic page wrapper
         "has_more": false,
-        "first_id": ids.first(),
-        "last_id": ids.last(),
+        "first_id": MODEL_IDS.first(),
+        "last_id": MODEL_IDS.last(),
     }))
     .into_response()
 }
 
 #[cfg(test)]
 mod models_tests {
-    use super::{advertised_model_ids, MODEL_IDS, MODEL_IDS_POOL};
+    use super::MODEL_IDS;
     use crate::virtual_model::model::VirtualModelName;
 
     #[test]
@@ -900,31 +869,5 @@ mod models_tests {
                 "{id} 在 /v1/models 清单里, 但 parse 得到 {vm:?}"
             );
         }
-    }
-
-    /// pool 模式下清单里的每一项必须真能过门禁 (paradigm == Pool),
-    /// 否则客户端会看到「菜单上有、厨房不认」的名字。
-    #[test]
-    fn pool_list_entries_are_all_pool_paradigm() {
-        use crate::virtual_model::RoutingParadigm;
-        for id in MODEL_IDS_POOL {
-            let vm = VirtualModelName::parse(id).unwrap_or_else(|| panic!("{id} 解析失败"));
-            assert_eq!(vm.paradigm(), RoutingParadigm::Pool, "{id} 应为池范式");
-        }
-    }
-
-    /// 菜单与门禁同源: slots 模式 (默认+脏值) 四槽 + 池全列出 (池独立于模式);
-    /// pool 模式只列池名 (四槽被门禁拦, 菜单不摆)。
-    #[test]
-    fn advertised_list_matches_the_gate() {
-        // slots / 脏值: 全量
-        let slots = advertised_model_ids("slots");
-        assert_eq!(slots.len(), MODEL_IDS.len() + MODEL_IDS_POOL.len());
-        for id in MODEL_IDS.iter().chain(MODEL_IDS_POOL) {
-            assert!(slots.contains(id), "slots 清单应包含 {id}");
-        }
-        assert_eq!(advertised_model_ids("garbage"), slots);
-        // pool: 只有池名
-        assert_eq!(advertised_model_ids("pool"), MODEL_IDS_POOL);
     }
 }

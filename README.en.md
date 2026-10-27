@@ -1,29 +1,29 @@
-<p align="center">  
-  <img src="assets/icon.png" alt="cc-router logo" width="160" height="160" />  
+<p align="center">
+  <img src="assets/icon.png" alt="cc-router logo" width="160" height="160" />
 </p>
 
 <h1 align="center">cc-router</h1>
 
-<p align="center">  
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>  
-  <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square\&logo=tauri\&logoColor=white" alt="Tauri 2">  
-  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square\&logo=rust\&logoColor=white" alt="Rust 1.90+">  
-  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square\&logo=react\&logoColor=white" alt="React 19">  
-  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square\&logo=typescript\&logoColor=white" alt="TypeScript 5">  
-  <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square\&logo=tailwindcss\&logoColor=white" alt="Tailwind CSS">  
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">  
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
+  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+">
+  <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white" alt="React 19">
+  <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5">
+  <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
 </p>
 
-<p align="center">  
-  <a href="README.md">中文</a> · <strong>English</strong> · <a href="README.ja.md">日本語</a>  
+<p align="center">
+  <a href="README.md">简体中文</a> · <a href="README.zh-Hant.md">繁體中文</a> · <strong>English</strong> · <a href="README.ja.md">日本語</a>
 </p>
 
-<p align="center">  
-  <a href="https://ccrouter.app/docs/" target="\_blank" rel="noopener">📖 中文文档</a> ·  
-  <a href="https://ccrouter.app/en/docs/" target="\_blank" rel="noopener">📖 English Docs</a> ·  
-  <a href="https://ccrouter.app/ja/docs/" target="\_blank" rel="noopener">📖 日本語ドキュメント</a> ·  
-  <a href="https://deepwiki.com/finch-xu/cc-router" target="\_blank" rel="noopener">🤖 DeepWiki</a> ·  
-  <a href="https://ccrouter.app" target="\_blank" rel="noopener">🌐 Official Site ccrouter.app</a>  
+<p align="center">
+  <a href="https://ccrouter.app/docs/" target="_blank" rel="noopener">📖 中文文档</a> ·
+  <a href="https://ccrouter.app/en/docs/" target="_blank" rel="noopener">📖 English Docs</a> ·
+  <a href="https://ccrouter.app/ja/docs/" target="_blank" rel="noopener">📖 日本語ドキュメント</a> ·
+  <a href="https://deepwiki.com/finch-xu/cc-router" target="_blank" rel="noopener">🤖 DeepWiki</a> ·
+  <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 Official Site ccrouter.app</a>
 </p>
 
 A locally-running LLM aggregation gateway with a desktop GUI, zero-code setup: bundle your scattered `Token Plan`, `Coding Plan`, and LLM API quotas into a single virtual Plan, and plug it into Claude Code, Claude Desktop App, OpenClaw, OpenCode, Codex and more —— save money! save tokens! 100% local!
@@ -67,36 +67,36 @@ Highlights:
 - **Three outbound protocols, every subscription in one router** — 24 built-in provider presets (DeepSeek, Qwen, Kimi, MiMo, MiniMax, GLM, Claude, OpenAI, Gemini, …), plus any Anthropic / OpenAI / Gemini-compatible endpoint you bring yourself
 - **Pool every token you have** — sequential / round-robin / session-affinity dispatch with automatic switching and failover
 - **Usage receipts** — export your token usage as a "supermarket receipt" in one click, handy for sharing or keeping records
-- **Fully translated UI** — 简体中文 / English / 日本語, follows your system locale or pick manually in Settings
+- **Fully translated UI** — 简体中文 / 繁體中文 / English / 日本語, follows your system locale or pick manually in Settings
 - **Desktop, web and terminal UIs** — besides the desktop GUI, open the exact same management UI in a browser via the [Web UI](#web-ui-optional-off-by-default), or use the [terminal UI (TUI)](#terminal-ui-optional-off-by-default) to manage subscriptions and watch live routing and request logs from the command line
 - **Virtual model aliases** — each of fable / opus / sonnet / haiku accepts multiple names; for opus that's `model-opus` / `claude-opus-4-7` / `anthropic/model-opus` / `anthropic/claude-opus-4-7`, all routed to the same virtual model — pick whatever naming your tool prefers
 - **Local HTTPS** — generate a self-signed CA and server cert in one click so HTTPS-only clients can talk to cc-router too; see the [setup guide](https://ccrouter.app/docs/claude-desktop-integration/)
 - **Claude Desktop App support** — combine local HTTPS with the virtual-model aliases above and Anthropic's official desktop app can route through cc-router's aggregated subscriptions; see the [setup guide](https://ccrouter.app/docs/claude-desktop-integration/)
 
-<table align="center">  
-  <tr>  
-    <td align="center" width="50%"><img src="assets/screenshots/en/routing.png" alt="cc-router live routing page" />   <sub><b>Live routing</b> · see where every request flows</sub></td>  
-    <td align="center" width="50%"><img src="assets/screenshots/en/models.png" alt="cc-router virtual model configuration page" />   <sub><b>Virtual models</b> · drag to set subscription priority</sub></td>  
-  </tr>  
-  <tr>  
-    <td align="center" width="50%"><img src="assets/screenshots/en/logs.png" alt="cc-router request logs page" />   <sub><b>Request logs</b> · model, latency and tokens per request</sub></td>  
-    <td align="center" width="50%"><img src="assets/screenshots/en/receipts.png" alt="cc-router usage receipts page" />   <sub><b>Usage receipts</b> · export token usage as a receipt</sub></td>  
-  </tr>  
-  <tr>  
-    <td align="center" width="50%"><img src="assets/screenshots/en/tui-overview.png" alt="cc-router terminal UI overview" />   <sub><b>Terminal UI overview</b> · subscription health and quotas at a glance</sub></td>  
-    <td align="center" width="50%"><img src="assets/screenshots/en/tui-log-detail.png" alt="cc-router terminal UI request detail" />   <sub><b>Terminal UI request detail</b> · the full record of a single request</sub></td>  
-  </tr>  
+<table align="center">
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/en/routing.png" alt="cc-router live routing page" /><br /><sub><b>Live routing</b> · see where every request flows</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/en/models.png" alt="cc-router virtual model configuration page" /><br /><sub><b>Virtual models</b> · drag to set subscription priority</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/en/logs.png" alt="cc-router request logs page" /><br /><sub><b>Request logs</b> · model, latency and tokens per request</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/en/receipts.png" alt="cc-router usage receipts page" /><br /><sub><b>Usage receipts</b> · export token usage as a receipt</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/en/tui-overview.png" alt="cc-router terminal UI overview" /><br /><sub><b>Terminal UI overview</b> · subscription health and quotas at a glance</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/en/tui-log-detail.png" alt="cc-router terminal UI request detail" /><br /><sub><b>Terminal UI request detail</b> · the full record of a single request</sub></td>
+  </tr>
 </table>
 
 ## Integration Guide
 
 Every AI Agent / Coding Agent tool below can connect to cc-router and use all the LLM plans you own:
 
-<p>  
-<a href="https://ccrouter.app/docs/getting-started/" target="\_blank" rel="noopener">Claude Code cli</a> ·   
-<a href="https://ccrouter.app/docs/claude-desktop-integration/" target="\_blank" rel="noopener">Claude Desktop App</a> ·   
-<a href="https://ccrouter.app/docs/codex-integration/" target="\_blank" rel="noopener">OpenAI Codex cli</a> ·   
-<a href="https://ccrouter.app/docs/codex-integration/" target="\_blank" rel="noopener">OpenAI Codex Desktop App</a> · OpenCode · OpenClaw · Kimi code cli · pi coding agent, and many more.  
+<p>
+<a href="https://ccrouter.app/docs/getting-started/" target="_blank" rel="noopener">Claude Code cli</a> · 
+<a href="https://ccrouter.app/docs/claude-desktop-integration/" target="_blank" rel="noopener">Claude Desktop App</a> · 
+<a href="https://ccrouter.app/docs/codex-integration/" target="_blank" rel="noopener">OpenAI Codex cli</a> · 
+<a href="https://ccrouter.app/docs/codex-integration/" target="_blank" rel="noopener">OpenAI Codex Desktop App</a> · OpenCode · OpenClaw · Kimi code cli · pi coding agent, and many more.
 </p>
 
 ## Quick Start
@@ -105,18 +105,17 @@ Every AI Agent / Coding Agent tool below can connect to cc-router and use all th
 2. Add subscriptions from your providers, bind real models to the virtual models, and pick a dispatch mode.
 3. Paste the generated config into Claude Code or any other tool and you're done.
 
-| OS      | Arch          | Package                             | Download                                                                                                                                                                                               |
-| ------- | ------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| macOS   | Apple Silicon | `cc-router_macOS-arm64.dmg`         | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-arm64.dmg) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_macOS-arm64.dmg)                 |
-| macOS   | Intel         | `cc-router_macOS-x64.dmg`           | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-x64.dmg) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_macOS-x64.dmg)                     |
-| Windows | x64           | `cc-router_windows-x64-setup.exe`   | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64-setup.exe) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64-setup.exe)     |
-| Windows | x64 (MSI)     | `cc-router_windows-x64.msi`         | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64.msi) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64.msi)                 |
-| Windows | arm64         | `cc-router_windows-arm64-setup.exe` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-arm64-setup.exe) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_windows-arm64-setup.exe) |
-| Linux   | x64           | `cc-router_linux-x64.AppImage`      | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.AppImage) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.AppImage)           |
-| Linux   | x64           | `cc-router_linux-x64.deb`           | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.deb) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.deb)                     |
-| Linux   | arm64         | `cc-router_linux-arm64.AppImage`    | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.AppImage) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.AppImage)       |
-| Linux   | arm64         | `cc-router_linux-arm64.deb`         | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.deb) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.deb)                 |
-
+| OS | Arch | Package | Download |
+|---|---|---|---|
+| macOS | Apple Silicon | `cc-router_macOS-arm64.dmg` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-arm64.dmg) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_macOS-arm64.dmg) |
+| macOS | Intel | `cc-router_macOS-x64.dmg` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_macOS-x64.dmg) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_macOS-x64.dmg) |
+| Windows | x64 | `cc-router_windows-x64-setup.exe` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64-setup.exe) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64-setup.exe) |
+| Windows | x64 (MSI) | `cc-router_windows-x64.msi` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-x64.msi) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_windows-x64.msi) |
+| Windows | arm64 | `cc-router_windows-arm64-setup.exe` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_windows-arm64-setup.exe) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_windows-arm64-setup.exe) |
+| Linux | x64 | `cc-router_linux-x64.AppImage` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.AppImage) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.AppImage) |
+| Linux | x64 | `cc-router_linux-x64.deb` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-x64.deb) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-x64.deb) |
+| Linux | arm64 | `cc-router_linux-arm64.AppImage` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.AppImage) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.AppImage) |
+| Linux | arm64 | `cc-router_linux-arm64.deb` | [Global](https://github.com/finch-xu/cc-router/releases/latest/download/cc-router_linux-arm64.deb) · [China mirror](https://d.cc-router.catonthe.top/latest/cc-router_linux-arm64.deb) |
 
 > Both links serve identical files; users in mainland China will find the China mirror faster. Links always point to the latest version; older versions are on the [Releases](https://github.com/finch-xu/cc-router/releases) page. On Linux, AppImage is recommended because it supports in-app auto-update; deb has to be re-downloaded manually.
 
@@ -148,13 +147,13 @@ The LiteLLM-style `anthropic/` prefix is also accepted: `anthropic/model-opus` /
 
 Virtual models and aliases:
 
-| Virtual model  | Aliases                                                                                                                     |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `model-fable`  | `anthropic/model-fable` `anthropic/claude-fable*` `claude-fable*` `gpt-*-astra` `openai/gpt-*-astra`                        |
-| `model-opus`   | `anthropic/model-opus` `anthropic/claude-opus*` `claude-opus*` `gpt-*-sol` `openai/gpt-*-sol`                               |
-| `model-sonnet` | `anthropic/model-sonnet` `anthropic/claude-sonnet*` `claude-sonnet*` `gpt-*-terra` `openai/gpt-*-terra`                     |
-| `model-haiku`  | `anthropic/model-haiku` `anthropic/claude-haiku*` `claude-haiku*` `gpt-*-luna` `openai/gpt-*-luna`                          |
-| `model-jev`    | `anthropic/model-jev` `openai/model-jev` (only on the `/v1/systemone` entry point; the chat entry points return 400 for it) |
+| Virtual model | Aliases |
+|---|---|
+|  `model-fable` |  `anthropic/model-fable` `anthropic/claude-fable*` `claude-fable*` `gpt-*-astra` `openai/gpt-*-astra` |
+|  `model-opus` |  `anthropic/model-opus` `anthropic/claude-opus*` `claude-opus*` `gpt-*-sol` `openai/gpt-*-sol` |
+|  `model-sonnet` |  `anthropic/model-sonnet` `anthropic/claude-sonnet*` `claude-sonnet*` `gpt-*-terra` `openai/gpt-*-terra` |
+|  `model-haiku` |  `anthropic/model-haiku` `anthropic/claude-haiku*` `claude-haiku*` `gpt-*-luna` `openai/gpt-*-luna` |
+|  `model-jev` |  `anthropic/model-jev` `openai/model-jev` (only on the `/v1/systemone` entry point; the chat entry points return 400 for it) |
 
 > `claude-opus*` is a wildcard (prefix match): you can pass any model name that fits the pattern and it will be normalized to the `model-opus` virtual model — e.g. `claude-opus-4-8`, `claude-opus-4-7-20260101`, and `claude-opus-100` all work. `gpt-*-sol`-style aliases match by tier segment: `gpt-6-sol`, `gpt-6.1-sol`, and `gpt-5.6-sol-20261201` all hit the sol tier (same for astra/terra/luna). Only tier names are recognized: bare version names such as `gpt-5.5` and `gpt-*-mini` are not mapped and go to `model-fallback`.
 
@@ -162,19 +161,17 @@ Virtual models and aliases:
 
 cc-router sits between your tools and the LLM providers: tools connect on the **inbound** side, requests leave through the **outbound** side. Each side speaks three mainstream LLM APIs, and any combination works — for example, Codex comes in through the OpenAI Responses inbound and is ultimately answered by DeepSeek's Anthropic endpoint. There is also a dedicated lane for Jev (System One) decision models: `/v1/systemone` on both sides, passed through as-is.
 
-
 ### Inbound: how your tools connect to cc-router
 
 The three chat entry points share the same subscriptions, virtual models, quotas and session affinity; the fourth, `/v1/systemone`, serves Jev decision models and only routes to `model-jev`. The "Entry endpoint" column in the request log shows which one each request came through. Expand the section matching the protocol your tool speaks:
 
 <details>
-
 <summary><b>Anthropic Messages</b> <code>/v1/messages</code> — Claude Code, Claude Desktop, OpenCode, OpenClaw, pi, Kimi code cli, etc.</summary>
 
-| Setting    | Value                                                                                                                                |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Base URL   | `http://127.0.0.1:23456` (no `/v1` — the tool appends `/v1/messages` itself)                                                         |
-| Auth       | `x-api-key: <token>` or `Authorization: Bearer <token>`, i.e. Claude Code's `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`             |
+| Setting | Value |
+|---|---|
+| Base URL | `http://127.0.0.1:23456` (no `/v1` — the tool appends `/v1/messages` itself) |
+| Auth | `x-api-key: <token>` or `Authorization: Bearer <token>`, i.e. Claude Code's `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` |
 | Model name | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku`, or any alias from the table above (including the `anthropic/` prefix) |
 
 - This is the primary inbound: requests are passed through verbatim with no protocol translation, so thinking, `output_config.effort`, `cache_control`, images and tool calls all keep their native Anthropic semantics.
@@ -185,13 +182,12 @@ The three chat entry points share the same subscriptions, virtual models, quotas
 </details>
 
 <details>
-
 <summary><b>OpenAI Responses</b> <code>/v1/responses</code> — Codex CLI, Codex Desktop App and other Responses clients</summary>
 
-| Setting    | Value                                                                                                                                                                                                                         |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Base URL   | `http://127.0.0.1:23456/v1`                                                                                                                                                                                                   |
-| API Key    | the token from cc-router's Settings page; Codex reads it from `OPENAI_API_KEY` or `~/.codex/auth.json`                                                                                                                        |
+| Setting | Value |
+|---|---|
+| Base URL | `http://127.0.0.1:23456/v1` |
+| API Key | the token from cc-router's Settings page; Codex reads it from `OPENAI_API_KEY` or `~/.codex/auth.json` |
 | Model name | The `gpt-*-astra` / `gpt-*-sol` / `gpt-*-terra` / `gpt-*-luna` tier names (e.g. `gpt-6-sol`, optionally with the `openai/` prefix), mapping to fable / opus / sonnet / haiku respectively; the `model-*` form is accepted too |
 
 `~/.codex/config.toml` snippet (full steps are in the app under "Setup guide → Codex"; then launch with `codex -p cc-router`):
@@ -217,15 +213,14 @@ model = "model-sonnet"
 </details>
 
 <details>
-
 <summary><b>OpenAI Chat Completions</b> <code>/v1/chat/completions</code> — Open WebUI, Cherry Studio, Cline, LobeChat, etc.</summary>
 
 For tools that only speak OpenAI Chat Completions — Open WebUI, Cherry Studio, Cline, LobeChat and the like — point their "OpenAI-compatible" endpoint at cc-router:
 
-| Setting    | Value                                                                                                                                                                          |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Base URL   | `http://127.0.0.1:23456/v1` (some tools want it without `/v1`; follow the tool's hint)                                                                                         |
-| API Key    | the token from cc-router's Settings page (any non-empty value when auth is disabled)                                                                                           |
+| Setting | Value |
+|---|---|
+| Base URL | `http://127.0.0.1:23456/v1` (some tools want it without `/v1`; follow the tool's hint) |
+| API Key | the token from cc-router's Settings page (any non-empty value when auth is disabled) |
 | Model name | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku`, or tier aliases such as `gpt-6-astra` / `gpt-6-sol` / `gpt-6-terra` / `gpt-6-luna`; `GET /v1/models` lists them |
 
 Behavior notes:
@@ -241,16 +236,15 @@ Behavior notes:
 </details>
 
 <details>
-
 <summary><b>Jev System One</b> <code>/v1/systemone</code> — your own code, agent frameworks, or anything that can send HTTP requests</summary>
 
 Jev (System One) is a family of structured decision models: the request carries a `state` and a set of `questions`, and the response returns a structured answer for each question in `answers` — no chat text is generated. cc-router pools the keys of several upstreams under a dedicated virtual model, `model-jev`, and passes the protocol through untranslated.
 
-| Setting      | Value                                                                                               |
-| ------------ | --------------------------------------------------------------------------------------------------- |
-| Endpoint URL | `http://127.0.0.1:23456/v1/systemone` (full path)                                                   |
-| Auth         | `Authorization: Bearer <token>`; `x-api-key: <token>` also works                                    |
-| Model name   | `model-jev` (the `anthropic/` / `openai/` prefixes are accepted), or the upstream's real model name |
+| Setting | Value |
+|---|---|
+| Endpoint URL | `http://127.0.0.1:23456/v1/systemone` (full path) |
+| Auth | `Authorization: Bearer <token>`; `x-api-key: <token>` also works |
+| Model name | `model-jev` (the `anthropic/` / `openai/` prefixes are accepted), or the upstream's real model name |
 
 Verify from the command line:
 
@@ -283,7 +277,6 @@ curl http://127.0.0.1:23456/v1/systemone \
 Outbound is grouped into three protocol families, plus a group of OAuth-based subscription accounts and the System One endpoints that only serve `model-jev`. Built-in provider presets and custom endpoints take the same path — the presets just come with the address, auth scheme and model list pre-filled. The authoritative list of built-in providers is the "Add subscription" page in the app; the descriptor files live in [`src-tauri/providers/`](src-tauri/providers/), and PRs are welcome.
 
 <details>
-
 <summary><b>Anthropic Messages compatible</b> — primary path, requests passed through verbatim</summary>
 
 - Built-in: Anthropic official, DeepSeek, Zhipu GLM, Moonshot Kimi, MiniMax, Xiaomi MiMo, Alibaba Cloud Bailian, Volcengine Ark, Tencent Cloud, Baidu Qianfan, Stepfun, ModelScope, UCloud, Fireworks, OpenRouter, Requesty, xAI Grok, Aiberm, Ollama and more, covering each vendor's Token Plan / Coding Plan / Agent Plan subscriptions as well as pay-as-you-go APIs
@@ -293,7 +286,6 @@ Outbound is grouped into three protocol families, plus a group of OAuth-based su
 </details>
 
 <details>
-
 <summary><b>OpenAI compatible</b> <code>/v1/responses</code> · <code>/v1/chat/completions</code> — protocol translation</summary>
 
 - Built-in: OpenAI official API (GPT-5 / o3 / 4.1 and other reasoning models)
@@ -304,7 +296,6 @@ Outbound is grouped into three protocol families, plus a group of OAuth-based su
 </details>
 
 <details>
-
 <summary><b>Gemini compatible</b> <code>generateContent</code> · <code>/v1beta/interactions</code> — protocol translation</summary>
 
 - Built-in: Google AI Studio (generateContent, pay-as-you-go + free quota) and Google Gemini Interactions API (the new unified endpoint)
@@ -314,7 +305,6 @@ Outbound is grouped into three protocol families, plus a group of OAuth-based su
 </details>
 
 <details>
-
 <summary><b>Subscription-account outbound (OAuth)</b> — Codex (ChatGPT Plus/Pro), Kiro (AWS)</summary>
 
 - No API key: sign in via OAuth device code and use your ChatGPT subscription / Kiro's free Claude quota as an outbound
@@ -323,7 +313,6 @@ Outbound is grouped into three protocol families, plus a group of OAuth-based su
 </details>
 
 <details>
-
 <summary><b>Jev System One</b> <code>/v1/systemone</code> — serves <code>model-jev</code> only, passed through as-is</summary>
 
 - Built in: TypeSafe, OpenRouter (System One endpoint), Ollama 0.35+ (local System One endpoint), Cloudflare Clef; pick the provider's System One endpoint on the "Add subscription" page
@@ -343,18 +332,17 @@ Settings → Web UI → once enabled, open `http://127.0.0.1:23456/ui/` in a bro
 - **What it covers** — overview, subscriptions (enable / disable, test connection, refresh models and balance, edit slots, add, delete), virtual models, live routing and request logs; press `?` to see every key. The UI language follows the desktop app's language setting (reopen the terminal UI after changing it)
 - **Known limitations** — the terminal must be at least 80×24; some symbols are “ambiguous-width” characters that East Asian locales may render two columns wide, which misaligns the layout — if you see that, turn on your terminal's option to display ambiguous-width characters as narrow (single-width); adding OAuth subscriptions and changing API keys still happen in the desktop app
 
-<table align="center">  
-  <tr>  
-    <td width="33%"><img src="assets/screenshots/en/tui-overview.png" alt="cc-router terminal UI overview" /></td>  
-    <td width="33%"><img src="assets/screenshots/en/tui-subscriptions.png" alt="cc-router terminal UI subscriptions page" /></td>  
-    <td width="33%"><img src="assets/screenshots/en/tui-log-detail.png" alt="cc-router terminal UI request detail" /></td>  
-  </tr>  
+<table align="center">
+  <tr>
+    <td width="33%"><img src="assets/screenshots/en/tui-overview.png" alt="cc-router terminal UI overview" /></td>
+    <td width="33%"><img src="assets/screenshots/en/tui-subscriptions.png" alt="cc-router terminal UI subscriptions page" /></td>
+    <td width="33%"><img src="assets/screenshots/en/tui-log-detail.png" alt="cc-router terminal UI request detail" /></td>
+  </tr>
 </table>
 
 ## FAQ & Use Cases
 
 <details>
-
 <summary>What problem does cc-router solve?</summary>
 
 **Without cc-router**: your AI agent (Claude Code / OpenCode / etc.) can only talk to one vendor at a time. Small-quota plans run out at the worst moment, and you end up swapping config files by hand — bad experience.
@@ -371,7 +359,6 @@ What you get:
 </details>
 
 <details>
-
 <summary>What are the <code>model-opus</code> / <code>model-sonnet</code> / <code>model-haiku</code> virtual models?</summary>
 
 Claude Code uses three model tiers by task difficulty: opus for planning, sonnet for coding, haiku for tool calls.
@@ -387,7 +374,6 @@ When CC sends a request, cc-router routes by the mapping — no more hand-editin
 </details>
 
 <details>
-
 <summary>How should I combine multiple Coding Plans?</summary>
 
 Example: subscription A = GLM-5 / MiniMax-2.7 / DeepSeek-Flash; subscription B = DeepSeek-V4-Pro / MiniMax-2.7 / GLM-5.
@@ -398,7 +384,6 @@ Example: subscription A = GLM-5 / MiniMax-2.7 / DeepSeek-Flash; subscription B =
 </details>
 
 <details>
-
 <summary>Scheduling mode: sequential, round-robin, or session affinity?</summary>
 
 - **Sequential** — drain account A first, then switch to B. Better cache hit rate; ideal for **squeezing every token out of two small GLM Coding Plans**
@@ -437,7 +422,6 @@ Artifacts land in `src-tauri/target/release/bundle/` under per-platform subfolde
 ## Windows Development Notes
 
 <details>
-
 <summary>Expand when you hit trouble developing or building on Windows (can save you hours)</summary>
 
 **1. The MSVC toolchain is required — GNU will not work**

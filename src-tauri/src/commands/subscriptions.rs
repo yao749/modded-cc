@@ -23,6 +23,7 @@ use crate::subscription::{
     },
     model_discovery, ping,
     quota::TokenQuotas,
+    schedule::{validate_slot_schedules, SlotSchedules, WallClock},
     state_machine, store,
 };
 
@@ -188,9 +189,6 @@ pub struct CreateSubscriptionInput {
     pub api_key: String,
     pub model_slots: ModelSlots,
     pub source: CreateSource,
-    /// 路由分组: "classic" 或 "pool". None → 默认 "classic"。migration 027 引入, 供池入口创建时设 pool.
-    #[serde(default)]
-    pub routing_group: Option<String>,
     // 刻意不含 slot_efforts: 新建订阅一律全 auto (DB 列 DEFAULT '{}'), 用户创建后进编辑页再设。
     // 新建向导是两步非事务流程, 不往里再加表单字段。
 }
@@ -268,10 +266,6 @@ pub struct ConnectionPatch {
     /// 额外出站 header。整块替换 (与 model_slots / slot_efforts 一致):
     /// Some(map) = 覆盖为 map (空 map = 清空), None = 不改。
     pub required_headers: Option<BTreeMap<String, String>>,
-    /// 用户显式指定的模型列表完整 URL (如 `https://dashscope.aliyuncs.com/compatible-mode/v1/models`).
-    /// None = 不改; Some(url) = 写入 model_discovery.url; Some("") = 清空让后端自动 probe.
-    #[serde(default)]
-    pub models_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,18 +283,6 @@ pub struct TestConnectionResult {
     /// `message` 是 cc-router 固定文案时的结构化形式 (桌面端按界面语言显示)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<ping::ProbeNote>,
-}
-
-/// 能力分类模型池里单个模型的连通性测试结果 —— 用于逐行显示绿色勾/红色叉。
-#[derive(Debug, Clone, Serialize)]
-pub struct PoolTestItem {
-    pub model_name: String,
-    pub priority: i64,
-    pub enabled: bool,
-    pub ok: bool,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub http_status: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,21 +311,12 @@ async fn collect_references(state: &AppState) -> std::collections::HashMap<Uuid,
 }
 
 #[tauri::command]
-pub async fn list_subscriptions(
-    state: State<'_, AppState>,
-    group: Option<String>,
-) -> AppResult<Vec<SubscriptionDto>> {
+pub async fn list_subscriptions(state: State<'_, AppState>) -> AppResult<Vec<SubscriptionDto>> {
     let refs = collect_references(&state).await;
     let subs = state.subscriptions.read().await;
     let mut out = Vec::with_capacity(subs.len());
     for (id, rt) in subs.iter() {
         let guard = rt.read().await;
-        // 路由分组过滤: 只返回指定组的订阅; 不传 group 返回全部 (兼容老客户端)
-        if let Some(ref g) = group {
-            if guard.row.routing_group != *g {
-                continue;
-            }
-        }
         let referenced = refs.get(id).cloned().unwrap_or_default();
         out.push(SubscriptionDto::from_runtime(&guard, referenced, &state.providers));
     }
@@ -373,10 +346,6 @@ pub async fn create_subscription(
 ) -> AppResult<SubscriptionDto> {
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let routing_group = input
-        .routing_group
-        .filter(|g| g == "pool" || g == "classic")
-        .unwrap_or_else(|| "classic".to_string());
 
     // 根据 source 拼出 row 的 snapshot 字段
     let row = match input.source {
@@ -404,6 +373,7 @@ pub async fn create_subscription(
                 oauth_metadata: OAuthMetadata::default(),
                 model_slots: input.model_slots,
                 slot_efforts: SlotEfforts::default(),
+                slot_schedules: Default::default(),
                 token_quotas: TokenQuotas::default(),
                 enabled: true,
                 is_auth_failed: false,
@@ -425,7 +395,7 @@ pub async fn create_subscription(
                 provider_display_name: provider.display_name.zh.clone(),
                 provider_icon: provider.icon.clone().unwrap_or_default(),
                 is_user_defined: false,
-                routing_group: routing_group.clone(),
+                routing_group: "classic".into(),
             }
         }
         CreateSource::Custom {
@@ -467,6 +437,7 @@ pub async fn create_subscription(
                 oauth_metadata: OAuthMetadata::default(),
                 model_slots,
                 slot_efforts: SlotEfforts::default(),
+                slot_schedules: Default::default(),
                 token_quotas: TokenQuotas::default(),
                 enabled: true,
                 is_auth_failed: false,
@@ -488,7 +459,7 @@ pub async fn create_subscription(
                 provider_display_name,
                 provider_icon: profile.icon.to_string(),
                 is_user_defined: true,
-                routing_group,
+                routing_group: "classic".into(),
             }
         }
     };
@@ -646,14 +617,6 @@ pub async fn update_subscription(
             if let Some(v) = conn.required_headers {
                 guard.row.required_headers = v;
             }
-            // 模型列表完整 URL: 非空 = 写入; 空串 = 清空让后端自动 probe
-            if let Some(v) = conn.models_url.as_deref() {
-                if v.trim().is_empty() {
-                    guard.row.model_discovery.url = None;
-                } else {
-                    guard.row.model_discovery.url = Some(v.trim().to_string());
-                }
-            }
         }
 
         guard.row.updated_at = Utc::now();
@@ -770,7 +733,9 @@ pub async fn test_connection(
         g.row.clone()
     };
 
-    let (model, slot) = match ping::pick_test_model_with_pool_fallback(&state, &row).await {
+    // 选模型与带的思考强度用同一时刻, 不会一个按半点前、一个按半点后
+    let clock = crate::subscription::schedule::WallClock::now();
+    let (model, slot) = match ping::pick_test_model_at(&row, clock) {
         Some(m) => m,
         None => {
             let note = ping::ProbeNote::NoTestModel;
@@ -785,7 +750,7 @@ pub async fn test_connection(
         }
     };
 
-    let result = ping::probe_subscription(&state, &row, &model, slot).await;
+    let result = ping::probe_subscription(&state, &row, &model, slot, clock).await;
 
     let mut state_reset = false;
     if result.ok {
@@ -810,83 +775,6 @@ pub async fn test_connection(
         state_reset,
         note: result.note,
     })
-}
-
-/// 批量测试某个能力分类下**所有模型**, 返回每个模型的连通性结果.
-/// 按 priority ASC 顺序依次 probe, 不中断 (一个失败继续下一个).
-/// 未启用的模型跳过 probe, 直接标记 enabled=false.
-/// 前端用这个结果在每行模型前显示绿色勾 (ok) / 红色叉 (fail) / 灰色 (未启用).
-#[tauri::command]
-pub async fn test_pool_connection(
-    state: State<'_, AppState>,
-    id: String,
-    capability: String,
-) -> AppResult<Vec<PoolTestItem>> {
-    let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
-    let rt = {
-        let subs = state.subscriptions.read().await;
-        subs.get(&id)
-            .cloned()
-            .ok_or_else(|| AppError::SubscriptionNotFound(id.to_string()))?
-    };
-    let row = {
-        let g = rt.read().await;
-        g.row.clone()
-    };
-
-    // 拉该分类下全部模型 (包括未启用的, 未启用也要返回给前端显示灰色)
-    let all: Vec<crate::subscription::store::ModelPoolEntry> = {
-        let mut all = crate::subscription::store::load_model_pool(&state.db, id).await?;
-        all.retain(|e| e.capability == capability.as_str());
-        // 确保按 priority ASC 排
-        all.sort_by_key(|e| e.priority);
-        all
-    };
-
-    if all.is_empty() {
-        return Ok(vec![PoolTestItem {
-            model_name: "(空)".into(),
-            priority: 0,
-            enabled: false,
-            ok: false,
-            message: format!("该分类 ({}) 没有模型, 请先添加", capability),
-            http_status: None,
-        }]);
-    }
-
-    tracing::info!(
-        "test_pool_connection start sub_id={} provider={} base_url={} capability={} entries={}",
-        id, row.provider_id, row.base_url, capability, all.len()
-    );
-
-    let mut results = Vec::with_capacity(all.len());
-    for entry in &all {
-        if !entry.enabled {
-            results.push(PoolTestItem {
-                model_name: entry.model_name.clone(),
-                priority: entry.priority,
-                enabled: false,
-                ok: false,
-                message: "未启用, 跳过测试".into(),
-                http_status: None,
-            });
-            continue;
-        }
-        let probe = ping::probe_subscription(&state, &row, &entry.model_name, None).await;
-        tracing::info!(
-            "test_pool_connection probe model={} ok={} http_status={:?} message={}",
-            entry.model_name, probe.ok, probe.http_status, probe.message
-        );
-        results.push(PoolTestItem {
-            model_name: entry.model_name.clone(),
-            priority: entry.priority,
-            enabled: true,
-            ok: probe.ok,
-            message: probe.message,
-            http_status: probe.http_status,
-        });
-    }
-    Ok(results)
 }
 
 #[tauri::command]
@@ -1012,13 +900,10 @@ pub async fn probe_custom_models(
 
     Ok(
         match model_discovery::probe(&state.http_client, &target).await {
-            Ok(mut found) => {
-                found.models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-                ProbeCustomModelsResult::Auto {
-                    models: found.models,
-                    models_url: found.url,
-                }
-            }
+            Ok(found) => ProbeCustomModelsResult::Auto {
+                models: found.models,
+                models_url: found.url,
+            },
             Err(e) => ProbeCustomModelsResult::ManualFallback {
                 reason: e.to_string(),
             },
@@ -1232,6 +1117,64 @@ pub async fn update_token_quotas(
     Ok(SubscriptionDto::from_runtime(&guard, referenced_by, &state.providers))
 }
 
+/// Shared by `update_slot_schedules` and backup import so both reject the same rows. Takes the
+/// narrowest inputs both callers have (import works on an export struct, not a `SubscriptionRow`).
+/// System One is checked first: its subscriptions have no slot-to-model mapping to schedule.
+pub(crate) fn check_schedules_for(
+    endpoint_protocol: EndpointProtocol,
+    s: &SlotSchedules,
+) -> AppResult<()> {
+    if endpoint_protocol == EndpointProtocol::Systemone && !s.is_empty() {
+        return Err(AppError::BadRequest("System One 订阅不支持分时段".into()));
+    }
+    validate_slot_schedules(s).map_err(AppError::BadRequest)
+}
+
+#[tauri::command]
+pub async fn update_slot_schedules(
+    state: State<'_, AppState>,
+    id: String,
+    schedules: SlotSchedules,
+) -> AppResult<SubscriptionDto> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
+    let rt = state
+        .get_subscription(&id)
+        .await
+        .ok_or_else(|| AppError::SubscriptionNotFound(id.to_string()))?;
+    let row_snapshot = {
+        let mut g = rt.write().await;
+        check_schedules_for(g.row.endpoint_protocol, &schedules)?;
+        g.row.slot_schedules = schedules;
+        g.row.updated_at = Utc::now();
+        g.row.clone()
+    };
+    store::update_row(&state.db, &row_snapshot).await?;
+    let referenced_by = referenced_by_names(&state, &id).await;
+    let guard = rt.read().await;
+    Ok(SubscriptionDto::from_runtime(&guard, referenced_by, &state.providers))
+}
+
+/// The host machine's local wall clock, as the scheduler sees it. The web UI / TUI may run on
+/// another machine, so they ask the host instead of reading their own clock.
+#[derive(Debug, Serialize)]
+pub struct HostClockDto {
+    /// 1 = Monday .. 7 = Sunday.
+    pub weekday: u8,
+    /// Minutes since local midnight, 0..1440.
+    pub minute: u16,
+    pub epoch_ms: i64,
+}
+
+#[tauri::command]
+pub async fn get_host_clock() -> AppResult<HostClockDto> {
+    let now = WallClock::now();
+    Ok(HostClockDto {
+        weekday: now.weekday,
+        minute: now.minute,
+        epoch_ms: Utc::now().timestamp_millis(),
+    })
+}
+
 #[tauri::command]
 pub async fn reset_total_quota_usage(
     state: State<'_, AppState>,
@@ -1435,75 +1378,6 @@ mod tests {
         let p: CustomProtocol = serde_json::from_value(serde_json::json!("systemone")).unwrap();
         assert_eq!(p, CustomProtocol::Systemone);
     }
-
-    /// 复现 issue 1: entries 里缺少 subscription_id 会不会让 serde 炸?
-    #[test]
-    fn save_model_pool_entries_without_subscription_id() {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Args {
-            input: SaveModelPoolInput,
-        }
-
-        // 前端真实发送: entries 里 subscription_id 被有意剔除
-        let json = r#"{
-            "input": {
-                "subscription_id": "550e8400-e29b-41d4-a716-446655440000",
-                "entries": [
-                    {
-                        "id": "abc-123",
-                        "capability": "vision",
-                        "model_name": "gpt-4o-vision",
-                        "priority": 0,
-                        "enabled": true,
-                        "supported_inputs": ["text", "image"]
-                    }
-                ]
-            }
-        }"#;
-
-        let result: Result<Args, _> = serde_json::from_str(json);
-        match &result {
-            Ok(args) => eprintln!("OK! loaded {} entries", args.input.entries.len()),
-            Err(e) => eprintln!("FAIL: {e}"),
-        }
-        assert!(result.is_ok(), "缺少 ModelPoolEntryDto.subscription_id 时应该也能反序列化");
-    }
-
-    /// 复现 issue 2: Tauri IPC 可能用的是 camelCase KEY 递归转换
-    #[test]
-    fn save_model_pool_with_camel_case_inner() {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Args {
-            input: SaveModelPoolInput,
-        }
-
-        // 假设 Tauri 把所有 key 递归转成 camelCase
-        let json = r#"{
-            "input": {
-                "subscriptionId": "550e8400-e29b-41d4-a716-446655440000",
-                "entries": [
-                    {
-                        "id": "abc-123",
-                        "subscriptionId": "unused",
-                        "capability": "vision",
-                        "modelName": "gpt-4o-vision",
-                        "priority": 0,
-                        "enabled": true,
-                        "supportedInputs": ["text", "image"]
-                    }
-                ]
-            }
-        }"#;
-
-        let result: Result<Args, _> = serde_json::from_str(json);
-        match &result {
-            Ok(args) => eprintln!("OK (camelCase inner)! loaded {} entries", args.input.entries.len()),
-            Err(e) => eprintln!("FAIL (camelCase inner): {e}"),
-        }
-        // 这个测试预期会 FAIL — 说明 serde 确实不做递归 camelCase
-    }
 }
 
 #[cfg(test)]
@@ -1518,207 +1392,40 @@ mod protocol_tests {
         assert!(protocol_switch_rejection(Messages, Systemone).is_some());
         assert!(protocol_switch_rejection(Systemone, Messages).is_some());
     }
-}
 
-// ============== 能力分类模型池命令 ==============
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModelPoolEntryDto {
-    pub id: String,
-    /// 前端会刻意剥离此字段 (外部 SaveModelPoolInput 已经带了 subscription_id),
-    /// 所以用 serde(default) 让 serde 反序列化时忽略缺失值 —— Rust handler 最终
-    /// 会用 input.subscription_id 覆盖这个字段, 不会留空.
-    #[serde(default)]
-    pub subscription_id: String,
-    pub capability: String,
-    pub model_name: String,
-    pub priority: i64,
-    pub enabled: bool,
-    #[serde(default)]
-    pub supported_inputs: Option<Vec<String>>,
-}
-
-impl From<crate::subscription::store::ModelPoolEntry> for ModelPoolEntryDto {
-    fn from(e: crate::subscription::store::ModelPoolEntry) -> Self {
-        Self {
-            id: e.id,
-            subscription_id: e.subscription_id.to_string(),
-            capability: e.capability,
-            model_name: e.model_name,
-            priority: e.priority,
-            enabled: e.enabled,
-            supported_inputs: e.supported_inputs,
+    fn rule(start: &str) -> crate::subscription::schedule::ScheduleRule {
+        crate::subscription::schedule::ScheduleRule {
+            days: vec![1],
+            start: start.into(),
+            end: "09:00".into(),
+            model: "m".into(),
+            effort: None,
         }
     }
-}
-
-#[tauri::command]
-pub async fn load_model_pool(
-    state: State<'_, AppState>,
-    subscription_id: String,
-) -> AppResult<Vec<ModelPoolEntryDto>> {
-    use std::str::FromStr;
-    let id = Uuid::from_str(&subscription_id)
-        .map_err(|e| AppError::BadRequest(format!("invalid uuid: {e}")))?;
-    let entries = crate::subscription::store::load_model_pool(&state.db, id).await?;
-    Ok(entries.into_iter().map(ModelPoolEntryDto::from).collect())
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SaveModelPoolInput {
-    pub subscription_id: String,
-    pub entries: Vec<ModelPoolEntryDto>,
-}
-
-#[tauri::command]
-pub async fn save_model_pool(
-    state: State<'_, AppState>,
-    input: SaveModelPoolInput,
-) -> AppResult<()> {
-    use std::str::FromStr;
-    let id = Uuid::from_str(&input.subscription_id)
-        .map_err(|e| AppError::BadRequest(format!("invalid uuid: {e}")))?;
-    // 生成缺失的 id (前端可能新添加了 entry 但没生成 id)
-    let entries: Vec<crate::subscription::store::ModelPoolEntry> = input
-        .entries
-        .into_iter()
-        .map(|e| {
-            let real_id = if e.id.is_empty() {
-                Uuid::new_v4().to_string()
-            } else {
-                e.id
-            };
-            crate::subscription::store::ModelPoolEntry {
-                id: real_id,
-                subscription_id: id,
-                capability: e.capability,
-                model_name: e.model_name,
-                priority: e.priority,
-                enabled: e.enabled,
-                supported_inputs: e.supported_inputs,
-            }
-        })
-        .collect();
-    crate::subscription::store::save_model_pool(&state.db, id, &entries).await?;
-    // 池条目即接入: 按启用条目同步能力虚拟模型的绑定 (只动当前订阅)
-    sync_capability_bindings_from_pool(&state, id, &entries).await?;
-    Ok(())
-}
-
-/// 计算某个能力分类下, 当前订阅的绑定是否要变化。
-/// 返回 None = 无需变化; Some(ids) = 目标绑定列表 (含其他订阅, 保序)。
-///
-/// 池条目是池接入的唯一来源: 有 ≥1 条启用条目 → 绑定; 全部禁用/删除 → 解绑。
-/// 手动在虚拟模型页加的绑定会被下一次池保存覆盖 (± 语义只动当前订阅)。
-fn pool_binding_target(
-    current: &[Uuid],
-    sub_id: Uuid,
-    has_enabled_entry: bool,
-) -> Option<Vec<Uuid>> {
-    let present = current.contains(&sub_id);
-    if present == has_enabled_entry {
-        return None;
-    }
-    let mut ids = current.to_vec();
-    if has_enabled_entry {
-        ids.push(sub_id);
-    } else {
-        ids.retain(|x| *x != sub_id);
-    }
-    Some(ids)
-}
-
-/// 保存池条目后, 把 5 个能力虚拟模型的订阅绑定同步成「有条目的订阅」集合。
-/// 读锁取快照 → 无锁落库 → 写锁更新内存, 与 `update_virtual_model` 同序, 避免持锁 await。
-async fn sync_capability_bindings_from_pool(
-    state: &State<'_, AppState>,
-    sub_id: Uuid,
-    entries: &[crate::subscription::store::ModelPoolEntry],
-) -> AppResult<()> {
-    use crate::virtual_model::{RoutingParadigm, VirtualModelName};
-
-    // 1. 读快照, 算出每个能力名的目标绑定
-    let changes: Vec<(VirtualModelName, Vec<Uuid>)> = {
-        let guard = state.virtual_models.read().await;
-        let mut out = Vec::new();
-        for name in VirtualModelName::all() {
-            if name.paradigm() != RoutingParadigm::Pool {
-                continue;
-            }
-            let Some(capability) = name.capability() else {
-                continue;
-            };
-            let has_enabled = entries
-                .iter()
-                .any(|e| e.capability == capability.as_str() && e.enabled);
-            let Some(cfg) = guard.get(&name) else {
-                continue;
-            };
-            if let Some(ids) = pool_binding_target(&cfg.subscription_ids, sub_id, has_enabled) {
-                out.push((name, ids));
-            }
-        }
-        out
-    };
-
-    if changes.is_empty() {
-        return Ok(());
-    }
-
-    // 2. 落库 (不持锁)
-    for (name, ids) in &changes {
-        crate::virtual_model::store::save_bindings(&state.db, *name, ids).await?;
-    }
-
-    // 3. 更新内存表
-    let mut guard = state.virtual_models.write().await;
-    for (name, ids) in changes {
-        if let Some(cfg) = guard.get_mut(&name) {
-            cfg.subscription_ids = ids;
-            cfg.last_used_index = 0;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod pool_binding_sync_tests {
-    use super::pool_binding_target;
-    use uuid::Uuid;
 
     #[test]
-    fn no_change_when_state_matches_entries() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        // 已绑定 + 有启用条目 → 不动
-        assert!(pool_binding_target(&[a, b], a, true).is_none());
-        // 未绑定 + 无启用条目 → 不动
-        assert!(pool_binding_target(&[a, b], Uuid::new_v4(), false).is_none());
+    fn schedules_are_rejected_for_systemone_but_empty_is_fine() {
+        let mut s = SlotSchedules::default();
+        assert!(check_schedules_for(EndpointProtocol::Systemone, &s).is_ok());
+        s.opus = vec![rule("08:00")];
+        let err = check_schedules_for(EndpointProtocol::Systemone, &s).unwrap_err();
+        assert!(err.to_string().contains("System One"), "{err}");
+        assert!(check_schedules_for(EndpointProtocol::Messages, &s).is_ok());
     }
 
     #[test]
-    fn adds_sub_when_first_enabled_entry_appears() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        let ids = pool_binding_target(&[a], b, true).expect("应追加绑定");
-        assert_eq!(ids, vec![a, b], "追加在末尾, 其他订阅保序");
+    fn schedules_with_bad_time_are_rejected_for_normal_rows() {
+        let mut s = SlotSchedules::default();
+        s.opus = vec![rule("08:15")];
+        let err = check_schedules_for(EndpointProtocol::Messages, &s).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)), "{err}");
     }
 
     #[test]
-    fn removes_sub_when_all_entries_gone_or_disabled() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        let ids = pool_binding_target(&[a, b], a, false).expect("应解除绑定");
-        assert_eq!(ids, vec![b], "只摘当前订阅, 其余原样");
-    }
-
-    #[test]
-    fn only_touches_the_saved_subscription() {
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        let c = Uuid::new_v4();
-        // a 解绑不影响 b/c 的相对顺序
-        let ids = pool_binding_target(&[c, a, b], a, false).unwrap();
-        assert_eq!(ids, vec![c, b]);
+    fn systemone_check_runs_before_rule_validation() {
+        let mut s = SlotSchedules::default();
+        s.opus = vec![rule("08:15")];
+        let err = check_schedules_for(EndpointProtocol::Systemone, &s).unwrap_err();
+        assert!(err.to_string().contains("System One"), "{err}");
     }
 }

@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
 use crate::backup::crypto::{self, KdfCost};
-use crate::backup::export::{build_export, pools_to_export, SecretOptions, VirtualModelSnapshot};
+use crate::backup::export::{build_export, SecretOptions, VirtualModelSnapshot};
 use crate::backup::format::parse_file;
 use crate::backup::import::{self, ImportPreview, ImportReport, LocalState};
 use crate::error::{AppError, AppResult};
@@ -98,8 +98,6 @@ async fn local_state(state: &AppState) -> LocalState {
 async fn render_export(state: &AppState, password: Option<Zeroizing<String>>) -> AppResult<(String, usize)> {
     let rows = snapshot_rows(state).await;
     let vms = snapshot_vms(state).await;
-    // 池配置只存在 DB 里 (内存不缓存), 导出时现读全量
-    let pools = pools_to_export(&crate::subscription::store::load_all_model_pools(&state.db).await?);
     let token = Zeroizing::new(state.settings.read().await.auth_token.clone());
     let count = rows.len();
     // Argon2 (64 MiB, t=3) takes a few hundred ms; keep it off the async workers.
@@ -109,7 +107,7 @@ async fn render_export(state: &AppState, password: Option<Zeroizing<String>>) ->
             auth_token: token.as_str(),
             cost: KdfCost::DEFAULT,
         });
-        let file = build_export(&rows, &vms, &pools, secrets, env!("CARGO_PKG_VERSION"), Utc::now())?;
+        let file = build_export(&rows, &vms, secrets, env!("CARGO_PKG_VERSION"), Utc::now())?;
         Ok(serde_json::to_string_pretty(&file)?)
     })
     .await

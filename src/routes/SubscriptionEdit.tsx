@@ -27,7 +27,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { ModelSlotPicker } from "@/components/ModelSlotPicker";
-import { SubscriptionBalanceCard } from "@/components/SubscriptionBalanceCard";
+import { SubscriptionBalancePanel } from "@/components/SubscriptionBalanceCard";
 import { SubscriptionQuotaCard } from "@/components/SubscriptionQuotaCard";
 import { api } from "@/api/tauri";
 import { KeyValueEditor, type KeyValueRow } from "@/components/KeyValueEditor";
@@ -576,7 +576,7 @@ export function SubscriptionEditPage() {
               </Card>
             )}
 
-            <SubscriptionBalanceCard
+            <SubscriptionBalancePanel
               subscription={sub}
               onChanged={() => {
                 queryClient.invalidateQueries({ queryKey: ["subscription", id] });

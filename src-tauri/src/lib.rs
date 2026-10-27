@@ -21,6 +21,8 @@ pub mod tls;
 pub mod tray;
 #[cfg(test)]
 mod tui_contract;
+#[cfg(test)]
+mod zh_hant_check;
 pub mod tui_install;
 pub mod updater_source;
 pub mod virtual_model;
@@ -131,17 +133,15 @@ pub fn run() {
             commands::subscriptions::delete_subscription,
             commands::subscriptions::set_subscription_enabled,
             commands::subscriptions::test_connection,
-            commands::subscriptions::test_pool_connection,
             commands::subscriptions::refresh_model_list,
             commands::subscriptions::probe_custom_models,
             commands::subscriptions::refresh_subscription_balance,
             commands::subscriptions::update_token_quotas,
+            commands::subscriptions::update_slot_schedules,
+            commands::subscriptions::get_host_clock,
             commands::subscriptions::reset_total_quota_usage,
-            commands::subscriptions::load_model_pool,
-            commands::subscriptions::save_model_pool,
             commands::virtual_models::list_virtual_models,
             commands::virtual_models::update_virtual_model,
-            commands::virtual_models::list_model_pools,
             commands::requests::list_requests,
             commands::requests::export_requests_csv,
             commands::requests::export_requests_csv_text,

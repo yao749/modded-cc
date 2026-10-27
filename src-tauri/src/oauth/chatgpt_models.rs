@@ -86,22 +86,15 @@ pub async fn fetch(
     let text = resp.text().await?;
     let parsed: CodexModelsEnvelope = serde_json::from_str(&text)?;
 
-    let mut models: Vec<ModelInfo> = parsed
+    let models: Vec<ModelInfo> = parsed
         .models
         .into_iter()
         .filter(|m| m.visibility.as_deref() == Some("list"))
-        .map(|m| {
-            let inferred = crate::subscription::model_discovery::infer_capability(&m.slug, &[]);
-            ModelInfo {
-                id: m.slug,
-                display_name: m.display_name,
-                native_capabilities: Vec::new(),
-                inferred_capability: inferred,
-            }
+        .map(|m| ModelInfo {
+            id: m.slug,
+            display_name: m.display_name,
         })
         .collect();
-    // 和通用 discovery 保持一致: 按模型名字母序排
-    models.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     if models.is_empty() {
         return Err(DiscoveryError::InvalidResponse(
             "返回的模型列表为空 (账号无 Codex 权限或全部 visibility=hide)".into(),

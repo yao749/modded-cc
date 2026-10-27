@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use crate::virtual_model::model::{RoutingMode, RoutingParadigm, VirtualModelName};
+use crate::virtual_model::model::{RoutingMode, VirtualModelName};
 use crate::virtual_model::store;
 
 #[derive(Debug, Serialize)]
@@ -22,26 +22,9 @@ pub struct UpdateVirtualModelInput {
 
 #[tauri::command]
 pub async fn list_virtual_models(state: State<'_, AppState>) -> AppResult<Vec<VirtualModelDto>> {
-    // GUI 列出的虚拟名: 能力池范式**永远列出** (模型池是独立体系, 2026-10-23 修订);
-    // 四槽范式在 pool 模式下隐藏; Jev (Both) 两套都列。
-    // 内存表与 DB 仍然全量加载 (store::load_all 不动), 这里只是读侧过滤。
-    let routing_mode = {
-        let guard = state.settings.read().await;
-        guard.routing_mode.clone()
-    };
-    let is_pool = routing_mode == "pool";
-
     let guard = state.virtual_models.read().await;
     let mut out = Vec::with_capacity(VirtualModelName::all().len());
     for name in VirtualModelName::all() {
-        let allowed = match name.paradigm() {
-            RoutingParadigm::Pool => true, // 池独立于模式, 任何模式都可管理
-            RoutingParadigm::Slots => !is_pool,
-            RoutingParadigm::Both => true,
-        };
-        if !allowed {
-            continue;
-        }
         if let Some(cfg) = guard.get(&name) {
             out.push(VirtualModelDto {
                 name: cfg.name.as_str().to_string(),
@@ -101,13 +84,4 @@ pub async fn update_virtual_model(
         cfg.last_used_index = 0;
     }
     Ok(())
-}
-
-/// 一次返回全部订阅的能力分类池条目 (按订阅 + 能力 + 优先级排序).
-/// 池总览矩阵页需要: 逐个订阅 invoke `load_model_pool` 是 N 次往返。
-#[tauri::command]
-pub async fn list_model_pools(
-    state: State<'_, AppState>,
-) -> AppResult<Vec<crate::subscription::store::ModelPoolEntry>> {
-    crate::subscription::store::load_all_model_pools(&state.db).await
 }
