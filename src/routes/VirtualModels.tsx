@@ -17,7 +17,7 @@ import { useVirtualModels, useUpdateVirtualModel } from "@/hooks/useVirtualModel
 import { isAnthropicPassthrough } from "@/lib/authTypes";
 import { customProviderLabel } from "@/lib/providerLabels";
 import { providerName as localProviderName } from "@/lib/providerText";
-import { VM_META, VM_ORDER, isJev, jevModelOf, vmAccepts, vmNameToSlot } from "@/lib/virtualModels";
+import { VM_META, VM_ORDER, CAPABILITY_NAMES, isJev, jevModelOf, vmAccepts, vmNameToSlot } from "@/lib/virtualModels";
 import { runtime } from "@/runtime";
 import { useT } from "@/i18n";
 import type {
@@ -42,11 +42,13 @@ export function VirtualModelsPage() {
     return m;
   }, [subs.data]);
 
+  // 经典页只呈现四槽体系: 能力分类名 (model-llm 等) 属于池门户, 不在这里出现。
+  // pool 模式下本页自然为空 → 显示未生效提示 (ModeBanner 也会警示)。
   const orderedVms = useMemo<VirtualModelDto[]>(
     () =>
-      VM_ORDER.map((name) => vms.data?.find((v) => v.name === name)).filter(
-        (v): v is VirtualModelDto => v !== undefined,
-      ),
+      VM_ORDER.filter((n) => !CAPABILITY_NAMES.has(n))
+        .map((name) => vms.data?.find((v) => v.name === name))
+        .filter((v): v is VirtualModelDto => v !== undefined),
     [vms.data],
   );
 
@@ -77,14 +79,22 @@ export function VirtualModelsPage() {
       </div>
 
       <div className="slot-grid">
-        {orderedVms.map((vm) => (
-          <VirtualModelCard
-            key={vm.name}
-            vm={vm}
-            subsMap={subsMap}
-            allSubs={subs.data ?? []}
-          />
-        ))}
+        {orderedVms.length === 0 ? (
+          <div className="card section">
+            <div className="card-body text-sm text-muted-foreground">
+              {t("virtualModels.slotsNotActive")}
+            </div>
+          </div>
+        ) : (
+          orderedVms.map((vm) => (
+            <VirtualModelCard
+              key={vm.name}
+              vm={vm}
+              subsMap={subsMap}
+              allSubs={subs.data ?? []}
+            />
+          ))
+        )}
       </div>
 
       <StarPrompt className="page-end" />

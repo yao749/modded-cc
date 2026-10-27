@@ -3407,18 +3407,6 @@ html:not([data-platform="macos"]) .main.flush { padding-top: 0; }
   background: var(--fill-butter);
   color: var(--ink);
 }
-.mode-banner-switch {
-  flex-shrink: 0;
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  border: 1.5px solid var(--stroke);
-  border-radius: var(--r-blob);
-  background: var(--bg);
-  color: var(--ink);
-  cursor: pointer;
-}
-.mode-banner-switch:disabled { opacity: 0.6; cursor: default; }
 
 /* === 能力分类池总览矩阵 (/pool) === */
 .pool-matrix { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -3454,6 +3442,21 @@ html:not([data-platform="macos"]) .main.flush { padding-top: 0; }
 }
 .pool-cell:hover { border-color: var(--stroke); color: var(--ink); }
 .pool-cell.filled { border-style: solid; border-color: var(--line); color: var(--ink-2); }
+
+/* 管理订阅区 (/pool 下方) */
+.pool-manage-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 池虚拟模型页 (/pool/models) */
+.pool-bound-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.pool-bound-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-blob);
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
 .nav-toggles { display: flex; align-items: center; gap: 4px; padding: 6px 4px 0; }
 /* 只有图案的按钮: 平时无框, 悬停时和导航项一样落成一张纸条 */
 .nav-toggle {

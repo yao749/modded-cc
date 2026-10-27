@@ -32,7 +32,8 @@ export const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 p-6 duration-200 " +
+        // max-h + overflow: 内容超视口时整窗可滚动 —— 否则 fixed 居中会把上下两端切掉且滚轮无处可滚
+        "fixed left-[50%] top-[50%] z-50 grid max-h-[90vh] w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto p-6 duration-200 " +
           "plain:border plain:bg-background plain:shadow-lg plain:sm:rounded-lg " +
           "sketch:border-2 sketch:border-(--stroke) sketch:bg-(--surface) sketch:shadow-[8px_8px_0_var(--fill-oat)] sketch:sm:rounded-(--r-card) " +
           "win2k:border-0 win2k:bg-(--w-face) win2k:shadow-(--bevel-window)",

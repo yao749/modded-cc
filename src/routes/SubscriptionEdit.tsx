@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { ArrowLeft, TriangleAlert, LoaderCircle } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { runtime } from "@/runtime";
@@ -64,6 +64,8 @@ export function SubscriptionEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const poolMode = searchParams.get("mode") === "pool";
 
   const subQuery = useQuery({
     queryKey: ["subscription", id],
@@ -516,6 +518,7 @@ export function SubscriptionEditPage() {
               </CardContent>
             </Card>
 
+            {!poolMode && (
             <Card>
               <CardHeader>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%" }}>
@@ -553,6 +556,25 @@ export function SubscriptionEditPage() {
                 )}
               </CardContent>
             </Card>
+            )}
+            {poolMode && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>{t("subscriptionEdit.modelSlotsTitle")}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <Alert variant="default">
+                    <AlertDescription>
+                      此订阅处于<strong>能力池模式</strong>。模型链配置请前往{" "}
+                      <Link to={`/pool?sub=${id}`} className="underline">
+                        能力池管理
+                      </Link>
+                      。
+                    </AlertDescription>
+                  </Alert>
+                </CardContent>
+              </Card>
+            )}
 
             <SubscriptionBalanceCard
               subscription={sub}

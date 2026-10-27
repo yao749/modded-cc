@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router";
 import { AppShell } from "@/components/layout/AppShell";
 import { VirtualModelsPage } from "@/routes/VirtualModels";
 import { PoolPage } from "@/routes/Pool";
+import { PoolModelsPage } from "@/routes/PoolModels";
 import { LiveRoutingPage } from "@/routes/LiveRouting";
 import { UpdatesPage } from "@/routes/Updates";
 import { SubscriptionsPage } from "@/routes/Subscriptions";
@@ -55,9 +56,10 @@ function AppInner() {
         <Route index element={<Navigate to="/virtual-models" replace />} />
         <Route path="/live-routing" element={<LiveRoutingPage />} />
         <Route path="/virtual-models" element={<VirtualModelsPage />} />
-        {/* 能力池组 (门户): 总览矩阵 + 能力虚拟模型绑定 */}
+        {/* 能力池组 (门户): 池订阅管理 → 经典订阅同组件 /pool/subscriptions; 总览矩阵 + 能力虚拟模型 */}
+        <Route path="/pool/subscriptions" element={<SubscriptionsPage />} />
         <Route path="/pool" element={<PoolPage />} />
-        <Route path="/pool/models" element={<VirtualModelsPage />} />
+        <Route path="/pool/models" element={<PoolModelsPage />} />
         <Route path="/subscriptions" element={<SubscriptionsPage />} />
         <Route path="/subscriptions/new" element={<SubscriptionNewPage />} />
         <Route path="/subscriptions/:id" element={<SubscriptionEditPage />} />

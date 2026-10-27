@@ -78,6 +78,10 @@ interface NavItem {
   dotLabelKey?: string;
   /** 自定义激活判定; 缺省走 NavLink 的 pathname 匹配 (它不看 query) */
   active?: boolean;
+  /** 精确匹配 (NavLink 的 end): 只在路径完全相等时高亮。
+   *  给「互不为父子」的兄弟路由用 —— 默认的前缀匹配会让 /pool 在
+   *  /pool/subscriptions 上也亮着, 出现两个激活项。 */
+  end?: boolean;
 }
 
 /** 导航分组: 经典组无标题, 能力池组带组标题 (见 docs/routing-mode-portal-plan.md §3) */
@@ -141,9 +145,12 @@ export function Sidebar() {
       // 能力池组: 非本模式也可点 —— 点进去就是门户, 由 ModeBanner 引导一键切模式
       labelKey: "sidebar.group.pool",
       items: [
-        // 图标复用现有涂鸦: 池总览是矩阵 → stats; 池的虚拟模型 → vm
-        { to: "/pool", label: t("sidebar.nav.pool"), icon: "stats" },
-        { to: "/pool/models", label: t("sidebar.nav.poolModels"), icon: "vm" },
+        // 图标复用现有涂鸦: 池总览是矩阵 → stats; 池的虚拟模型 → vm; 池订阅 → subs。
+        // 三个池路由是兄弟不是父子, 必须 end 精确匹配 —— 否则 /pool 的前缀匹配
+        // 会让它在 /pool/subscriptions 和 /pool/models 上也亮着 (两个激活项)。
+        { to: "/pool/subscriptions", label: t("sidebar.nav.poolSubs"), icon: "subs", end: true },
+        { to: "/pool", label: t("sidebar.nav.pool"), icon: "stats", end: true },
+        { to: "/pool/models", label: t("sidebar.nav.poolModels"), icon: "vm", end: true },
       ],
     },
   ];
@@ -178,6 +185,7 @@ export function Sidebar() {
                 <NavLink
                   key={it.to}
                   to={it.to}
+                  end={it.end}
                   className={({ isActive }) => cn("nav-item", (it.active ?? isActive) && "active")}
                   aria-current={it.active === false ? false : undefined}
                 >

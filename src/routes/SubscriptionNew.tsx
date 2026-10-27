@@ -175,13 +175,22 @@ export function SubscriptionNewPage() {
   const [searchParams] = useSearchParams();
   const returnTo = searchParams.get("returnTo");
   const isOnboarding = searchParams.get("onboarding") === "1";
+  // 从能力池总览的「添加订阅」进来: 创建后回流到池总览并打开编辑器
+  const fromPool = searchParams.get("from") === "pool";
+  function afterCreateNavigate(id: string) {
+    if (fromPool) {
+      navigate(`/pool?edit=${id}`, { replace: true });
+      return;
+    }
+    navigate(returnTo ?? `/subscriptions/${id}`);
+  }
   const queryClient = useQueryClient();
   const providers = useProviders();
   const createMut = useCreateSubscription();
   const vms = useVirtualModels();
-  // 全局路由模式: pool 模式下新建订阅仍填四槽, 但真正生效的是订阅详情里的能力分类池
+  // 全局路由模式 + ?from=pool 覆盖: 从 Pool 页面跳转过来时强制 pool 模式
   const settingsQuery = useSettings();
-  const poolMode = (settingsQuery.data?.routing_mode ?? "slots") === "pool";
+  const poolMode = searchParams.get("from") === "pool" || (settingsQuery.data?.routing_mode ?? "slots") === "pool";
 
   const [importOpen, setImportOpen] = useState(false);
   const onboardingDoneByImportRef = useRef(false);
@@ -350,6 +359,7 @@ export function SubscriptionNewPage() {
         endpoint_id: endpoint.id,
         display_name: displayName,
         model_slots: placeholderSlots,
+        routing_group: fromPool ? "pool" : "classic",
       });
       await queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
 
@@ -404,7 +414,7 @@ export function SubscriptionNewPage() {
         navigate("/guide", { replace: true });
         return;
       }
-      navigate(returnTo ?? `/subscriptions/${createdId}`);
+      afterCreateNavigate(createdId);
     } catch (e) {
       setSubmitError(`${t("subscriptionNew.errCreate")}: ${errorText(e)}`);
     } finally {
@@ -429,6 +439,7 @@ export function SubscriptionNewPage() {
         model_slots: placeholderSlots,
         disguise: kiroPayload.disguise,
         profile_arn_override: kiroPayload.profileArn,
+        routing_group: fromPool ? "pool" : "classic",
       });
       await queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
       // Kiro 无 /models 端点, 直接拿 example_models 作初始值
@@ -464,7 +475,7 @@ export function SubscriptionNewPage() {
         navigate("/guide", { replace: true });
         return;
       }
-      navigate(returnTo ?? `/subscriptions/${createdId}`);
+      afterCreateNavigate(createdId);
     } catch (e) {
       setSubmitError(`${t("subscriptionNew.errCreate")}: ${errorText(e)}`);
     } finally {
@@ -498,6 +509,7 @@ export function SubscriptionNewPage() {
             endpoint.url_params_used.map((id) => [id, (urlParams[id] ?? "").trim()]),
           ),
         },
+        routing_group: fromPool ? "pool" : "classic",
       };
       const created = await createMut.mutateAsync(input);
       if (isSystemOne) {
@@ -611,7 +623,7 @@ export function SubscriptionNewPage() {
       navigate("/guide", { replace: true });
       return;
     }
-    navigate(returnTo ?? `/subscriptions/${createdId}`);
+    afterCreateNavigate(createdId);
   }
 
   function customAuthHeader(): { name: string; format: AuthHeaderFormat } {
@@ -702,6 +714,7 @@ export function SubscriptionNewPage() {
           ? { models_url: customProbe.modelsUrl }
           : {}),
       },
+      routing_group: fromPool ? "pool" : "classic",
     };
 
     setSubmitting(true);
@@ -719,7 +732,7 @@ export function SubscriptionNewPage() {
         navigate("/guide", { replace: true });
         return;
       }
-      navigate(returnTo ?? `/subscriptions/${created.id}`);
+      afterCreateNavigate(created.id);
     } catch (e) {
       setSubmitError(`${t("subscriptionNew.errCreate")}: ${errorText(e)}`);
     } finally {

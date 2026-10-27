@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, useLocation } from "react-router";
 import { Plus, Key } from "lucide-react";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderLogo } from "@/components/ProviderLogo";
@@ -32,17 +32,23 @@ function regionOf(sub: SubscriptionDto, providers: ProviderInfo[] | undefined): 
 
 export function SubscriptionsPage() {
   const { t, locale } = useT();
-  const subs = useSubscriptions();
+  const location = useLocation();
+  const poolMode = location.pathname.startsWith("/pool/subscriptions");
+  const subs = useSubscriptions(poolMode ? "pool" : "classic");
   const providers = useProviders();
+
+  const title = poolMode ? t("subscriptions.pool.title") : t("subscriptions.title");
+  const subtitle = poolMode ? t("subscriptions.pool.subtitle") : t("subscriptions.subtitle");
+  const baseNew = poolMode ? "/subscriptions/new?from=pool" : "/subscriptions/new";
 
   return (
     <>
       <div className="page-actions">
         <div className="page-header" style={{ margin: 0 }}>
-          <h1>{t("subscriptions.title")}</h1>
-          <div className="subtitle">{t("subscriptions.subtitle")}</div>
+          <h1>{title}</h1>
+          <div className="subtitle">{subtitle}</div>
         </div>
-        <Link className="btn primary" to="/subscriptions/new">
+        <Link className="btn primary" to={baseNew}>
           <Plus size={12} /> {t("subscriptions.add")}
         </Link>
       </div>
@@ -54,7 +60,7 @@ export function SubscriptionsPage() {
           icon={Key}
           message={t("subscriptions.empty.message")}
           action={
-            <Link className="btn primary sm" to="/subscriptions/new">
+            <Link className="btn primary sm" to={baseNew}>
               <Plus size={12} /> {t("subscriptions.empty.action")}
             </Link>
           }
@@ -134,7 +140,7 @@ export function SubscriptionsPage() {
                       {fmtTimeShort(sub.updated_at)}
                     </td>
                     <td>
-                      <Link className="btn sm" to={`/subscriptions/${sub.id}`}>
+                      <Link className="btn sm" to={`/subscriptions/${sub.id}${poolMode ? "?mode=pool" : ""}`}>
                         {t("subscriptions.view")}
                       </Link>
                     </td>
