@@ -113,6 +113,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         26,
         include_str!("../../migrations/026_add_model_pool_inputs.sql"),
     ),
+    (
+        27,
+        include_str!("../../migrations/027_add_routing_group.sql"),
+    ),
 ];
 
 pub async fn init_pool(db_path: &Path) -> AppResult<SqlitePool> {
@@ -404,7 +408,8 @@ mod tests {
         run_migrations(&pool).await.expect("migrate fresh");
 
         let versions = applied_versions(&pool).await;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]);
+        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
+        assert_eq!(versions, expected);
         assert!(!has_column(&pool, "subscriptions", "supports_thinking_blocks").await);
         assert!(!has_column(&pool, "subscriptions", "thinking_block_field_name").await);
         assert!(has_column(&pool, "requests", "upstream_response_body").await);
@@ -502,7 +507,8 @@ mod tests {
         run_migrations(&pool).await.expect("migrate legacy");
 
         let versions = applied_versions(&pool).await;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]); // baseline v=1, 然后跑增量
+        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
+        assert_eq!(versions, expected); // baseline v=1, 然后跑增量
         assert!(!has_column(&pool, "subscriptions", "supports_thinking_blocks").await);
         assert!(!has_column(&pool, "subscriptions", "thinking_block_field_name").await);
         assert!(has_column(&pool, "requests", "upstream_response_body").await);
@@ -518,7 +524,8 @@ mod tests {
         run_migrations(&pool).await.expect("third run");
 
         let versions = applied_versions(&pool).await;
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]); // 没有重复写
+        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
+        assert_eq!(versions, expected); // 没有重复写
     }
 
     /// 在 v4 schema 状态下插一条订阅 (含已 v7 移除的 supports_thinking_blocks 列)。
@@ -582,10 +589,8 @@ mod tests {
 
         assert!(has_table(&pool, "subscriptions").await);
         assert!(!has_table(&pool, "subscriptions_new").await);
-        assert_eq!(
-            applied_versions(&pool).await,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
-        );
+        let expected: Vec<i64> = (1..=MIGRATIONS.len() as i64).collect();
+        assert_eq!(applied_versions(&pool).await, expected);
 
         let count: (i64,) =
             sqlx::query_as("SELECT count(*) FROM subscriptions WHERE provider_id='deepseek'")

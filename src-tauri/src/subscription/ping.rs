@@ -435,6 +435,23 @@ pub fn pick_test_model(row: &SubscriptionRow) -> Option<(String, Option<Subscrip
         .map(|m| (m, None))
 }
 
+/// [`pick_test_model`] 的 async 包装: 先用四槽 + example_models 挑 model, 都空时退到
+/// 模型池 (default capability = "llm") 取第一个 enabled 模型名. 用在探测连通性和
+/// recheck_worker 定期巡检两处 — 池组订阅四槽本来就全空, 原来的 sync 版本总是 None.
+pub async fn pick_test_model_with_pool_fallback(
+    state: &AppState,
+    row: &SubscriptionRow,
+) -> Option<(String, Option<SubscriptionSlot>)> {
+    if let Some(m) = pick_test_model(row) {
+        return Some(m);
+    }
+    // 四槽和 example_models 都空了, 试试能力池
+    match crate::subscription::store::list_pool_models(&state.db, row.id, "llm").await {
+        Ok(models) if !models.is_empty() => Some((models[0].0.clone(), None)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

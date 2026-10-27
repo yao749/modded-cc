@@ -817,12 +817,16 @@ const MODEL_IDS_POOL: &[&str] = &[
     "model-embedding",
 ];
 
-/// 按 routing_mode 选择对外暴露的模型清单: "pool" → 能力分类池, 其余 (含脏值) → 四槽。
+/// 按 routing_mode 选择对外暴露的模型清单。
+/// 模型池是独立体系 (2026-10-23 修订): **任何模式都广告池名**;
+/// 四槽名在 pool 模式下隐藏 (门禁同款判定), slots 模式 (默认+脏值) 下两者都列出。
 /// 与 pipeline.rs::routing_mode_gate 同一套判定, 保证「菜单」和「厨房」一致。
-fn advertised_model_ids(routing_mode: &str) -> &'static [&'static str] {
+fn advertised_model_ids(routing_mode: &str) -> Vec<&'static str> {
     match routing_mode {
-        "pool" => MODEL_IDS_POOL,
-        _ => MODEL_IDS,
+        // pool 模式: 只用池名 (四槽被门禁拦, 菜单不摆)
+        "pool" => MODEL_IDS_POOL.to_vec(),
+        // slots 模式 (默认 + 脏值): 四槽 + 池全列出 —— 池独立于模式, 永远可用
+        _ => MODEL_IDS.iter().chain(MODEL_IDS_POOL).copied().collect(),
     }
 }
 
@@ -909,12 +913,18 @@ mod models_tests {
         }
     }
 
-    /// slots 清单里不得混入池名 (反之亦然) —— 菜单与门禁同源。
+    /// 菜单与门禁同源: slots 模式 (默认+脏值) 四槽 + 池全列出 (池独立于模式);
+    /// pool 模式只列池名 (四槽被门禁拦, 菜单不摆)。
     #[test]
-    fn advertised_list_switches_with_routing_mode() {
-        assert_eq!(advertised_model_ids("slots"), MODEL_IDS);
+    fn advertised_list_matches_the_gate() {
+        // slots / 脏值: 全量
+        let slots = advertised_model_ids("slots");
+        assert_eq!(slots.len(), MODEL_IDS.len() + MODEL_IDS_POOL.len());
+        for id in MODEL_IDS.iter().chain(MODEL_IDS_POOL) {
+            assert!(slots.contains(id), "slots 清单应包含 {id}");
+        }
+        assert_eq!(advertised_model_ids("garbage"), slots);
+        // pool: 只有池名
         assert_eq!(advertised_model_ids("pool"), MODEL_IDS_POOL);
-        // 脏值回落 slots, 与 pipeline::routing_mode_gate 一致
-        assert_eq!(advertised_model_ids("garbage"), MODEL_IDS);
     }
 }

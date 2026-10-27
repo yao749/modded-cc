@@ -39,7 +39,7 @@ pub async fn load_runtime(
                 model_discovery, balance_discovery,
                 provider_display_name, provider_icon, is_user_defined,
                 auth_type, oauth_metadata, slot_efforts, token_quotas, endpoint_protocol,
-                url_params, systemone_wire
+                url_params, systemone_wire, routing_group
          FROM subscriptions",
     )
     .fetch_all(pool)
@@ -202,6 +202,11 @@ fn row_to_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<SubscriptionRow> {
             let v: i64 = row.try_get("is_user_defined")?;
             v != 0
         },
+        // routing_group (migration 027): 宽容降级——NULL / 坏值 → classic
+        routing_group: row
+            .try_get::<Option<String>, _>("routing_group")?
+            .filter(|g| g == "pool" || g == "classic")
+            .unwrap_or_else(|| "classic".to_string()),
     })
 }
 
@@ -239,13 +244,13 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
             model_discovery, balance_discovery,
             provider_display_name, provider_icon, is_user_defined,
             auth_type, oauth_metadata, slot_efforts, token_quotas, endpoint_protocol,
-            url_params, systemone_wire)
+            url_params, systemone_wire, routing_group)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, ?,
                  ?, ?, ?, ?, ?,
                  ?, ?, ?,
                  ?, ?, ?, ?, ?,
-                 ?, ?)",
+                 ?, ?, ?)",
     )
     .bind(sub.id.to_string())
     .bind(&sub.provider_id)
@@ -282,6 +287,7 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
     .bind(sub.endpoint_protocol.as_str())
     .bind(url_params_json)
     .bind(sub.systemone_wire.as_str())
+    .bind(&sub.routing_group)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -753,41 +759,13 @@ pub async fn load_all_model_pools(pool: &SqlitePool) -> AppResult<Vec<ModelPoolE
     Ok(out)
 }
 
-/// 路由时用: 给定订阅 + 能力分类, 取 enabled=1 且优先级最高 (priority 最小) 的首选条目.
-/// 返回 (model_name, supported_inputs). supported_inputs 为 None 时路由兜底当作 ["text"].
-pub async fn pick_pool_model(
-    pool: &SqlitePool,
-    sub_id: Uuid,
-    capability: &str,
-) -> AppResult<Option<(String, Option<Vec<String>>)>> {
-    let rows = sqlx::query(
-        "SELECT model_name, supported_inputs FROM subscription_model_pool
-         WHERE subscription_id = ? AND capability = ? AND enabled = 1
-         ORDER BY priority ASC LIMIT 1",
-    )
-    .bind(sub_id.to_string())
-    .bind(capability)
-    .fetch_all(pool)
-    .await?;
-    if let Some(row) = rows.into_iter().next() {
-        let name: String = row.try_get("model_name")?;
-        let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
-        let inputs: Option<Vec<String>> = inputs_raw.and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
-        Ok(Some((name, inputs)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// 同上, 但一次返回该订阅某能力分类池内全部启用的模型 (按 priority).
-/// 用于失败回退: 首选 4xx/5xx 时第二优先级顶上.
 pub async fn list_pool_models(
     pool: &SqlitePool,
     sub_id: Uuid,
     capability: &str,
-) -> AppResult<Vec<String>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT model_name, priority FROM subscription_model_pool
+) -> AppResult<Vec<(String, Option<Vec<String>>)>> {
+    let rows = sqlx::query(
+        "SELECT model_name, supported_inputs FROM subscription_model_pool
          WHERE subscription_id = ? AND capability = ? AND enabled = 1
          ORDER BY priority ASC",
     )
@@ -795,7 +773,16 @@ pub async fn list_pool_models(
     .bind(capability)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|(name, _)| name).collect())
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.try_get("model_name")?;
+        let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
+        let inputs: Option<Vec<String>> =
+            inputs_raw.and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
+        out.push((name, inputs));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

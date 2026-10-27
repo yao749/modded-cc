@@ -191,17 +191,20 @@ pub(crate) fn jev_only_via_systemone(vm_name: VirtualModelName) -> Option<Respon
 }
 
 /// 路由模式门禁: 读取 settings.routing_mode, 检查当前虚拟名范式是否匹配.
-/// Jev (Both) 两套都放行; paradigm 不匹配 → 400 + 清晰指引.
-/// 默认 routing_mode="slots", 脏值 (非 "slots"/"pool") 也按 slots 处理.
+/// - 能力池范式 (model-llm 等): **永远放行** —— 模型池是独立体系, 有自己的订阅/页面,
+///   不随 routing_mode 关闭 (2026-10-23 修订, 原为两套互斥).
+/// - Jev (Both): 两套都放行.
+/// - 四槽范式: pool 模式下拦截 (400 + 清晰指引); slots 模式 (默认 + 脏值) 放行.
 pub(crate) fn routing_mode_gate(
     vm_name: VirtualModelName,
     routing_mode: &str,
 ) -> Option<Response> {
-    use crate::virtual_model::{RoutingParadigm, VirtualModelName};
+    use crate::virtual_model::RoutingParadigm;
 
     let paradigm = vm_name.paradigm();
-    if matches!(paradigm, RoutingParadigm::Both) {
-        return None; // Jev 两套都放行
+    // 池范式与 Jev 不受模式影响: 池是独立体系, 任何模式下都能用
+    if matches!(paradigm, RoutingParadigm::Pool | RoutingParadigm::Both) {
+        return None;
     }
     let effective_mode = match routing_mode {
         "pool" => "pool",
@@ -209,30 +212,6 @@ pub(crate) fn routing_mode_gate(
     };
 
     match (effective_mode, paradigm) {
-        ("slots", RoutingParadigm::Pool) => {
-            // slots 模式下用户发了 model-llm / model-vision 等池名
-            let hint = if vm_name.is_capability_based() {
-                match vm_name {
-                    VirtualModelName::Vision => "model-vision",
-                    VirtualModelName::Llm => "model-llm",
-                    VirtualModelName::Multimodal => "model-multimodal",
-                    VirtualModelName::Speech => "model-speech",
-                    VirtualModelName::Embedding => "model-embedding",
-                    _ => unreachable!(),
-                }
-            } else {
-                vm_name.as_str()
-            };
-            Some(crate::proxy::handler::error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!(
-                    "当前为四槽模式 (settings.routing_mode=slots), 「{hint}」属于能力分类池范式. \
-请改用 model-opus / model-sonnet / model-haiku / model-fable / model-fallback, \
-或在设置里切换路由模式为 pool."
-                ),
-            ))
-        }
         ("pool", RoutingParadigm::Slots) => {
             // pool 模式下用户发了 model-opus / model-sonnet 等旧名
             let hint = vm_name.as_str();
@@ -386,13 +365,13 @@ pub async fn dispatch(
     let body_has_image = body_inputs.contains(&"image");
     let body_has_audio = body_inputs.contains(&"audio");
 
-    for sub_id in order.candidate_ids {
+    'sub_loop: for sub_id in order.candidate_ids {
         let attempt_id = Uuid::new_v4();
         let rt = {
             let subs_map = state.subscriptions.read().await;
             subs_map.get(&sub_id).cloned()
         };
-        let Some(rt) = rt else { continue };
+        let Some(rt) = rt else { continue 'sub_loop };
 
         // 运行时守卫: systemone 订阅不进对话路径 (写入 / 导入已拦, 这里兜历史数据)。
         {
@@ -400,15 +379,16 @@ pub async fn dispatch(
             if !vm_name.accepts(g.row.endpoint_protocol) {
                 warn!(%sub_id, display_name = %g.row.display_name, "systemone subscription skipped on chat path");
                 skipped_wrong_protocol.push(g.row.display_name.clone());
-                continue;
+                continue 'sub_loop;
             }
         }
 
         // 从订阅 row snapshot 读取所有连接信息(snapshot 模型: 不再回查 state.providers)
+        let mut pool_chain: Option<Vec<(String, Option<Vec<String>>)>> = None;
         let (
             provider_id,
             endpoint_id,
-            real_model,
+            mut real_model,
             display_name,
             url,
             auth_header_name,
@@ -436,17 +416,29 @@ pub async fn dispatch(
                     .clone()
                     .unwrap_or_else(|| model.to_string())
             } else if is_capability_based {
-                // 能力分类池: 异步查 DB 取首选模型 (priority 最小 + enabled).
                 let capability = vm_name.capability().map(|c| c.as_str()).unwrap_or("llm");
-                match crate::subscription::store::pick_pool_model(
-                    &state.db,
-                    guard.row.id,
-                    capability,
-                )
-                .await
-                {
-                    Ok(Some((m, supported_inputs))) => {
-                        // 模态校验: 请求体带 image 但模型不支持, 跳过这个候选
+                let raw_chain: Vec<(String, Option<Vec<String>>)> =
+                    match crate::subscription::store::list_pool_models(
+                        &state.db,
+                        guard.row.id,
+                        capability,
+                    )
+                    .await
+                    {
+                        Ok(c) if !c.is_empty() => c,
+                        Ok(_) => {
+                            skipped_no_pool_model.push(guard.row.display_name.clone());
+                            continue 'sub_loop;
+                        }
+                        Err(e) => {
+                            warn!(%sub_id, error = %e, "failed to query model pool chain");
+                            skipped_no_pool_model.push(guard.row.display_name.clone());
+                            continue 'sub_loop;
+                        }
+                    };
+                let valid_chain: Vec<(String, Option<Vec<String>>)> = raw_chain
+                    .into_iter()
+                    .filter(|(m, supported_inputs)| {
                         let supports_image = supported_inputs
                             .as_deref()
                             .map(|v| v.iter().any(|s| s == "image"))
@@ -458,36 +450,19 @@ pub async fn dispatch(
                         if (body_has_image && !supports_image)
                             || (body_has_audio && !supports_audio)
                         {
-                            warn!(
-                                %sub_id,
-                                display_name = %guard.row.display_name,
-                                model = %m,
-                                body_has_image,
-                                body_has_audio,
-                                model_inputs = ?supported_inputs,
-                                "model pool entry input mismatch, skipping"
-                            );
-                            skipped_input_mismatch.push(guard.row.display_name.clone());
-                            continue;
+                            warn!(model=%m, "model pool entry input mismatch, dropping from chain");
+                            false
+                        } else {
+                            true
                         }
-                        m
-                    }
-                    Ok(None) => {
-                        warn!(
-                            %sub_id,
-                            display_name = %guard.row.display_name,
-                            capability,
-                            "subscription has no enabled model for capability pool, skipping"
-                        );
-                        skipped_no_pool_model.push(guard.row.display_name.clone());
-                        continue; // 这个候选跳过, 走下一个订阅
-                    }
-                    Err(e) => {
-                        warn!(%sub_id, error = %e, "failed to query model pool");
-                        skipped_no_pool_model.push(guard.row.display_name.clone());
-                        continue;
-                    }
+                    })
+                    .collect();
+                if valid_chain.is_empty() {
+                    skipped_input_mismatch.push(guard.row.display_name.clone());
+                    continue 'sub_loop;
                 }
+                pool_chain = Some(valid_chain);
+                String::new()
             } else {
                 let slot = vm_name.slot();
                 guard.row.model_slots.get(slot).to_string()
@@ -531,7 +506,7 @@ pub async fn dispatch(
                 "translation-type subscription skipped under fallback (no fallback slot configured)"
             );
             skipped_no_fallback_slot.push(display_name.clone());
-            continue;
+            continue 'sub_loop;
         }
 
         // sticky: 候选真正被交付请求时才钉 (含 retry 切下家; 不弹回); 放在所有「跳过不试」的
@@ -545,6 +520,29 @@ pub async fn dispatch(
                 t.pin(vm_name, key, sub_id, Instant::now());
             }
         }
+
+        // === dispatch 循环: chain 模式迭代整条链, 四槽模式只跑一次 ===
+        let chain_mode = pool_chain.is_some();
+        let mut chain_iter = pool_chain.take().unwrap_or_default().into_iter();
+        // 四槽模式: 每个订阅只交付一次 attempt。各分支里 retryable 的 `continue` 会回到
+        // 循环顶部, 第二次进入必须放手去下一个订阅 (与重构前 for 循环的语义一致) —
+        // 否则同一订阅同一模型会被无限重试: 没有重试上限, 请求永不返回, 还会把上游
+        // 和请求日志打爆。chain 模式不受影响 (走上面的 chain_iter 耗尽分支)。
+        let mut slot_attempted = false;
+
+        loop {
+            if !chain_mode && slot_attempted {
+                break 'sub_loop;
+            }
+            slot_attempted = true;
+            // chain 模式: 从链里取下一个模型覆盖 real_model
+            if let Some((model_name, _)) = chain_iter.next() {
+                real_model = model_name;
+            } else if chain_mode {
+                // chain 模式但链已耗尽 → 放弃此订阅
+                break 'sub_loop;
+            }
+            // 四槽模式 + chain_iter None → real_model 保持快照层算好的值
 
         // ChatGPT OAuth 分支: 走独立的 dispatch + 翻译层 (proxy::oauth_dispatch).
         if matches!(auth_type, AuthType::ChatgptOauth) {
@@ -574,8 +572,8 @@ pub async fn dispatch(
                 &state.http_client,
                 state.chatgpt_oauth.clone(),
                 sub_id,
-                oauth_refresh_token,
-                oauth_account_id,
+                oauth_refresh_token.clone(),
+                oauth_account_id.clone(),
                 url.clone(),
                 &oauth_body,
                 is_streaming,
@@ -666,7 +664,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     }
-                    return Ok(oauth_dispatch::build_error_response(&err));
+                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
                 }
             }
         }
@@ -777,7 +775,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     }
-                    return Ok(oauth_dispatch::build_error_response(&err));
+                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
                 }
             }
         }
@@ -898,7 +896,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     }
-                    return Ok(oauth_dispatch::build_error_response(&err));
+                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
                 }
             }
         }
@@ -1030,7 +1028,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     }
-                    return Ok(oauth_dispatch::build_error_response(&err));
+                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
                 }
             }
         }
@@ -1161,7 +1159,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     }
-                    return Ok(oauth_dispatch::build_error_response(&err));
+                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
                 }
             }
         }
@@ -1291,7 +1289,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     }
-                    return Ok(oauth_dispatch::build_error_response(&err));
+                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
                 }
             }
         }
@@ -1558,7 +1556,7 @@ pub async fn dispatch(
                         retry_count += 1;
                         continue;
                     } else {
-                        return Ok(build_error_status(status));
+                        if chain_mode { break 'sub_loop; } else { return Ok(build_error_status(status)); }
                     }
                 }
 
@@ -1823,6 +1821,7 @@ pub async fn dispatch(
                 continue;
             }
         }
+        } // dispatch_loop 闭合
     }
 
     // 所有候选都失败
@@ -2015,18 +2014,14 @@ mod tests {
     }
 
     #[test]
-    fn slots_mode_rejects_pool_names() {
-        let mode = "slots";
-        let blocked = [
-            VirtualModelName::Vision,
-            VirtualModelName::Llm,
-            VirtualModelName::Multimodal,
-            VirtualModelName::Speech,
-            VirtualModelName::Embedding,
-        ];
-        for name in blocked {
-            let resp = routing_mode_gate(name, mode).expect(&format!("{name:?} 应被 slots 模式拦截"));
-            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    fn pool_names_always_pass_gate() {
+        // 模型池是独立体系: slots / pool / 脏值模式下池名都放行 (2026-10-23 修订)
+        for mode in ["slots", "pool", "not_a_valid_value"] {
+            assert!(routing_mode_gate(VirtualModelName::Vision, mode).is_none());
+            assert!(routing_mode_gate(VirtualModelName::Llm, mode).is_none());
+            assert!(routing_mode_gate(VirtualModelName::Multimodal, mode).is_none());
+            assert!(routing_mode_gate(VirtualModelName::Speech, mode).is_none());
+            assert!(routing_mode_gate(VirtualModelName::Embedding, mode).is_none());
         }
     }
 
@@ -2068,12 +2063,10 @@ mod tests {
 
     #[test]
     fn garbage_routing_mode_falls_back_to_slots() {
-        // 脏值按 slots 处理: slots 名放行, pool 名拦截
+        // 脏值按 slots 处理: 四槽名放行; 池名独立放行 (不受模式影响)
         let mode = "not_a_valid_value";
         assert!(routing_mode_gate(VirtualModelName::Opus, mode).is_none());
-        let resp = routing_mode_gate(VirtualModelName::Llm, mode)
-            .expect("脏值模式下 pool 名应被拦截");
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(routing_mode_gate(VirtualModelName::Llm, mode).is_none());
     }
 
     // ---- dispatch 错误 → 状态机事件 (Retry-After 透传) ----

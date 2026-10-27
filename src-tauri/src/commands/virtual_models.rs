@@ -22,8 +22,9 @@ pub struct UpdateVirtualModelInput {
 
 #[tauri::command]
 pub async fn list_virtual_models(state: State<'_, AppState>) -> AppResult<Vec<VirtualModelDto>> {
-    // GUI 只列出当前路由模式放行的虚拟名: 范式不匹配的整条隐藏, Jev (Both) 两套都列。
-    // 内存表与 DB 仍然全量加载 (store::load_all 不动), 这里只是读侧过滤, 切模式即恢复。
+    // GUI 列出的虚拟名: 能力池范式**永远列出** (模型池是独立体系, 2026-10-23 修订);
+    // 四槽范式在 pool 模式下隐藏; Jev (Both) 两套都列。
+    // 内存表与 DB 仍然全量加载 (store::load_all 不动), 这里只是读侧过滤。
     let routing_mode = {
         let guard = state.settings.read().await;
         guard.routing_mode.clone()
@@ -34,7 +35,7 @@ pub async fn list_virtual_models(state: State<'_, AppState>) -> AppResult<Vec<Vi
     let mut out = Vec::with_capacity(VirtualModelName::all().len());
     for name in VirtualModelName::all() {
         let allowed = match name.paradigm() {
-            RoutingParadigm::Pool => is_pool,
+            RoutingParadigm::Pool => true, // 池独立于模式, 任何模式都可管理
             RoutingParadigm::Slots => !is_pool,
             RoutingParadigm::Both => true,
         };

@@ -85,6 +85,8 @@ pub struct CreateChatGptOAuthSubscriptionInput {
     pub endpoint_id: String,
     pub display_name: String,
     pub model_slots: ModelSlots,
+    #[serde(default)]
+    pub routing_group: Option<String>,
 }
 
 /// 用 device_code 取出后端缓存的完整 token, 落盘成一条新的 chatgpt_oauth 订阅,
@@ -132,6 +134,11 @@ pub async fn create_chatgpt_oauth_subscription(
     let mut required_headers: BTreeMap<String, String> = provider.required_headers.clone();
     required_headers.remove(CHATGPT_ACCOUNT_ID_HEADER);
 
+    let routing_group = input
+        .routing_group
+        .filter(|g| g == "pool" || g == "classic")
+        .unwrap_or_else(|| "classic".to_string());
+
     let row = SubscriptionRow {
         id,
         provider_id: input.provider_id.clone(),
@@ -163,6 +170,7 @@ pub async fn create_chatgpt_oauth_subscription(
         provider_display_name: provider.display_name.zh.clone(),
         provider_icon: provider.icon.clone().unwrap_or_default(),
         is_user_defined: false,
+        routing_group: routing_group.clone(),
     };
 
     store::insert(&state.db, &row).await?;
@@ -358,6 +366,8 @@ pub struct CreateKiroSubscriptionInput {
     pub disguise: Option<KiroDisguise>,
     #[serde(default)]
     pub profile_arn_override: Option<String>,
+    #[serde(default)]
+    pub routing_group: Option<String>,
 }
 #[tauri::command]
 pub async fn create_kiro_subscription(
@@ -406,6 +416,11 @@ pub async fn create_kiro_subscription(
     let now = Utc::now();
     let required_headers: BTreeMap<String, String> = provider.required_headers.clone();
 
+    let routing_group = input
+        .routing_group
+        .filter(|g| g == "pool" || g == "classic")
+        .unwrap_or_else(|| "classic".to_string());
+
     let row = SubscriptionRow {
         id,
         provider_id: input.provider_id.clone(),
@@ -437,6 +452,7 @@ pub async fn create_kiro_subscription(
         provider_display_name: provider.display_name.zh.clone(),
         provider_icon: provider.icon.clone().unwrap_or_default(),
         is_user_defined: false,
+        routing_group: routing_group.clone(),
     };
 
     store::insert(&state.db, &row).await?;

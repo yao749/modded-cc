@@ -188,6 +188,9 @@ pub struct CreateSubscriptionInput {
     pub api_key: String,
     pub model_slots: ModelSlots,
     pub source: CreateSource,
+    /// 路由分组: "classic" 或 "pool". None → 默认 "classic"。migration 027 引入, 供池入口创建时设 pool.
+    #[serde(default)]
+    pub routing_group: Option<String>,
     // 刻意不含 slot_efforts: 新建订阅一律全 auto (DB 列 DEFAULT '{}'), 用户创建后进编辑页再设。
     // 新建向导是两步非事务流程, 不往里再加表单字段。
 }
@@ -326,12 +329,21 @@ async fn collect_references(state: &AppState) -> std::collections::HashMap<Uuid,
 }
 
 #[tauri::command]
-pub async fn list_subscriptions(state: State<'_, AppState>) -> AppResult<Vec<SubscriptionDto>> {
+pub async fn list_subscriptions(
+    state: State<'_, AppState>,
+    group: Option<String>,
+) -> AppResult<Vec<SubscriptionDto>> {
     let refs = collect_references(&state).await;
     let subs = state.subscriptions.read().await;
     let mut out = Vec::with_capacity(subs.len());
     for (id, rt) in subs.iter() {
         let guard = rt.read().await;
+        // 路由分组过滤: 只返回指定组的订阅; 不传 group 返回全部 (兼容老客户端)
+        if let Some(ref g) = group {
+            if guard.row.routing_group != *g {
+                continue;
+            }
+        }
         let referenced = refs.get(id).cloned().unwrap_or_default();
         out.push(SubscriptionDto::from_runtime(&guard, referenced, &state.providers));
     }
@@ -361,6 +373,10 @@ pub async fn create_subscription(
 ) -> AppResult<SubscriptionDto> {
     let id = Uuid::new_v4();
     let now = Utc::now();
+    let routing_group = input
+        .routing_group
+        .filter(|g| g == "pool" || g == "classic")
+        .unwrap_or_else(|| "classic".to_string());
 
     // 根据 source 拼出 row 的 snapshot 字段
     let row = match input.source {
@@ -409,6 +425,7 @@ pub async fn create_subscription(
                 provider_display_name: provider.display_name.zh.clone(),
                 provider_icon: provider.icon.clone().unwrap_or_default(),
                 is_user_defined: false,
+                routing_group: routing_group.clone(),
             }
         }
         CreateSource::Custom {
@@ -471,6 +488,7 @@ pub async fn create_subscription(
                 provider_display_name,
                 provider_icon: profile.icon.to_string(),
                 is_user_defined: true,
+                routing_group,
             }
         }
     };
@@ -752,7 +770,7 @@ pub async fn test_connection(
         g.row.clone()
     };
 
-    let (model, slot) = match ping::pick_test_model(&row) {
+    let (model, slot) = match ping::pick_test_model_with_pool_fallback(&state, &row).await {
         Some(m) => m,
         None => {
             let note = ping::ProbeNote::NoTestModel;
@@ -1582,5 +1600,125 @@ pub async fn save_model_pool(
         })
         .collect();
     crate::subscription::store::save_model_pool(&state.db, id, &entries).await?;
+    // 池条目即接入: 按启用条目同步能力虚拟模型的绑定 (只动当前订阅)
+    sync_capability_bindings_from_pool(&state, id, &entries).await?;
     Ok(())
+}
+
+/// 计算某个能力分类下, 当前订阅的绑定是否要变化。
+/// 返回 None = 无需变化; Some(ids) = 目标绑定列表 (含其他订阅, 保序)。
+///
+/// 池条目是池接入的唯一来源: 有 ≥1 条启用条目 → 绑定; 全部禁用/删除 → 解绑。
+/// 手动在虚拟模型页加的绑定会被下一次池保存覆盖 (± 语义只动当前订阅)。
+fn pool_binding_target(
+    current: &[Uuid],
+    sub_id: Uuid,
+    has_enabled_entry: bool,
+) -> Option<Vec<Uuid>> {
+    let present = current.contains(&sub_id);
+    if present == has_enabled_entry {
+        return None;
+    }
+    let mut ids = current.to_vec();
+    if has_enabled_entry {
+        ids.push(sub_id);
+    } else {
+        ids.retain(|x| *x != sub_id);
+    }
+    Some(ids)
+}
+
+/// 保存池条目后, 把 5 个能力虚拟模型的订阅绑定同步成「有条目的订阅」集合。
+/// 读锁取快照 → 无锁落库 → 写锁更新内存, 与 `update_virtual_model` 同序, 避免持锁 await。
+async fn sync_capability_bindings_from_pool(
+    state: &State<'_, AppState>,
+    sub_id: Uuid,
+    entries: &[crate::subscription::store::ModelPoolEntry],
+) -> AppResult<()> {
+    use crate::virtual_model::{RoutingParadigm, VirtualModelName};
+
+    // 1. 读快照, 算出每个能力名的目标绑定
+    let changes: Vec<(VirtualModelName, Vec<Uuid>)> = {
+        let guard = state.virtual_models.read().await;
+        let mut out = Vec::new();
+        for name in VirtualModelName::all() {
+            if name.paradigm() != RoutingParadigm::Pool {
+                continue;
+            }
+            let Some(capability) = name.capability() else {
+                continue;
+            };
+            let has_enabled = entries
+                .iter()
+                .any(|e| e.capability == capability.as_str() && e.enabled);
+            let Some(cfg) = guard.get(&name) else {
+                continue;
+            };
+            if let Some(ids) = pool_binding_target(&cfg.subscription_ids, sub_id, has_enabled) {
+                out.push((name, ids));
+            }
+        }
+        out
+    };
+
+    if changes.is_empty() {
+        return Ok(());
+    }
+
+    // 2. 落库 (不持锁)
+    for (name, ids) in &changes {
+        crate::virtual_model::store::save_bindings(&state.db, *name, ids).await?;
+    }
+
+    // 3. 更新内存表
+    let mut guard = state.virtual_models.write().await;
+    for (name, ids) in changes {
+        if let Some(cfg) = guard.get_mut(&name) {
+            cfg.subscription_ids = ids;
+            cfg.last_used_index = 0;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pool_binding_sync_tests {
+    use super::pool_binding_target;
+    use uuid::Uuid;
+
+    #[test]
+    fn no_change_when_state_matches_entries() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // 已绑定 + 有启用条目 → 不动
+        assert!(pool_binding_target(&[a, b], a, true).is_none());
+        // 未绑定 + 无启用条目 → 不动
+        assert!(pool_binding_target(&[a, b], Uuid::new_v4(), false).is_none());
+    }
+
+    #[test]
+    fn adds_sub_when_first_enabled_entry_appears() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let ids = pool_binding_target(&[a], b, true).expect("应追加绑定");
+        assert_eq!(ids, vec![a, b], "追加在末尾, 其他订阅保序");
+    }
+
+    #[test]
+    fn removes_sub_when_all_entries_gone_or_disabled() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let ids = pool_binding_target(&[a, b], a, false).expect("应解除绑定");
+        assert_eq!(ids, vec![b], "只摘当前订阅, 其余原样");
+    }
+
+    #[test]
+    fn only_touches_the_saved_subscription() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        // a 解绑不影响 b/c 的相对顺序
+        let ids = pool_binding_target(&[c, a, b], a, false).unwrap();
+        assert_eq!(ids, vec![c, b]);
+    }
 }

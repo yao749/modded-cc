@@ -82,6 +82,9 @@ pub struct ExportSubscription {
     pub provider_icon: String,
     #[serde(default)]
     pub is_user_defined: bool,
+    /// 路由分组: classic / pool. 默认空串 → 导入时宽容当作 classic (migration 027).
+    #[serde(default)]
+    pub routing_group: String,
     /// Whether the source row had a non-empty api_key. Local models (Ollama etc.) legitimately
     /// have none, so an empty key alone must not be treated as "missing".
     #[serde(default)]
@@ -256,6 +259,7 @@ pub fn subscription_to_export(row: &SubscriptionRow) -> (ExportSubscription, Ext
         provider_display_name,
         provider_icon,
         is_user_defined,
+        routing_group,
     } = row;
 
     let mut plain_headers = BTreeMap::new();
@@ -295,6 +299,7 @@ pub fn subscription_to_export(row: &SubscriptionRow) -> (ExportSubscription, Ext
         provider_display_name: provider_display_name.clone(),
         provider_icon: provider_icon.clone(),
         is_user_defined: *is_user_defined,
+        routing_group: routing_group.clone(),
         has_api_key,
         redacted_headers: secret_headers.keys().cloned().collect(),
         secret_refs: None,
@@ -345,6 +350,7 @@ pub fn export_to_row(
         provider_display_name: sub.provider_display_name.clone(),
         provider_icon: sub.provider_icon.clone(),
         is_user_defined: sub.is_user_defined,
+        routing_group: if sub.routing_group == "pool" { "pool" } else { "classic" }.into(),
     }
 }
 

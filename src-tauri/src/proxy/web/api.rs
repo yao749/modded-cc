@@ -119,7 +119,7 @@ web_commands! {
     // providers
     list_providers() => commands::providers::list_providers(st).await,
     // subscriptions
-    list_subscriptions() => commands::subscriptions::list_subscriptions(st).await,
+    list_subscriptions(group: Option<String>) => commands::subscriptions::list_subscriptions(st, args.group).await,
     get_subscription(id: String) => commands::subscriptions::get_subscription(st, args.id).await,
     create_subscription(input: CreateSubscriptionInput) => commands::subscriptions::create_subscription(st, args.input).await,
     update_subscription(id: String, patch: SubscriptionPatch) => commands::subscriptions::update_subscription(st, args.id, args.patch).await,
