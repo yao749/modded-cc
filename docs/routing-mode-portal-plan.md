@@ -20,10 +20,13 @@
 | 设置页路由模式选择器 | `settings/GeneralTab.tsx`、`useSettingsForm.ts` | ✅ |
 | 池条目 API（读/存/测试） | `api/tauri.ts`: `load_model_pool` / `save_model_pool` / `test_pool_connection` | ✅ |
 | 池条目编辑器组件 | `components/ModelPoolPicker.tsx`（719 行，现嵌在 SubscriptionEdit） | ✅ 可复用 |
-| 侧边导航分组 | `components/layout/Sidebar.tsx` | ❌ 待做 |
-| 池页面组（/pool, /pool/models） | — | ❌ 待做 |
-| 契约过滤（/v1/models、GUI 列表、TUI 按模式） | `handler.rs:810`、`commands/virtual_models.rs`、`tui_contract.rs` | ❌ 待做 |
-| 备份覆盖 `subscription_model_pool` | `backup/export.rs` / `import.rs` | ❌ **正确性漏洞，P0** |
+| 侧边导航分组 | `components/layout/Sidebar.tsx` | ✅（`9e59312`） |
+| 池页面组（/pool, /pool/models） | `routes/Pool.tsx` / `routes/PoolModels.tsx` | ✅（`9e59312` + 本次修订） |
+| 契约过滤（/v1/models、GUI 列表、TUI 按模式） | `handler.rs:810`、`commands/virtual_models.rs`、`tui_contract.rs` | ✅ |
+| 备份覆盖 `subscription_model_pool` | `backup/export.rs` / `import.rs` | ✅（`d1c3695`） |
+| ModeBanner（只读，无切换按钮） | `components/layout/ModeBanner.tsx` | ✅（本次去掉切换按钮） |
+| 池内添加订阅 + 管理订阅区 | `routes/Pool.tsx`、`routes/SubscriptionNew.tsx` | ✅（本次） |
+| 池条目即接入（保存时自动同步绑定） | `commands/subscriptions.rs::save_model_pool` | ✅（本次） |
 | Attempt Plan 订阅内优先级降级 | `pipeline.rs` + `store.rs:752`(`list_pool_models` 死代码) | ❌ 独立功能，本方案不含 |
 
 ## 2. 信息架构
@@ -35,8 +38,8 @@
   /statistics  /receipts  /updates  /settings  /about
 
 能力池组（新增）
-  /pool          池总览：订阅 × 能力矩阵 + 优先级链 + 启停 + 测试
-  /pool/models   能力虚拟模型绑定管理（平行于 /virtual-models）
+  /pool          池总览：订阅 × 能力矩阵 + 优先级链 + 管理订阅区
+  /pool/models   能力虚拟模型（调度模式 + 已接入订阅，池专属）
 ```
 
 **订阅编辑页**：槽位配置区原样保留；池配置区块**移除**，池配置全部收敛到 `/pool`
@@ -48,6 +51,37 @@
   经典组无组标题，池组带组标题「能力池」。
 - 现有 active/dot/badge 逻辑不动，纯数据形状变化。
 - 池组在 slots 模式下**可点击**（不置灰）——点进去即门户：页面横幅引导一键切模式。
+
+### 3.1 修订（2026-10-23）：横幅不带切换按钮
+
+ModeBanner 只读，**不含一键切换按钮**（防误触把整站路由切走）。模式切换只走设置页
+（settings.routing_mode）。横幅文案三组：
+- 池组页面 + pool 模式（弱）：「当前：能力池模式」
+- 池组页面 + slots 模式（强）：「当前为四槽模式，这一页的能力池配置没有生效。」
+- 经典配置页 + pool 模式（强）：「当前为能力池模式，这一页的四槽配置没有生效。」
+
+### 3.2 修订（2026-10-23）：池内添加订阅 + 管理订阅
+
+- `/pool` 页头新增「添加订阅」→ `/subscriptions/new?from=pool`；创建成功后回流
+  `/pool?edit=<subId>` 并自动打开该订阅的池编辑器（SubscriptionNew 的 4 处成功跳转
+  统一走 `afterCreateNavigate`）。
+- `/pool` 矩阵下方新增「管理订阅」区：列出池内订阅（有任一池条目），支持
+  编辑跳转 / 测试连接 / 启停 / 删除（带确认弹窗）。与经典「订阅管理」页数据同源
+  （订阅是共享底座），操作实时同步。
+- 订阅是共享底座：同一个订阅既可以配四槽也可以配池，两套配置互不干扰。
+
+## 3.3 修订（2026-10-23）：池条目即接入（唯一来源）
+
+`save_model_pool` 保存后自动同步能力虚拟模型绑定：某订阅在某能力下有 ≥1 条**启用**条目
+→ 自动加入该能力虚拟模型的 `subscription_ids`；全部禁用/删除 → 自动移除。只动当前订阅
+（±），其他订阅的绑定原样。手动在虚拟模型页加的绑定会被下一次池保存覆盖。
+
+因此：
+- 池接入的唯一来源是池条目（池总览矩阵），**不需要**单独去虚拟模型页绑定；
+- `/pool/models` 是池专属页（5 个能力虚拟模型的调度模式 + 已接入订阅只读列表），
+  不再复用经典 VirtualModelsPage；
+- 经典 `/virtual-models` 页过滤掉能力名，只呈现四槽；pool 模式下显示未生效提示。
+
 
 ## 4. 模式横幅 ModeBanner（"门户"的核心 UX）
 
@@ -69,16 +103,19 @@
   点击打开 ModelPoolPicker 编辑弹窗（组件复用，入口从订阅编辑页改为矩阵单元格）。
 - **行操作**：测试连接（复用 `test_pool_connection`）。
 - **顶部**：ModeBanner + 能力说明 tooltip + 空状态引导（"选一个订阅开始配置"）。
+- **管理订阅区**（矩阵下方）：见 §3.2。
 - **数据**：新增后端命令 `list_model_pools()` 一次返回全量池条目（矩阵页需要；
   现有 `load_model_pool` 按订阅查，N 个订阅 = N 次 invoke，前端并行 useQuery 也可但脏检查麻烦）。
   store.rs 加一个 `SELECT ... ORDER BY subscription_id, capability, priority` 即可。
 
 ## 6. /pool/models 页设计
 
-平行于 `/virtual-models`：
-- 列出 5 个能力虚拟模型名，各自显示：绑定的订阅数、各订阅首选模型摘要。
-- 复用 VirtualModels.tsx 框架，过滤 `VirtualModelName::all().filter(is_capability_based)`。
-- 绑定/解绑操作走现有 `commands/virtual_models` 接口（后端已支持）。
+**池专属页**（`routes/PoolModels.tsx`，2026-10-23 起不再复用 VirtualModelsPage）：
+- 列出 5 个能力虚拟模型名，各自显示：调度模式切换（sequential / round_robin / sticky，
+  走现有 `update_virtual_model`）+ 已接入订阅只读列表（chips）。
+- 接入由池条目驱动（§3.3），本页不提供手动绑定；空列表时提示去池总览加条目。
+- 经典 `/virtual-models` 页只呈现四槽（`VM_ORDER` 过滤掉能力名），pool 模式下显示
+  「四槽未生效」提示——两页命名空间彻底分开。
 
 ## 7. 契约过滤（门户语义的运行侧保障）
 
