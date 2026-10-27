@@ -61,7 +61,8 @@ export const api = {
   listProviders: () => invoke<ProviderInfo[]>("list_providers"),
 
   // subscriptions
-  listSubscriptions: () => invoke<SubscriptionDto[]>("list_subscriptions"),
+  listSubscriptions: (group?: string) =>
+    invoke<SubscriptionDto[]>("list_subscriptions", { group }),
   getSubscription: (id: string) =>
     invoke<SubscriptionDto>("get_subscription", { id }),
   createSubscription: (input: CreateSubscriptionInput) =>

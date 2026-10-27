@@ -22,6 +22,15 @@ export const VM_ORDER: VirtualModelName[] = [
   "model-embedding",
 ];
 
+/** 能力分类虚拟模型名集合 (池门户的命名空间, 与四槽分开) */
+export const CAPABILITY_NAMES: ReadonlySet<VirtualModelName> = new Set([
+  "model-vision",
+  "model-llm",
+  "model-multimodal",
+  "model-speech",
+  "model-embedding",
+]);
+
 export interface VmMeta {
   /** i18n key for the "purpose" line shown above the slot */
   purposeKey: string;

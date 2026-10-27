@@ -68,6 +68,7 @@ export interface CreateKiroSubscriptionInput {
   model_slots: ModelSlots;
   disguise?: KiroDisguise;
   profile_arn_override?: string;
+  routing_group?: "classic" | "pool";
 }
 
 /**
@@ -97,6 +98,7 @@ export interface CreateChatGptOAuthSubscriptionInput {
   endpoint_id: string;
   display_name: string;
   model_slots: ModelSlots;
+  routing_group?: "classic" | "pool";
 }
 export type VirtualModelName =
   | "model-fable"
@@ -407,6 +409,8 @@ export interface SubscriptionDto {
   updated_at: number;
   /** 该订阅被哪些虚拟模型引用 */
   referenced_by: VirtualModelName[];
+  /** 路由分组: classic = 经典四槽组, pool = 能力池组; 两个组互不连通 */
+  routing_group?: "classic" | "pool";
   /** 缓存的模型列表（可能为空，fetched_at = Unix ms） */
   model_cache?: {
     fetched_at: number;
@@ -520,6 +524,7 @@ export interface CreateSubscriptionInput {
   api_key: string;
   model_slots: ModelSlots;
   source: CreateSource;
+  routing_group?: "classic" | "pool";
 }
 
 /** 自定义订阅修改连接信息时的 patch */
@@ -549,6 +554,7 @@ export interface SubscriptionPatch {
   url_params?: Record<string, string>;
   /** 自定义订阅: 改连接信息 */
   connection?: ConnectionPatch;
+  routing_group?: "classic" | "pool";
 }
 
 export interface TestConnectionResult {

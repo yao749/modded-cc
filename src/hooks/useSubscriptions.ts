@@ -44,10 +44,10 @@ export function useSubscriptionEventBridge() {
   }, [queryClient]);
 }
 
-export function useSubscriptions() {
+export function useSubscriptions(group?: string) {
   return useQuery({
-    queryKey: SUBSCRIPTIONS_KEY,
-    queryFn: () => api.listSubscriptions(),
+    queryKey: group ? [...SUBSCRIPTIONS_KEY, group] : SUBSCRIPTIONS_KEY,
+    queryFn: () => api.listSubscriptions(group),
     refetchInterval: 10_000,
   });
 }
