@@ -450,6 +450,33 @@ pub async fn delete(pool: &SqlitePool, id: &Uuid) -> AppResult<()> {
 }
 
 /// 从能力分类模型池里取某订阅 + 某 capability 的全部启用模型, 按 priority 升序.
+/// 池链失败降序: 把某订阅某能力链里的一个模型挪到链尾 (priority = 当前 MAX + 1)。
+/// 调度方案 B — chain 模式下模型 attempt 失败后调用, 下一次请求它就排到最后,
+/// 不再每次都从坏模型开始撞墙。模型行已被删除时影响 0 行, 视为成功 (尽力而为)。
+pub async fn demote_pool_model(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+    capability: &str,
+    model_name: &str,
+) -> AppResult<()> {
+    // 单条 UPDATE 内的标量子查询在 SQLite 里是原子的: MAX 读到的是语句开始前的快照,
+    // 并发降序最多产生并列 priority, 读取端 ORDER BY priority 的次序稳定即可。
+    sqlx::query(
+        "UPDATE subscription_model_pool
+         SET priority = (SELECT COALESCE(MAX(priority), 0) + 1 FROM subscription_model_pool
+                         WHERE subscription_id = ?1 AND capability = ?2),
+             updated_at = ?3
+         WHERE subscription_id = ?1 AND capability = ?2 AND model_name = ?4",
+    )
+    .bind(sub_id.to_string())
+    .bind(capability)
+    .bind(Utc::now().timestamp_millis())
+    .bind(model_name)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn list_pool_models(
     pool: &SqlitePool,
     sub_id: Uuid,
@@ -1110,5 +1137,52 @@ mod jev_tests {
         let rt = loaded.get(&row.id).unwrap().read().await;
         assert_eq!(rt.row.endpoint_protocol, EndpointProtocol::Messages);
         assert_eq!(rt.row.model_slots.jev_model(), None);
+    }
+
+    /// 池链失败降序: demote 后该模型排到链尾, 其余相对次序不变; 链与链互不影响;
+    /// 重复 demote 同一模型继续排尾; 不存在的模型不报错。
+    #[tokio::test]
+    async fn demote_pool_model_moves_to_chain_tail() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let row = SubscriptionRow::test_fixture("zhipu", "default");
+        insert(&pool, &row).await.expect("insert");
+
+        let mk = |cap: &str, name: &str, prio: i64| ModelPoolEntry {
+            id: format!("{cap}-{name}"),
+            subscription_id: row.id,
+            capability: cap.into(),
+            model_name: name.into(),
+            priority: prio,
+            enabled: true,
+            supported_inputs: Some(default_inputs_for_capability(cap)),
+        };
+        let entries = vec![
+            mk("llm", "glm-a", 1),
+            mk("llm", "glm-b", 2),
+            mk("llm", "glm-c", 3),
+            mk("vision", "glm-v", 1),
+        ];
+        save_model_pool(&pool, row.id, &entries).await.expect("save");
+
+        // 中间模型失败一次 → 挪到 llm 链尾
+        demote_pool_model(&pool, row.id, "llm", "glm-b").await.expect("demote");
+        let llm = list_pool_models(&pool, row.id, "llm").await.unwrap();
+        let names: Vec<&str> = llm.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(names, vec!["glm-a", "glm-c", "glm-b"]);
+
+        // 其他能力链不受影响
+        let vision = list_pool_models(&pool, row.id, "vision").await.unwrap();
+        assert_eq!(vision.len(), 1);
+        assert_eq!(vision[0].0, "glm-v");
+
+        // 再失败一次 → 依旧在尾 (与 glm-c 交换位置)
+        demote_pool_model(&pool, row.id, "llm", "glm-b").await.expect("demote again");
+        let llm = list_pool_models(&pool, row.id, "llm").await.unwrap();
+        let names: Vec<&str> = llm.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(names, vec!["glm-a", "glm-c", "glm-b"]);
+
+        // 已删除/不存在的模型: 影响 0 行, 不报错
+        demote_pool_model(&pool, row.id, "llm", "not-in-chain").await.expect("missing model ok");
     }
 }

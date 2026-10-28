@@ -251,6 +251,20 @@ fn dispatch_err_to_event(err: &OAuthDispatchError) -> (state_machine::Event, boo
     }
 }
 
+/// 池链失败降序 (方案 B): chain 模式下某模型的 attempt 失败后, 把它在该能力链的
+/// priority 挪到链尾并落库 — 下一次请求它排到最后, 不再每次从坏模型开始撞墙。
+/// 无论错误可否重试都降序 (403 AccessDenied 这类模型级永久限制正需要它)。
+/// 写失败只记日志: 降序是尽力而为的优化, 不能反过来影响本次请求的失败处理;
+/// 四槽/兜底请求 capability 为 None, 直接跳过。
+async fn demote_pool_chain_model(state: &AppState, sub_id: Uuid, capability: Option<&str>, model: &str) {
+    let Some(cap) = capability else { return };
+    if let Err(e) =
+        crate::subscription::store::demote_pool_model(&state.db, sub_id, cap, model).await
+    {
+        warn!(%sub_id, %model, error = %e, "failed to demote pool chain model");
+    }
+}
+
 pub async fn dispatch(
     state: &AppState,
     model: &str,
@@ -381,6 +395,13 @@ pub async fn dispatch(
             }
         }
 
+        // 池链降序用: chain 模式下的能力分类名 (四槽/兜底请求为 None → 降序自动跳过)。
+        let chain_capability: Option<&'static str> = if is_capability_based {
+            Some(vm_name.capability().map(|c| c.as_str()).unwrap_or("llm"))
+        } else {
+            None
+        };
+
         // 从订阅 row snapshot 读取所有连接信息(snapshot 模型: 不再回查 state.providers)
         let mut pool_chain: Option<Vec<(String, Option<Vec<String>>)>> = None;
         let (
@@ -414,7 +435,7 @@ pub async fn dispatch(
                     .clone()
                     .unwrap_or_else(|| model.to_string())
             } else if is_capability_based {
-                let capability = vm_name.capability().map(|c| c.as_str()).unwrap_or("llm");
+                let capability = chain_capability.unwrap_or("llm");
                 let raw_chain: Vec<(String, Option<Vec<String>>)> =
                     match crate::subscription::store::list_pool_models(
                         &state.db,
@@ -607,6 +628,7 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = dispatch_err_to_event(&err);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -718,6 +740,7 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = dispatch_err_to_event(&err);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -839,6 +862,7 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = dispatch_err_to_event(&err);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -971,6 +995,7 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = dispatch_err_to_event(&err);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1102,6 +1127,7 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = dispatch_err_to_event(&err);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1232,6 +1258,7 @@ pub async fn dispatch(
                 Err(err) => {
                     emit_attempt_finished(state, sub_id, vm_name, false);
                     let (event, retryable) = dispatch_err_to_event(&err);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let _ = state_machine::apply(
                         &state.db,
                         &state.app_handle,
@@ -1534,6 +1561,7 @@ pub async fn dispatch(
                 // 流式：若非 2xx 按非流式错误处理
                 if !status.is_success() {
                     emit_attempt_finished(state, sub_id, vm_name, false);
+                    demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                     let event = state_machine::Event::HttpStatus(status.as_u16());
                     let _ = state_machine::apply(
                         &state.db,
@@ -1566,6 +1594,7 @@ pub async fn dispatch(
                         let is_quota_exhausted = provider_id == "zhipu"
                             && sse::classify_zhipu_sse_error(code.as_deref(), message.as_deref());
                         emit_attempt_finished(state, sub_id, vm_name, false);
+                        demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                         let _ = state_machine::apply(
                             &state.db,
                             &state.app_handle,
@@ -1633,6 +1662,7 @@ pub async fn dispatch(
                     }
                     sse::PeekResult::Network(e) => {
                         emit_attempt_finished(state, sub_id, vm_name, false);
+                        demote_pool_chain_model(state, sub_id, chain_capability, &real_model).await;
                         warn!(?e, "upstream stream error during lookahead");
                         let _ = state_machine::apply(
                             &state.db,
