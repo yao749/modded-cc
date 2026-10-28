@@ -314,10 +314,10 @@ export function PoolSubscriptionNewPage() {
           <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
             {/* 厂商选择 */}
             <div className="field">
-              <Label>{t("subscriptionNew.provider")}</Label>
+              <Label>{t("subscriptionNew.field.provider")}</Label>
               <Select value={providerId} onValueChange={handleProviderChange}>
                 <SelectTrigger>
-                  <SelectValue placeholder={t("subscriptionNew.selectProvider")} />
+                  <SelectValue placeholder={t("subscriptionNew.providerSelect")} />
                 </SelectTrigger>
                 <SelectContent>
                   {firstParty.length > 0 && (
@@ -372,10 +372,10 @@ export function PoolSubscriptionNewPage() {
             {/* 端点选择 (非自定义) */}
             {provider && !isCustom && provider.endpoints.length > 0 && (
               <div className="field">
-                <Label>{t("subscriptionNew.endpoint")}</Label>
+                <Label>{t("subscriptionNew.field.endpoint")}</Label>
                 <Select value={endpointId} onValueChange={handleEndpointChange}>
                   <SelectTrigger>
-                    <SelectValue placeholder={t("subscriptionNew.selectEndpoint")} />
+                    <SelectValue placeholder={t("subscriptionNew.endpointSelect")} />
                   </SelectTrigger>
                   <SelectContent>
                     {provider.endpoints.map((ep) => (
@@ -392,7 +392,7 @@ export function PoolSubscriptionNewPage() {
             {isCustom && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 <div className="field">
-                  <Label>{t("subscriptionNew.customBase")}</Label>
+                  <Label>Base URL</Label>
                   <Input
                     value={customBaseUrl}
                     onChange={(e) => setCustomBaseUrl(e.target.value)}
@@ -400,14 +400,14 @@ export function PoolSubscriptionNewPage() {
                   />
                 </div>
                 <div className="field">
-                  <Label>{t("subscriptionNew.customPath")}</Label>
+                  <Label>Messages Path</Label>
                   <Input
                     value={customMessagesPath}
                     onChange={(e) => setCustomMessagesPath(e.target.value)}
                   />
                 </div>
                 <div className="field">
-                  <Label>{t("subscriptionNew.customAuth")}</Label>
+                  <Label>{t("subscriptionNew.authMethod")}</Label>
                   <Select value={customAuthPreset} onValueChange={(v) => setCustomAuthPreset(v as any)}>
                     <SelectTrigger>
                       <SelectValue />
@@ -435,7 +435,7 @@ export function PoolSubscriptionNewPage() {
             {/* API Key / OAuth */}
             {isChatGptOAuth ? (
               <div className="field">
-                <Label>{t("subscriptionNew.apiKey")}</Label>
+                <Label>API Key</Label>
                 {oauthResult ? (
                   <div className="oauth-connected">
                     <span className="oauth-icon">✓</span>
@@ -457,7 +457,7 @@ export function PoolSubscriptionNewPage() {
               </div>
             ) : isKiroOAuth ? (
               <div className="field">
-                <Label>{t("subscriptionNew.apiKey")}</Label>
+                <Label>API Key</Label>
                 {kiroPayload ? (
                   <div className="oauth-connected">
                     <span className="oauth-icon">✓</span>
@@ -479,7 +479,7 @@ export function PoolSubscriptionNewPage() {
               </div>
             ) : (
               <div className="field">
-                <Label>{t("subscriptionNew.apiKey")}</Label>
+                <Label>API Key</Label>
                 <Input
                   type="password"
                   value={apiKey}
@@ -491,7 +491,7 @@ export function PoolSubscriptionNewPage() {
 
             {/* 显示名 */}
             <div className="field">
-              <Label>{t("subscriptionNew.displayName")}</Label>
+              <Label>{t("subscriptionNew.field.note")}</Label>
               <Input
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}

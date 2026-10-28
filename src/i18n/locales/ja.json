@@ -1153,5 +1153,14 @@
   "releaseNotes.lang.zh": "Chinese",
   "releaseNotes.lang.en": "English",
   "releaseNotes.lang.ja": "Japanese",
-  "virtualModels.slotsNotActive": "Capability pool mode is active, so four-slot virtual models are not in effect. Switch back to four-slot mode in Settings to manage model-fable / model-opus here; capability models live in the Capability pool group."
+  "virtualModels.slotsNotActive": "Capability pool mode is active, so four-slot virtual models are not in effect. Switch back to four-slot mode in Settings to manage model-fable / model-opus here; capability models live in the Capability pool group.",
+  "common.back": "戻る",
+  "common.done": "完了",
+  "pool.new.title": "プールサブスクリプションを追加",
+  "pool.new.step1": "接続",
+  "pool.new.step1Hint": "プロバイダーを選択して認証すると、次にケイパビリティを設定します",
+  "pool.new.step2": "ケイパビリティ設定",
+  "pool.new.step2Hint": "ケイパビリティごとにモデルチェーンを設定し、「自動入力」で一括インポートできます",
+  "pool.new.skip": "スキップして後で設定",
+  "pool.new.defaultName": "プールサブスクリプション"
 }

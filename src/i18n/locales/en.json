@@ -1153,5 +1153,14 @@
   "releaseNotes.lang.zh": "中国語",
   "releaseNotes.lang.en": "英語",
   "releaseNotes.lang.ja": "日本語",
-  "virtualModels.slotsNotActive": "ケイパビリティプールモードのため、4 スロット仮想モデルは有効ではありません。設定で 4 スロットに戻すと model-fable / model-opus 等をここで管理できます。能力分類の管理は「ケイパビリティプール」グループです。"
+  "virtualModels.slotsNotActive": "ケイパビリティプールモードのため、4 スロット仮想モデルは有効ではありません。設定で 4 スロットに戻すと model-fable / model-opus 等をここで管理できます。能力分類の管理は「ケイパビリティプール」グループです。",
+  "common.back": "Back",
+  "common.done": "Done",
+  "pool.new.title": "Add Pool Subscription",
+  "pool.new.step1": "Connect",
+  "pool.new.step1Hint": "Pick a provider and authenticate; you'll configure capabilities next",
+  "pool.new.step2": "Capability Mapping",
+  "pool.new.step2Hint": "Configure a model chain per capability; use Auto-fill to import in one click",
+  "pool.new.skip": "Skip for now",
+  "pool.new.defaultName": "Pool subscription"
 }

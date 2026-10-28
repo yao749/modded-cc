@@ -1153,5 +1153,14 @@
   "releaseNotes.lang.zh": "中文",
   "releaseNotes.lang.en": "英文",
   "releaseNotes.lang.ja": "日文",
-  "virtualModels.slotsNotActive": "当前为能力池模式：四槽虚拟模型未生效。切回四槽模式（设置页）后本页恢复管理 model-fable / model-opus 等；能力分类的管理在「能力池」组。"
+  "virtualModels.slotsNotActive": "当前为能力池模式：四槽虚拟模型未生效。切回四槽模式（设置页）后本页恢复管理 model-fable / model-opus 等；能力分类的管理在「能力池」组。",
+  "common.back": "返回",
+  "common.done": "完成",
+  "pool.new.title": "添加池订阅",
+  "pool.new.step1": "接入",
+  "pool.new.step1Hint": "选择厂商并完成鉴权, 创建后将进入能力配置",
+  "pool.new.step2": "能力配置",
+  "pool.new.step2Hint": "为每个能力分类配置模型链, 可用「自动填充」一键导入",
+  "pool.new.skip": "跳过, 稍后配置",
+  "pool.new.defaultName": "池订阅"
 }
