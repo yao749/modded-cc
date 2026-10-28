@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight, Check, X, Minus, CircleHelp } from "lucide-react";
+import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight, Check, X, Minus, CircleHelp, Sparkles } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -29,7 +29,8 @@ interface Props {
   /** 该订阅可用的模型列表 (从 refresh_model_list 拿的全量) */
   models: ModelInfo[] | null;
   loading?: boolean;
-  onRefresh?: () => void;
+  /** 刷新模型列表; 返回拉取到的模型, 供「自动获取并填充」在同一次点击内直接使用 */
+  onRefresh?: () => void | Promise<ModelInfo[] | null>;
   disabled?: boolean;
 }
 
@@ -47,6 +48,9 @@ export function ModelPoolPicker({
   const [testLoading, setTestLoading] = useState(false);
   /** 按 model_name 索引的测试结果, 用于每行前面显示 ✓/✗/- 状态 */
   const [testResults, setTestResults] = useState<Record<string, PoolTestItem>>({});
+  /** 「自动获取并填充」的执行态 + 结果提示 */
+  const [autoFillAllLoading, setAutoFillAllLoading] = useState(false);
+  const [autoFillAllMsg, setAutoFillAllMsg] = useState<string | null>(null);
 
   // 切换 tab 时清空上次测试结果
   function switchCap(c: CapabilityCategory) {
@@ -172,6 +176,65 @@ export function ModelPoolPicker({
     onChange([...entries, ...newEntries]);
   }
 
+  /** 把模型发现列表里所有能推断出能力分类的模型, 一次性填入对应分类 (已有跳过). 返回新增条数. */
+  function fillAllFromDiscovery(source: ModelInfo[]): number {
+    const existing = new Set(entries.map((e) => `${e.capability}\u0000${e.model_name}`));
+    // 每个分类的起始 priority = 该类现有最大 priority + 1
+    const nextPri: Record<string, number> = {};
+    for (const cap of CAPABILITIES) {
+      nextPri[cap] = entries
+        .filter((e) => e.capability === cap)
+        .reduce((m, e) => Math.max(m, e.priority + 1), 0);
+    }
+    const added: ModelPoolEntry[] = [];
+    for (const m of source) {
+      const cap = m.inferred_capability as CapabilityCategory | null | undefined;
+      if (!cap || !(cap in nextPri)) continue;
+      const key = `${cap}\u0000${m.id}`;
+      if (existing.has(key)) continue;
+      existing.add(key);
+      added.push({
+        id: `pool-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${added.length}`,
+        subscription_id: subscriptionId,
+        capability: cap,
+        model_name: m.id,
+        priority: nextPri[cap]++,
+        enabled: true,
+        supported_inputs: defaultInputsForCapability(cap),
+      });
+    }
+    if (added.length > 0) onChange([...entries, ...added]);
+    return added.length;
+  }
+
+  /**
+   * 一键: 模型列表为空时先自动获取 (onRefresh), 再按推断把 5 个能力分类一次性填好。
+   * 这是池页面「自动获取模型」的主入口 —— 不用切 5 次 tab 逐个点自动填充。
+   */
+  async function autoFetchAndFillAll() {
+    setAutoFillAllLoading(true);
+    setAutoFillAllMsg(null);
+    try {
+      let list: ModelInfo[] | null = models;
+      if (!list || list.length === 0) {
+        const fetched = await onRefresh?.();
+        if (fetched && fetched.length > 0) list = fetched;
+      }
+      if (!list || list.length === 0) {
+        setAutoFillAllMsg("未获取到模型列表: 请确认 API Key / Base URL 无误, 或点「刷新模型列表」重试");
+        return;
+      }
+      const added = fillAllFromDiscovery(list);
+      setAutoFillAllMsg(
+        added > 0
+          ? `已自动填入 ${added} 个模型 (按推断分到各能力分类)`
+          : "可推断的模型都已加入, 没有新增",
+      );
+    } finally {
+      setAutoFillAllLoading(false);
+    }
+  }
+
   // 当前模型发现列表里 inferred == active 的候选
   const autoFillCandidates = useMemo(() => {
     if (!models) return [] as ModelInfo[];
@@ -180,6 +243,17 @@ export function ModelPoolPicker({
       (m) => m.inferred_capability === active && !existingNames.has(m.id),
     );
   }, [models, entriesByCap, active]);
+
+  // 5 个分类合计的可自动填充候选 (按钮上显示的数字)
+  const totalAutoFillCandidates = useMemo(() => {
+    if (!models) return 0;
+    const existing = new Set(entries.map((e) => `${e.capability}\u0000${e.model_name}`));
+    return models.filter((m) => {
+      const cap = m.inferred_capability as CapabilityCategory | null | undefined;
+      if (!cap) return false;
+      return !existing.has(`${cap}\u0000${m.id}`);
+    }).length;
+  }, [models, entries]);
 
   return (
     <div>
@@ -221,7 +295,21 @@ export function ModelPoolPicker({
             );
           })}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="btn sm primary"
+            onClick={() => void autoFetchAndFillAll()}
+            disabled={disabled || autoFillAllLoading}
+            title="自动获取模型列表, 并按推断一次性填入全部 5 个能力分类"
+          >
+            <Sparkles size={12} />
+            {autoFillAllLoading
+              ? "获取中..."
+              : totalAutoFillCandidates > 0
+                ? `自动获取并填充 (${totalAutoFillCandidates})`
+                : "自动获取并填充"}
+          </button>
           <button
             type="button"
             className="btn sm"
@@ -256,6 +344,18 @@ export function ModelPoolPicker({
             </button>
           )}
         </div>
+      </div>
+
+      {/* 模型获取状态 + 一键填充结果 */}
+      <div className="field-hint" style={{ marginBottom: 6, marginTop: 0 }}>
+        {loading
+          ? "正在获取模型列表..."
+          : models
+            ? `已获取 ${models.length} 个模型`
+            : "尚未获取模型列表 — 点「自动获取并填充」或「刷新模型列表」"}
+        {autoFillAllMsg && (
+          <span style={{ marginLeft: 8, color: "var(--ink-2, #6b7280)" }}>· {autoFillAllMsg}</span>
+        )}
       </div>
 
       {/* 说明 */}

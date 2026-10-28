@@ -250,14 +250,22 @@ export function PoolSubscriptionNewPage() {
     }
   }
 
-  async function refreshPoolModels() {
-    if (!createdId) return;
+  /** 刷新模型列表; 返回模型本身, 供 ModelPoolPicker「自动获取并填充」在同一次点击内直接使用 */
+  async function refreshPoolModels(): Promise<ModelInfo[] | null> {
+    if (!createdId) return null;
     setPoolModelsLoading(true);
     try {
       const result = await api.refreshModelList(createdId);
-      if (result.kind === "auto") setStep1Models(result.models);
-    } catch {
-      // 忽略
+      if (result.kind === "auto") {
+        setStep1Models(result.models);
+        setStep1Error(null);
+        return result.models;
+      }
+      setStep1Error(result.reason);
+      return null;
+    } catch (e) {
+      setStep1Error(errorText(e));
+      return null;
     } finally {
       setPoolModelsLoading(false);
     }
@@ -536,18 +544,16 @@ export function PoolSubscriptionNewPage() {
             <h2>{t("pool.new.step2")}</h2>
           </div>
           <div className="card-body">
-            {poolModelsLoading && (
-              <div style={{ padding: 20, textAlign: "center" }}>
-                <LoaderCircle className="h-5 w-5 animate-spin" />
-              </div>
-            )}
-            {createdId && !poolModelsLoading && (
+            {/* 不要用 loading 卸载 ModelPoolPicker: 「自动获取并填充」会触发刷新,
+                卸载会丢掉组件内的填充结果与提示, 故把 loading 下传由组件内部呈现 */}
+            {createdId && (
               <ModelPoolPicker
                 subscriptionId={createdId}
                 entries={poolDraft}
                 onChange={setPoolDraft}
                 models={step1Models}
-                onRefresh={() => void refreshPoolModels()}
+                loading={poolModelsLoading}
+                onRefresh={refreshPoolModels}
               />
             )}
 
