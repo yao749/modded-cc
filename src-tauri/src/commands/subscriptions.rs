@@ -314,12 +314,22 @@ async fn collect_references(state: &AppState) -> std::collections::HashMap<Uuid,
 }
 
 #[tauri::command]
-pub async fn list_subscriptions(state: State<'_, AppState>) -> AppResult<Vec<SubscriptionDto>> {
+pub async fn list_subscriptions(
+    state: State<'_, AppState>,
+    group: Option<String>,
+) -> AppResult<Vec<SubscriptionDto>> {
     let refs = collect_references(&state).await;
     let subs = state.subscriptions.read().await;
     let mut out = Vec::with_capacity(subs.len());
     for (id, rt) in subs.iter() {
         let guard = rt.read().await;
+        // 按路由组隔离: classic 与 pool 互不可见, 同一个订阅只属于一个组。
+        // group 为空时返回全部 (统计/日志/虚拟模型等需要全量视图)。
+        if let Some(want) = group.as_deref() {
+            if guard.row.routing_group.as_str() != want {
+                continue;
+            }
+        }
         let referenced = refs.get(id).cloned().unwrap_or_default();
         out.push(SubscriptionDto::from_runtime(&guard, referenced, &state.providers));
     }
