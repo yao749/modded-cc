@@ -39,7 +39,8 @@ export function SubscriptionsPage() {
 
   const title = poolMode ? t("subscriptions.pool.title") : t("subscriptions.title");
   const subtitle = poolMode ? t("subscriptions.pool.subtitle") : t("subscriptions.subtitle");
-  const baseNew = poolMode ? "/subscriptions/new?from=pool" : "/subscriptions/new";
+  // 池模式走池专属向导 /pool/new (不复用经典页), 带 from=subs 以便完成后回到本列表
+  const baseNew = poolMode ? "/pool/new?from=subs" : "/subscriptions/new";
 
   return (
     <>

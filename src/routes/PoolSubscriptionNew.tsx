@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { ArrowLeft, ArrowRight, LoaderCircle } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ProviderLogo } from "@/components/ProviderLogo";
@@ -53,8 +53,12 @@ const AUTH_PRESETS: Record<"bearer" | "x_api_key", { name: string; format: AuthH
 export function PoolSubscriptionNewPage() {
   const { t } = useT();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const providers = useProviders();
+
+  // 来源感知: 从池订阅列表进入则完成后回列表, 从池总览进入则回总览
+  const backTarget = searchParams.get("from") === "subs" ? "/pool/subscriptions" : "/pool";
 
   const [step, setStep] = useState<Step>(1);
   const [providerId, setProviderId] = useState<string>("");
@@ -269,7 +273,7 @@ export function PoolSubscriptionNewPage() {
         poolDraft.map(({ subscription_id: _sub, ...rest }) => rest),
       );
       await queryClient.invalidateQueries({ queryKey: ["model-pools"] });
-      navigate("/pool", { replace: true });
+      navigate(backTarget, { replace: true });
     } catch (e) {
       setSubmitError(errorText(e));
     } finally {
@@ -278,7 +282,7 @@ export function PoolSubscriptionNewPage() {
   }
 
   async function skipPool() {
-    navigate("/pool", { replace: true });
+    navigate(backTarget, { replace: true });
   }
 
   function backToStep1() {
@@ -295,7 +299,7 @@ export function PoolSubscriptionNewPage() {
   return (
     <div className="page-container">
       <div className="page-header">
-        <Button variant="ghost" size="sm" onClick={() => navigate("/pool")}>
+        <Button variant="ghost" size="sm" onClick={() => navigate(backTarget)}>
           <ArrowLeft className="h-4 w-4" />
           {t("common.back")}
         </Button>
@@ -504,7 +508,7 @@ export function PoolSubscriptionNewPage() {
             )}
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-              <Button variant="outline" onClick={() => navigate("/pool")}>
+              <Button variant="outline" onClick={() => navigate(backTarget)}>
                 {t("common.cancel")}
               </Button>
               <Button
