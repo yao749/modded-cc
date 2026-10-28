@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { ArrowLeft, TriangleAlert, LoaderCircle } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { runtime } from "@/runtime";
@@ -27,6 +27,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { ModelSlotPicker } from "@/components/ModelSlotPicker";
+import { ModelPoolPicker } from "@/components/ModelPoolPicker";
 import { SubscriptionBalancePanel } from "@/components/SubscriptionBalanceCard";
 import { SubscriptionQuotaCard } from "@/components/SubscriptionQuotaCard";
 import { api } from "@/api/tauri";
@@ -44,6 +45,7 @@ import { useT } from "@/i18n";
 import type {
   AuthHeaderFormat,
   ModelInfo,
+  ModelPoolEntry,
   ModelSlots,
   QuotaPeriod,
   RefreshModelListResult,
@@ -64,8 +66,12 @@ export function SubscriptionEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
-  const poolMode = searchParams.get("mode") === "pool";
+  // 池专属路由 /pool/subscriptions/:id; 兼容旧的 /subscriptions/:id?mode=pool
+  const poolMode =
+    location.pathname.startsWith("/pool/subscriptions/") ||
+    searchParams.get("mode") === "pool";
 
   const subQuery = useQuery({
     queryKey: ["subscription", id],
@@ -122,6 +128,9 @@ export function SubscriptionEditPage() {
   const [newKey, setNewKey] = useState("");
   const [deleteDialog, setDeleteDialog] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** 池模式: 该订阅的能力链条目 (与订阅字段一起保存) */
+  const [poolEntries, setPoolEntries] = useState<ModelPoolEntry[]>([]);
+  const [poolSaving, setPoolSaving] = useState(false);
 
   useEffect(() => {
     if (subQuery.data) {
@@ -158,22 +167,41 @@ export function SubscriptionEditPage() {
     }
   }, [subQuery.data?.id]);
 
+  // 池模式: 加载该订阅的能力链条目
+  useEffect(() => {
+    if (!poolMode || !id) return;
+    let cancelled = false;
+    api
+      .loadModelPool(id)
+      .then((entries) => {
+        if (!cancelled) setPoolEntries(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setPoolEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [poolMode, id]);
+
   if (!id) return null;
 
-  async function refreshModels() {
-    if (!id) return;
+  async function refreshModels(): Promise<ModelInfo[] | null> {
+    if (!id) return null;
     setFetchingModels(true);
     setModelError(null);
     try {
       const result: RefreshModelListResult = await runtime.invoke("refresh_model_list", { id });
       if (result.kind === "auto") {
         setModels(result.models);
-      } else {
-        setModels(null);
-        setModelError(result.reason);
+        return result.models;
       }
+      setModels(null);
+      setModelError(result.reason);
+      return null;
     } catch (e) {
       setModelError(errorText(e));
+      return null;
     } finally {
       setFetchingModels(false);
     }
@@ -182,15 +210,13 @@ export function SubscriptionEditPage() {
   async function save() {
     if (!id || !sub) return;
     setSaveError(null);
-    // 自定义 System One 订阅没有示例模型可回退 (后端 require_jev_model 同规则)
-    if (sub.is_user_defined && sub.endpoint_protocol === "systemone" && !slots.jev?.trim()) {
+    // 池模式不写四槽: 模型链走 model_pools 表, 与订阅字段分开存
+    if (!poolMode && sub.is_user_defined && sub.endpoint_protocol === "systemone" && !slots.jev?.trim()) {
       return setSaveError(t("subscriptionNew.errFillJevModel"));
     }
-    const patch: SubscriptionPatch = {
-      display_name: displayName,
-      model_slots: slots,
-      slot_efforts: slotEfforts,
-    };
+    const patch: SubscriptionPatch = poolMode
+      ? { display_name: displayName }
+      : { display_name: displayName, model_slots: slots, slot_efforts: slotEfforts };
     // 仅透传订阅有此开关 (翻译类订阅不渲染也不提交, 保持后端字段不变)
     if (sub.auth_type === "api_key" && !isSystemOne) {
       patch.forward_client_headers = forwardClientHeaders;
@@ -232,6 +258,19 @@ export function SubscriptionEditPage() {
     }
     try {
       await updateMut.mutateAsync({ id, patch });
+      // 池模式: 同一次保存顺带落能力链, 避免用户再跳去总览配一遍
+      if (poolMode) {
+        setPoolSaving(true);
+        try {
+          await api.saveModelPool(
+            id,
+            poolEntries.map(({ subscription_id: _sub, ...rest }) => rest),
+          );
+          await queryClient.invalidateQueries({ queryKey: ["model-pools"] });
+        } finally {
+          setPoolSaving(false);
+        }
+      }
     } catch (e) {
       setSaveError(`${t("subscriptionEdit.errSave")}: ${errorText(e)}`);
     }
@@ -267,7 +306,7 @@ export function SubscriptionEditPage() {
   async function confirmDelete() {
     if (!id) return;
     await deleteMut.mutateAsync(id);
-    navigate("/subscriptions");
+    navigate(poolMode ? "/pool/subscriptions" : "/subscriptions");
   }
 
   async function confirmUpdateKey() {
@@ -303,7 +342,7 @@ export function SubscriptionEditPage() {
             title={t("subscriptionNew.backToList")}
             aria-label={t("subscriptionNew.backToList")}
           >
-            <Link to="/subscriptions">
+            <Link to={poolMode ? "/pool/subscriptions" : "/subscriptions"}>
               <ArrowLeft className="h-4 w-4" />
             </Link>
           </Button>
@@ -560,18 +599,17 @@ export function SubscriptionEditPage() {
             {poolMode && (
               <Card>
                 <CardHeader>
-                  <CardTitle>{t("subscriptionEdit.modelSlotsTitle")}</CardTitle>
+                  <CardTitle>{t("pool.editChain")}</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <Alert variant="default">
-                    <AlertDescription>
-                      此订阅处于<strong>能力池模式</strong>。模型链配置请前往{" "}
-                      <Link to={`/pool?sub=${id}`} className="underline">
-                        能力池管理
-                      </Link>
-                      。
-                    </AlertDescription>
-                  </Alert>
+                  <ModelPoolPicker
+                    subscriptionId={id!}
+                    entries={poolEntries}
+                    onChange={setPoolEntries}
+                    models={models}
+                    loading={fetchingModels}
+                    onRefresh={refreshModels}
+                  />
                 </CardContent>
               </Card>
             )}
@@ -665,8 +703,8 @@ export function SubscriptionEditPage() {
               <Button variant="destructive" size="sm" onClick={() => setDeleteDialog(true)}>
                 {t("common.delete")}
               </Button>
-              <Button size="sm" onClick={save} disabled={updateMut.isPending}>
-                {updateMut.isPending && <LoaderCircle className="h-4 w-4 animate-spin" />}
+              <Button size="sm" onClick={save} disabled={updateMut.isPending || poolSaving}>
+                {(updateMut.isPending || poolSaving) && <LoaderCircle className="h-4 w-4 animate-spin" />}
                 {t("common.save")}
               </Button>
             </div>

@@ -57,8 +57,9 @@ function AppInner() {
         <Route index element={<Navigate to="/virtual-models" replace />} />
         <Route path="/live-routing" element={<LiveRoutingPage />} />
         <Route path="/virtual-models" element={<VirtualModelsPage />} />
-        {/* 能力池组 (门户): 池订阅管理 → 经典订阅同组件 /pool/subscriptions; 总览矩阵 + 能力虚拟模型 */}
+        {/* 能力池组 (门户): 池订阅列表 /pool/subscriptions + 池专属编辑页 /pool/subscriptions/:id; 总览矩阵 + 能力虚拟模型 */}
         <Route path="/pool/subscriptions" element={<SubscriptionsPage />} />
+        <Route path="/pool/subscriptions/:id" element={<SubscriptionEditPage />} />
         <Route path="/pool" element={<PoolPage />} />
         <Route path="/pool/new" element={<PoolSubscriptionNewPage />} />
         <Route path="/pool/models" element={<PoolModelsPage />} />

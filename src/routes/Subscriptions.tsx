@@ -141,7 +141,10 @@ export function SubscriptionsPage() {
                       {fmtTimeShort(sub.updated_at)}
                     </td>
                     <td>
-                      <Link className="btn sm" to={`/subscriptions/${sub.id}${poolMode ? "?mode=pool" : ""}`}>
+                      <Link
+                        className="btn sm"
+                        to={poolMode ? `/pool/subscriptions/${sub.id}` : `/subscriptions/${sub.id}`}
+                      >
                         {t("subscriptions.view")}
                       </Link>
                     </td>

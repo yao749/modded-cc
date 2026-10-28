@@ -146,9 +146,10 @@ export function Sidebar() {
       labelKey: "sidebar.group.pool",
       items: [
         // 图标复用现有涂鸦: 池总览是矩阵 → stats; 池的虚拟模型 → vm; 池订阅 → subs。
-        // 三个池路由是兄弟不是父子, 必须 end 精确匹配 —— 否则 /pool 的前缀匹配
-        // 会让它在 /pool/subscriptions 和 /pool/models 上也亮着 (两个激活项)。
-        { to: "/pool/subscriptions", label: t("sidebar.nav.poolSubs"), icon: "subs", end: true },
+        // 三个池路由是兄弟不是父子, /pool 与 /pool/models 需 end 精确匹配 ——
+        // 否则 /pool 的前缀匹配会让它在 /pool/subscriptions、/pool/models 上也亮着。
+        // 池订阅项刻意不加 end: 它的编辑页 /pool/subscriptions/:id 仍应让它保持高亮。
+        { to: "/pool/subscriptions", label: t("sidebar.nav.poolSubs"), icon: "subs" },
         { to: "/pool", label: t("sidebar.nav.pool"), icon: "stats", end: true },
         { to: "/pool/models", label: t("sidebar.nav.poolModels"), icon: "vm", end: true },
       ],

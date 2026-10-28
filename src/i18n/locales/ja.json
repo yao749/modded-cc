@@ -24,6 +24,7 @@
   "sidebar.nav.poolSubs": "Pool subscriptions",
   "modeBanner.classicNotActive": "Capability pool mode is active, so this page's four-slot configuration is not in effect.",
   "pool.title": "Capability pool overview",
+  "pool.editChain": "Model chain",
   "pool.subtitle": "Rows are subscriptions, columns are capabilities. Click a cell to edit that subscription's priority chain for that capability.",
   "pool.addSubscription": "Add subscription",
   "pool.manageLink": "サブスクリプション管理",

@@ -24,6 +24,7 @@
   "sidebar.nav.poolSubs": "池订阅管理",
   "modeBanner.classicNotActive": "当前为能力池模式, 这一页的四槽配置没有生效。",
   "pool.title": "能力分类池总览",
+  "pool.editChain": "能力链配置",
   "pool.subtitle": "行 = 订阅, 列 = 能力分类。点单元格编辑该订阅在该能力下的优先级链。",
   "pool.addSubscription": "添加订阅",
   "pool.manageLink": "管理订阅",

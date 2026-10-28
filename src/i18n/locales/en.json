@@ -24,6 +24,7 @@
   "sidebar.nav.poolSubs": "プールサブスクリプション",
   "modeBanner.classicNotActive": "現在はケイパビリティプールモードのため、このページの 4 スロット設定は有効ではありません。",
   "pool.title": "ケイパビリティプール概要",
+  "pool.editChain": "ケイパビリティチェーン",
   "pool.subtitle": "行 = サブスクリプション、列 = 能力分類。セルをクリックすると、その能力の優先順位チェーンを編集できます。",
   "pool.addSubscription": "サブスクリプションを追加",
   "pool.manageLink": "Manage subscriptions",
