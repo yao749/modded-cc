@@ -3,6 +3,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { VirtualModelsPage } from "@/routes/VirtualModels";
 import { PoolPage } from "@/routes/Pool";
 import { PoolModelsPage } from "@/routes/PoolModels";
+import { PoolSubscriptionNewPage } from "@/routes/PoolSubscriptionNew";
 import { LiveRoutingPage } from "@/routes/LiveRouting";
 import { UpdatesPage } from "@/routes/Updates";
 import { SubscriptionsPage } from "@/routes/Subscriptions";
@@ -59,6 +60,7 @@ function AppInner() {
         {/* 能力池组 (门户): 池订阅管理 → 经典订阅同组件 /pool/subscriptions; 总览矩阵 + 能力虚拟模型 */}
         <Route path="/pool/subscriptions" element={<SubscriptionsPage />} />
         <Route path="/pool" element={<PoolPage />} />
+        <Route path="/pool/new" element={<PoolSubscriptionNewPage />} />
         <Route path="/pool/models" element={<PoolModelsPage />} />
         <Route path="/subscriptions" element={<SubscriptionsPage />} />
         <Route path="/subscriptions/new" element={<SubscriptionNewPage />} />

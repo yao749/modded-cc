@@ -294,6 +294,17 @@ pub async fn dispatch(
         _ => None,
     };
     let subs_map = state.subscriptions.read().await.clone();
+    // 分组隔离: classic VM 只扫 classic 订阅, pool VM 只扫 pool 订阅.
+    // 两边 query 各加一行 filter, 保证两组订阅互不连通.
+    let target_group: &str = if is_capability_based { "pool" } else { "classic" };
+    let subs_map = subs_map
+        .into_iter()
+        .filter(|(_, rt)| {
+            rt.try_read()
+                .map(|g| g.row.routing_group == target_group)
+                .unwrap_or(false)
+        })
+        .collect();
     let order = build_candidate_order(&vm_config, &subs_map, Utc::now(), crate::subscription::schedule::WallClock::now(), pinned).await;
     drop(subs_map);
 

@@ -189,6 +189,9 @@ pub struct CreateSubscriptionInput {
     pub api_key: String,
     pub model_slots: ModelSlots,
     pub source: CreateSource,
+    /// 订阅所属组: "classic" (四槽分发) 或 "pool" (能力池分发). 缺省走 "classic".
+    #[serde(default)]
+    pub routing_group: Option<String>,
     // 刻意不含 slot_efforts: 新建订阅一律全 auto (DB 列 DEFAULT '{}'), 用户创建后进编辑页再设。
     // 新建向导是两步非事务流程, 不往里再加表单字段。
 }
@@ -395,7 +398,7 @@ pub async fn create_subscription(
                 provider_display_name: provider.display_name.zh.clone(),
                 provider_icon: provider.icon.clone().unwrap_or_default(),
                 is_user_defined: false,
-                routing_group: "classic".into(),
+                routing_group: input.routing_group.clone().unwrap_or_else(|| "classic".into()),
             }
         }
         CreateSource::Custom {
@@ -459,7 +462,7 @@ pub async fn create_subscription(
                 provider_display_name,
                 provider_icon: profile.icon.to_string(),
                 is_user_defined: true,
-                routing_group: "classic".into(),
+                routing_group: input.routing_group.clone().unwrap_or_else(|| "classic".into()),
             }
         }
     };

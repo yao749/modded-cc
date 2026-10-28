@@ -23,7 +23,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useProviders } from "@/hooks/useProviders";
-import { useSettings } from "@/hooks/useSettings";
 import { useCreateSubscription } from "@/hooks/useSubscriptions";
 import { useVirtualModels } from "@/hooks/useVirtualModels";
 import { useT } from "@/i18n";
@@ -175,22 +174,13 @@ export function SubscriptionNewPage() {
   const [searchParams] = useSearchParams();
   const returnTo = searchParams.get("returnTo");
   const isOnboarding = searchParams.get("onboarding") === "1";
-  // 从能力池总览的「添加订阅」进来: 创建后回流到池总览并打开编辑器
-  const fromPool = searchParams.get("from") === "pool";
   function afterCreateNavigate(id: string) {
-    if (fromPool) {
-      navigate(`/pool?edit=${id}`, { replace: true });
-      return;
-    }
     navigate(returnTo ?? `/subscriptions/${id}`);
   }
   const queryClient = useQueryClient();
   const providers = useProviders();
   const createMut = useCreateSubscription();
   const vms = useVirtualModels();
-  // 全局路由模式 + ?from=pool 覆盖: 从 Pool 页面跳转过来时强制 pool 模式
-  const settingsQuery = useSettings();
-  const poolMode = searchParams.get("from") === "pool" || (settingsQuery.data?.routing_mode ?? "slots") === "pool";
 
   const [importOpen, setImportOpen] = useState(false);
   const onboardingDoneByImportRef = useRef(false);
@@ -359,7 +349,7 @@ export function SubscriptionNewPage() {
         endpoint_id: endpoint.id,
         display_name: displayName,
         model_slots: placeholderSlots,
-        routing_group: fromPool ? "pool" : "classic",
+        routing_group: "classic",
       });
       await queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
 
@@ -439,7 +429,7 @@ export function SubscriptionNewPage() {
         model_slots: placeholderSlots,
         disguise: kiroPayload.disguise,
         profile_arn_override: kiroPayload.profileArn,
-        routing_group: fromPool ? "pool" : "classic",
+        routing_group: "classic",
       });
       await queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
       // Kiro 无 /models 端点, 直接拿 example_models 作初始值
@@ -509,7 +499,7 @@ export function SubscriptionNewPage() {
             endpoint.url_params_used.map((id) => [id, (urlParams[id] ?? "").trim()]),
           ),
         },
-        routing_group: fromPool ? "pool" : "classic",
+        routing_group: "classic",
       };
       const created = await createMut.mutateAsync(input);
       if (isSystemOne) {
@@ -714,7 +704,7 @@ export function SubscriptionNewPage() {
           ? { models_url: customProbe.modelsUrl }
           : {}),
       },
-      routing_group: fromPool ? "pool" : "classic",
+      routing_group: "classic",
     };
 
     setSubmitting(true);
@@ -1187,11 +1177,6 @@ export function SubscriptionNewPage() {
                     点「获取模型列表」探测成功变下拉, 没点 / 失败就是手动输入 */}
                 {isCustom && (
                   <div style={{ marginBottom: 24 }}>
-                    {poolMode && !isSystemOne && (
-                      <div className="field-hint" style={{ marginTop: 0, marginBottom: 12 }}>
-                        {t("subscriptionNew.poolModeHint")}
-                      </div>
-                    )}
                     <div className="field-hint" style={{ marginTop: 0, marginBottom: 12 }}>
                       {t(isSystemOne ? "subscriptionNew.customSystemoneSlotsHint" : "subscriptionNew.slotsHint")}
                     </div>
@@ -1291,11 +1276,6 @@ export function SubscriptionNewPage() {
 
             {step === 2 && provider && (
               <>
-                {poolMode && !isSystemOne && (
-                  <div className="field-hint" style={{ marginTop: 0, marginBottom: 12 }}>
-                    {t("subscriptionNew.poolModeHint")}
-                  </div>
-                )}
                 <ModelSlotPicker
                   value={slots}
                   onChange={setSlots}

@@ -144,7 +144,7 @@ export function PoolPage() {
       </div>
 
       <div className="page-actions" style={{ marginBottom: 12 }}>
-        <Button onClick={() => navigate("/subscriptions/new?from=pool")}>
+        <Button onClick={() => navigate("/pool/new")}>
           + {t("pool.addSubscription")}
         </Button>
       </div>
