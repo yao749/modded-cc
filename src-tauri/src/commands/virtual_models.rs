@@ -85,3 +85,12 @@ pub async fn update_virtual_model(
     }
     Ok(())
 }
+
+/// 一次返回全部订阅的能力分类池条目 (按订阅 + 能力 + 优先级排序).
+/// 池总览矩阵页需要: 逐个订阅 invoke `load_model_pool` 是 N 次往返。
+#[tauri::command]
+pub async fn list_model_pools(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::subscription::store::ModelPoolEntry>> {
+    crate::subscription::store::load_all_model_pools(&state.db).await
+}

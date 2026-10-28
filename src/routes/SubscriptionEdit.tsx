@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { ArrowLeft, TriangleAlert, LoaderCircle } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -46,6 +46,7 @@ import type {
   AuthHeaderFormat,
   ModelInfo,
   ModelPoolEntry,
+  PoolTestItem,
   ModelSlots,
   QuotaPeriod,
   RefreshModelListResult,
@@ -131,6 +132,13 @@ export function SubscriptionEditPage() {
   /** 池模式: 该订阅的能力链条目 (与订阅字段一起保存) */
   const [poolEntries, setPoolEntries] = useState<ModelPoolEntry[]>([]);
   const [poolSaving, setPoolSaving] = useState(false);
+  /** 池模式批量测试: 逐模型结果 (跨 5 个能力分类) */
+  const [poolTestRunning, setPoolTestRunning] = useState(false);
+  const [poolTestItems, setPoolTestItems] = useState<
+    { capability: string; item: PoolTestItem }[] | null
+  >(null);
+  /** ?test=1 自动测试只跑一次 */
+  const didAutoTest = useRef(false);
 
   useEffect(() => {
     if (subQuery.data) {
@@ -183,6 +191,16 @@ export function SubscriptionEditPage() {
       cancelled = true;
     };
   }, [poolMode, id]);
+
+  // 从池总览点「测试」进入 (?test=1) 时自动跑一轮按列表测试, 跑完清掉参数避免刷新重复
+  useEffect(() => {
+    if (!poolMode || !id) return;
+    if (searchParams.get("test") !== "1") return;
+    if (didAutoTest.current) return;
+    didAutoTest.current = true;
+    void testAllPoolModels();
+    navigate(`/pool/subscriptions/${id}`, { replace: true });
+  }, [poolMode, id, searchParams, navigate]);
 
   if (!id) return null;
 
@@ -300,6 +318,34 @@ export function SubscriptionEditPage() {
     if (result.ok && result.state_reset) {
       queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
       queryClient.invalidateQueries({ queryKey: ["subscription", id] });
+    }
+  }
+
+  /**
+   * 池模式: 按能力链列表逐个模型测试。
+   * 不走 test_connection —— 那个用四槽选出的"代表模型", 对池订阅可能测到
+   * 根本不在池里、或 key 未开通的模型 (403 AccessDenied), 结论没参考价值。
+   */
+  async function testAllPoolModels() {
+    if (!id) return;
+    setPoolTestRunning(true);
+    setPoolTestItems(null);
+    try {
+      const out: { capability: string; item: PoolTestItem }[] = [];
+      for (const cap of ["vision", "llm", "multimodal", "speech", "embedding"]) {
+        try {
+          const items = await api.testPoolConnection(id, cap);
+          for (const item of items) {
+            if (item.model_name === "(空)") continue; // 空分类占位, 不计入
+            out.push({ capability: cap, item });
+          }
+        } catch {
+          // 单个分类失败不影响其他分类
+        }
+      }
+      setPoolTestItems(out);
+    } finally {
+      setPoolTestRunning(false);
     }
   }
 
@@ -661,7 +707,7 @@ export function SubscriptionEditPage() {
       {/* 底部常驻操作区: 与顶栏对称地挂在 .page-flow 之外, 不随内容滚动。
           反馈紧挨着触发它的按钮 —— 结果若跟着内容滚动, 用户在内容区底部点保存就看不见。 */}
       <div className="page-foot">
-        {(testResult || saveError) && (
+        {(testResult || saveError || (poolMode && poolTestItems)) && (
           <div className="page-foot-feedback">
             <div className="page-col space-y-2">
               {testResult && (
@@ -684,6 +730,33 @@ export function SubscriptionEditPage() {
                   <AlertDescription>{saveError}</AlertDescription>
                 </Alert>
               )}
+              {poolMode && poolTestItems && (() => {
+                const enabled = poolTestItems.filter((x) => x.item.enabled);
+                const okN = enabled.filter((x) => x.item.ok).length;
+                const fails = enabled.filter((x) => !x.item.ok);
+                return (
+                  <Alert variant={fails.length === 0 ? "default" : "destructive"}>
+                    <AlertDescription>
+                      <div>
+                        按列表测试完成: 启用 {enabled.length} 个 · 成功 {okN} · 失败 {fails.length}
+                      </div>
+                      {fails.length > 0 && (
+                        <div className="mt-1 text-xs">
+                          失败:{" "}
+                          {fails
+                            .map(
+                              (f) =>
+                                `${f.item.model_name} (${f.capability}${
+                                  f.item.http_status ? ` · HTTP ${f.item.http_status}` : ""
+                                })`,
+                            )
+                            .join("、")}
+                        </div>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -697,8 +770,17 @@ export function SubscriptionEditPage() {
               }
             />
             <div className="page-foot-actions">
-              <Button variant="outline" size="sm" onClick={testConnection}>
-                {t("subscriptionEdit.testConn")}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => (poolMode ? void testAllPoolModels() : void testConnection())}
+                disabled={poolTestRunning}
+              >
+                {poolTestRunning
+                  ? "测试中…"
+                  : poolMode
+                    ? "按列表测试全部模型"
+                    : t("subscriptionEdit.testConn")}
               </Button>
               <Button variant="destructive" size="sm" onClick={() => setDeleteDialog(true)}>
                 {t("common.delete")}

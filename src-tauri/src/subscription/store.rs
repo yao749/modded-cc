@@ -663,6 +663,139 @@ pub async fn save_quota_usage_snapshot(
     Ok(())
 }
 
+// ============== 能力分类模型池 CRUD ==============
+
+use serde::{Deserialize, Serialize};
+use serde_json as sj;
+
+/// 模型池中的一条记录: 某订阅下, 某模型, 归属于某能力分类, 在该分类池内的优先级.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPoolEntry {
+    pub id: String,
+    pub subscription_id: Uuid,
+    pub capability: String,
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+    /// 该模型支持的输入模态, 如 ["text"] / ["text","image"] / ["text","image","audio"].
+    /// 借鉴 DSH 的 input 字段. None 表示未声明, 路由时兜底当作 ["text"].
+    pub supported_inputs: Option<Vec<String>>,
+}
+
+/// 从 capability 推断默认的 supported_inputs (新建条目时用).
+pub fn default_inputs_for_capability(cap: &str) -> Vec<String> {
+    match cap {
+        "vision" | "multimodal" => vec!["text".into(), "image".into()],
+        "speech" => vec!["text".into(), "audio".into()],
+        _ => vec!["text".into()],
+    }
+}
+
+/// 一行 `subscription_model_pool` → [`ModelPoolEntry`].
+fn row_to_pool_entry(row: &sqlx::sqlite::SqliteRow) -> AppResult<ModelPoolEntry> {
+    let sub_id_str: String = row.try_get("subscription_id")?;
+    let sub = Uuid::parse_str(&sub_id_str)
+        .map_err(|e| AppError::internal(format!("invalid uuid: {e}")))?;
+    let inputs_raw: Option<String> = row.try_get("supported_inputs")?;
+    let supported_inputs: Option<Vec<String>> =
+        inputs_raw.and_then(|s| sj::from_str::<Vec<String>>(&s).ok());
+    Ok(ModelPoolEntry {
+        id: row.try_get("id")?,
+        subscription_id: sub,
+        capability: row.try_get("capability")?,
+        model_name: row.try_get("model_name")?,
+        priority: row.try_get("priority")?,
+        enabled: row.try_get::<i64, _>("enabled")? != 0,
+        supported_inputs,
+    })
+}
+
+/// 读某个订阅的全部模型池内容, 按 capability + priority 排序.
+pub async fn load_model_pool(pool: &SqlitePool, sub_id: Uuid) -> AppResult<Vec<ModelPoolEntry>> {
+    let rows = sqlx::query(
+        "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
+         FROM subscription_model_pool
+         WHERE subscription_id = ?
+         ORDER BY capability ASC, priority ASC",
+    )
+    .bind(sub_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(row_to_pool_entry(&row)?);
+    }
+    Ok(out)
+}
+
+/// 覆盖写某个订阅的模型池 —— 先删全部, 再批量插入. 一个事务完成.
+pub async fn save_model_pool(
+    pool: &SqlitePool,
+    sub_id: Uuid,
+    entries: &[ModelPoolEntry],
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    save_model_pool_on(&mut tx, sub_id, entries).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 同 [`save_model_pool`], 但跑在调用方的连接/事务上 (备份导入要和外层事务原子提交).
+pub async fn save_model_pool_on(
+    conn: &mut SqliteConnection,
+    sub_id: Uuid,
+    entries: &[ModelPoolEntry],
+) -> AppResult<()> {
+    sqlx::query("DELETE FROM subscription_model_pool WHERE subscription_id = ?")
+        .bind(sub_id.to_string())
+        .execute(&mut *conn)
+        .await?;
+
+    let now = Utc::now().timestamp_millis();
+    for e in entries {
+        let inputs_json = e
+            .supported_inputs
+            .as_ref()
+            .map(|v| sj::to_string(v).unwrap_or_else(|_| "[]".into()))
+            .unwrap_or_else(|| "[]".into());
+        sqlx::query(
+            "INSERT INTO subscription_model_pool
+             (id, subscription_id, capability, model_name, priority, enabled, supported_inputs, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&e.id)
+        .bind(sub_id.to_string())
+        .bind(&e.capability)
+        .bind(&e.model_name)
+        .bind(e.priority)
+        .bind(e.enabled as i64)
+        .bind(&inputs_json)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// 读全部订阅的模型池 (池总览/备份导出用), 按订阅 + 能力 + 优先级排序.
+pub async fn load_all_model_pools(pool: &SqlitePool) -> AppResult<Vec<ModelPoolEntry>> {
+    let rows = sqlx::query(
+        "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
+         FROM subscription_model_pool
+         ORDER BY subscription_id ASC, capability ASC, priority ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(row_to_pool_entry(&row)?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -40,8 +40,7 @@ export function PoolPage() {
   /** 编辑器里的模型发现列表 (供「自动填充」一键导入; null = 还没拉过) */
   const [editModels, setEditModels] = useState<ModelInfo[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
-  /** 管理订阅区: 正在测试连接的订阅 id / 待删除的订阅 */
-  const [testingId, setTestingId] = useState<string | null>(null);
+  /** 管理订阅区: 待删除的订阅 */
   const [deleting, setDeleting] = useState<SubscriptionDto | null>(null);
 
   const setEnabledMut = useSetSubscriptionEnabled();
@@ -77,15 +76,8 @@ export function PoolPage() {
     }
   }
 
-  async function testSub(id: string) {
-    setTestingId(id);
-    try {
-      await api.testConnection(id);
-      await queryClient.invalidateQueries({ queryKey: ["subscriptions"] });
-    } finally {
-      setTestingId(null);
-    }
-  }
+  // 池的测试按「能力链列表逐个模型」跑, 统一在池编辑页做 (?test=1 进入即测),
+  // 这里只负责跳转, 不再用 test_connection 的四槽代表模型 (会测到 key 未开通的模型)。
 
   const bySub = useMemo(() => {
     const m = new Map<string, ModelPoolEntry[]>();
@@ -285,10 +277,9 @@ export function PoolPage() {
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={testingId === sub.id}
-                          onClick={() => void testSub(sub.id)}
+                          onClick={() => navigate(`/pool/subscriptions/${sub.id}?test=1`)}
                         >
-                          {testingId === sub.id ? t("pool.manage.testing") : t("pool.manage.test")}
+                          {t("pool.manage.test")}
                         </Button>
                         <Button
                           size="sm"

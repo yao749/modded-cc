@@ -867,6 +867,287 @@ pub async fn refresh_model_list(
     }
 }
 
+// ============== 能力分类模型池命令 ==============
+
+/// 能力分类模型池里单个模型的连通性测试结果 —— 用于逐行显示绿色勾/红色叉。
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolTestItem {
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+    pub ok: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+}
+
+/// 批量测试某个能力分类下**所有模型**, 返回每个模型的连通性结果.
+/// 按 priority ASC 顺序依次 probe, 不中断 (一个失败继续下一个).
+/// 未启用的模型跳过 probe, 直接标记 enabled=false.
+/// 前端用这个结果在每行模型前显示绿色勾 (ok) / 红色叉 (fail) / 灰色 (未启用).
+///
+/// 与 `test_connection` 的区别: 后者用四槽选出的单个"代表模型"探测, 对池订阅会
+/// 拿一个未必在池里的模型 (例如 key 未开通的 qwen3.6-plus) 直接 403; 本命令严格
+/// 只测该分类池里列出的模型, 逐个给出可用性, 便于用户据此禁用不可用的模型。
+#[tauri::command]
+pub async fn test_pool_connection(
+    state: State<'_, AppState>,
+    id: String,
+    capability: String,
+) -> AppResult<Vec<PoolTestItem>> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
+    let rt = {
+        let subs = state.subscriptions.read().await;
+        subs.get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::SubscriptionNotFound(id.to_string()))?
+    };
+    let row = {
+        let g = rt.read().await;
+        g.row.clone()
+    };
+
+    // 拉该分类下全部模型 (包括未启用的, 未启用也要返回给前端显示灰色)
+    let mut all = crate::subscription::store::load_model_pool(&state.db, id).await?;
+    all.retain(|e| e.capability == capability.as_str());
+    all.sort_by_key(|e| e.priority);
+
+    if all.is_empty() {
+        return Ok(vec![PoolTestItem {
+            model_name: "(空)".into(),
+            priority: 0,
+            enabled: false,
+            ok: false,
+            message: format!("该分类 ({capability}) 没有模型, 请先添加"),
+            http_status: None,
+        }]);
+    }
+
+    let mut results = Vec::with_capacity(all.len());
+    for entry in &all {
+        if !entry.enabled {
+            results.push(PoolTestItem {
+                model_name: entry.model_name.clone(),
+                priority: entry.priority,
+                enabled: false,
+                ok: false,
+                message: "未启用, 跳过测试".into(),
+                http_status: None,
+            });
+            continue;
+        }
+        let clock = crate::subscription::schedule::WallClock::now();
+        let probe = ping::probe_subscription(&state, &row, &entry.model_name, None, clock).await;
+        results.push(PoolTestItem {
+            model_name: entry.model_name.clone(),
+            priority: entry.priority,
+            enabled: true,
+            ok: probe.ok,
+            message: probe.message,
+            http_status: probe.http_status,
+        });
+    }
+    Ok(results)
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelPoolEntryDto {
+    pub id: String,
+    /// 前端会刻意剥离此字段 (外部 SaveModelPoolInput 已经带了 subscription_id),
+    /// 所以用 serde(default) 让 serde 反序列化时忽略缺失值 —— Rust handler 最终
+    /// 会用 input.subscription_id 覆盖这个字段, 不会留空.
+    #[serde(default)]
+    pub subscription_id: String,
+    pub capability: String,
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+    #[serde(default)]
+    pub supported_inputs: Option<Vec<String>>,
+}
+
+impl From<crate::subscription::store::ModelPoolEntry> for ModelPoolEntryDto {
+    fn from(e: crate::subscription::store::ModelPoolEntry) -> Self {
+        Self {
+            id: e.id,
+            subscription_id: e.subscription_id.to_string(),
+            capability: e.capability,
+            model_name: e.model_name,
+            priority: e.priority,
+            enabled: e.enabled,
+            supported_inputs: e.supported_inputs,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn load_model_pool(
+    state: State<'_, AppState>,
+    subscription_id: String,
+) -> AppResult<Vec<ModelPoolEntryDto>> {
+    use std::str::FromStr;
+    let id = Uuid::from_str(&subscription_id)
+        .map_err(|e| AppError::BadRequest(format!("invalid uuid: {e}")))?;
+    let entries = crate::subscription::store::load_model_pool(&state.db, id).await?;
+    Ok(entries.into_iter().map(ModelPoolEntryDto::from).collect())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SaveModelPoolInput {
+    pub subscription_id: String,
+    pub entries: Vec<ModelPoolEntryDto>,
+}
+
+#[tauri::command]
+pub async fn save_model_pool(
+    state: State<'_, AppState>,
+    input: SaveModelPoolInput,
+) -> AppResult<()> {
+    use std::str::FromStr;
+    let id = Uuid::from_str(&input.subscription_id)
+        .map_err(|e| AppError::BadRequest(format!("invalid uuid: {e}")))?;
+    // 生成缺失的 id (前端可能新添加了 entry 但没生成 id)
+    let entries: Vec<crate::subscription::store::ModelPoolEntry> = input
+        .entries
+        .into_iter()
+        .map(|e| {
+            let real_id = if e.id.is_empty() {
+                Uuid::new_v4().to_string()
+            } else {
+                e.id
+            };
+            crate::subscription::store::ModelPoolEntry {
+                id: real_id,
+                subscription_id: id,
+                capability: e.capability,
+                model_name: e.model_name,
+                priority: e.priority,
+                enabled: e.enabled,
+                supported_inputs: e.supported_inputs,
+            }
+        })
+        .collect();
+    crate::subscription::store::save_model_pool(&state.db, id, &entries).await?;
+    // 池条目即接入: 按启用条目同步能力虚拟模型的绑定 (只动当前订阅)
+    sync_capability_bindings_from_pool(&state, id, &entries).await?;
+    Ok(())
+}
+
+/// 计算某个能力分类下, 当前订阅的绑定是否要变化。
+/// 返回 None = 无需变化; Some(ids) = 目标绑定列表 (含其他订阅, 保序)。
+///
+/// 池条目是池接入的唯一来源: 有 ≥1 条启用条目 → 绑定; 全部禁用/删除 → 解绑。
+/// 手动在虚拟模型页加的绑定会被下一次池保存覆盖 (± 语义只动当前订阅)。
+fn pool_binding_target(current: &[Uuid], sub_id: Uuid, has_enabled_entry: bool) -> Option<Vec<Uuid>> {
+    let present = current.contains(&sub_id);
+    if present == has_enabled_entry {
+        return None;
+    }
+    let mut ids = current.to_vec();
+    if has_enabled_entry {
+        ids.push(sub_id);
+    } else {
+        ids.retain(|x| *x != sub_id);
+    }
+    Some(ids)
+}
+
+/// 保存池条目后, 把 5 个能力虚拟模型的订阅绑定同步成「有条目的订阅」集合。
+/// 读锁取快照 → 无锁落库 → 写锁更新内存, 与 `update_virtual_model` 同序, 避免持锁 await。
+async fn sync_capability_bindings_from_pool(
+    state: &State<'_, AppState>,
+    sub_id: Uuid,
+    entries: &[crate::subscription::store::ModelPoolEntry],
+) -> AppResult<()> {
+    use crate::virtual_model::model::RoutingParadigm;
+    use crate::virtual_model::VirtualModelName;
+
+    // 1. 读快照, 算出每个能力名的目标绑定
+    let changes: Vec<(VirtualModelName, Vec<Uuid>)> = {
+        let guard = state.virtual_models.read().await;
+        let mut out = Vec::new();
+        for name in VirtualModelName::all() {
+            if name.paradigm() != RoutingParadigm::Pool {
+                continue;
+            }
+            let Some(capability) = name.capability() else {
+                continue;
+            };
+            let has_enabled = entries
+                .iter()
+                .any(|e| e.capability == capability.as_str() && e.enabled);
+            let Some(cfg) = guard.get(&name) else {
+                continue;
+            };
+            if let Some(ids) = pool_binding_target(&cfg.subscription_ids, sub_id, has_enabled) {
+                out.push((name, ids));
+            }
+        }
+        out
+    };
+
+    if changes.is_empty() {
+        return Ok(());
+    }
+
+    // 2. 落库 (不持锁)
+    for (name, ids) in &changes {
+        crate::virtual_model::store::save_bindings(&state.db, *name, ids).await?;
+    }
+
+    // 3. 更新内存表
+    let mut guard = state.virtual_models.write().await;
+    for (name, ids) in changes {
+        if let Some(cfg) = guard.get_mut(&name) {
+            cfg.subscription_ids = ids;
+            cfg.last_used_index = 0;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pool_binding_sync_tests {
+    use super::pool_binding_target;
+    use uuid::Uuid;
+
+    #[test]
+    fn no_change_when_state_matches_entries() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // 已绑定 + 有启用条目 → 不动
+        assert!(pool_binding_target(&[a, b], a, true).is_none());
+        // 未绑定 + 无启用条目 → 不动
+        assert!(pool_binding_target(&[a, b], Uuid::new_v4(), false).is_none());
+    }
+
+    #[test]
+    fn adds_sub_when_first_enabled_entry_appears() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let ids = pool_binding_target(&[a], b, true).expect("应追加绑定");
+        assert_eq!(ids, vec![a, b], "追加在末尾, 其他订阅保序");
+    }
+
+    #[test]
+    fn removes_sub_when_all_entries_gone_or_disabled() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let ids = pool_binding_target(&[a, b], a, false).expect("应解除绑定");
+        assert_eq!(ids, vec![b], "只摘当前订阅, 其余原样");
+    }
+
+    #[test]
+    fn only_touches_the_saved_subscription() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        // a 解绑不影响 b/c 的相对顺序
+        let ids = pool_binding_target(&[c, a, b], a, false).unwrap();
+        assert_eq!(ids, vec![c, b]);
+    }
+}
+
 /// 新建自定义订阅的表单在**保存前**拉模型列表 (issue #44)。只发一次 GET, 不写库 ——
 /// 刻意不复用内置向导「先落占位订阅再 refresh」的两步流程, 那会留下 `(pending)` 残留订阅。
 #[derive(Debug, Deserialize)]

@@ -104,7 +104,7 @@ use crate::commands::receipts::ReceiptRange;
 use crate::commands::requests::RequestLogFilters;
 use crate::commands::statistics::{BreakdownBy, StatsRange};
 use crate::commands::subscriptions::{
-    CreateSubscriptionInput, ProbeCustomModelsInput, SubscriptionPatch,
+    CreateSubscriptionInput, ProbeCustomModelsInput, SaveModelPoolInput, SubscriptionPatch,
 };
 use crate::commands::virtual_models::UpdateVirtualModelInput;
 use crate::settings::model::SettingsPatch;
@@ -135,6 +135,9 @@ web_commands! {
     update_slot_schedules(id: String, schedules: SlotSchedules) => commands::subscriptions::update_slot_schedules(st, args.id, args.schedules).await,
     get_host_clock() => commands::subscriptions::get_host_clock().await,
     reset_total_quota_usage(id: String) => commands::subscriptions::reset_total_quota_usage(st, args.id).await,
+    test_pool_connection(id: String, capability: String) => commands::subscriptions::test_pool_connection(st, args.id, args.capability).await,
+    load_model_pool(subscription_id: String) => commands::subscriptions::load_model_pool(st, args.subscription_id).await,
+    save_model_pool(input: SaveModelPoolInput) => commands::subscriptions::save_model_pool(st, args.input).await,
     // ChatGPT OAuth
     start_chatgpt_device_flow() => commands::oauth::start_chatgpt_device_flow(st).await,
     poll_chatgpt_device_code(device_code: String) => commands::oauth::poll_chatgpt_device_code(st, args.device_code).await,
@@ -151,6 +154,7 @@ web_commands! {
     update_kiro_disguise_fields(subscription_id: String, disguise: KiroDisguise) => commands::oauth::update_kiro_disguise_fields(st, args.subscription_id, args.disguise).await,
     // virtual models
     list_virtual_models() => commands::virtual_models::list_virtual_models(st).await,
+    list_model_pools() => commands::virtual_models::list_model_pools(st).await,
     update_virtual_model(name: String, input: UpdateVirtualModelInput) => commands::virtual_models::update_virtual_model(st, args.name, args.input).await,
     // request logs
     list_requests(page: u32, page_size: u32, filters: Option<RequestLogFilters>) => commands::requests::list_requests(st, args.page, args.page_size, args.filters).await,
