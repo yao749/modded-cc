@@ -326,7 +326,13 @@ pub async fn list_subscriptions(
         // 按路由组隔离: classic 与 pool 互不可见, 同一个订阅只属于一个组。
         // group 为空时返回全部 (统计/日志/虚拟模型等需要全量视图)。
         if let Some(want) = group.as_deref() {
-            if guard.row.routing_group.as_str() != want {
+            // 历史/异常空值一律视为 classic, 避免该订阅在两个列表里都消失
+            let actual = if guard.row.routing_group.is_empty() {
+                "classic"
+            } else {
+                guard.row.routing_group.as_str()
+            };
+            if actual != want {
                 continue;
             }
         }
