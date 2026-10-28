@@ -449,10 +449,11 @@ pub async fn delete(pool: &SqlitePool, id: &Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// 从能力分类模型池里取某订阅 + 某 capability 的全部启用模型, 按 priority 升序.
-/// 池链失败降序: 把某订阅某能力链里的一个模型挪到链尾 (priority = 当前 MAX + 1)。
-/// 调度方案 B — chain 模式下模型 attempt 失败后调用, 下一次请求它就排到最后,
-/// 不再每次都从坏模型开始撞墙。模型行已被删除时影响 0 行, 视为成功 (尽力而为)。
+/// 池链失败降序 (队列语义): 把某订阅某能力链里的一个模型从队头挪到队尾
+/// (priority = 当前 MAX + 1)。chain 模式某模型 attempt 失败后调用 —— 下一次请求
+/// 它排到最后, 队列继续从新的队头开始, 一直失败就一直往队尾挪。
+/// 因为直接写库, 重启/刷新都不会回到原位 (编辑器里能看到顺序真的变了)。
+/// 模型行已被删除时影响 0 行, 视为成功 (尽力而为)。
 pub async fn demote_pool_model(
     pool: &SqlitePool,
     sub_id: Uuid,
@@ -460,7 +461,7 @@ pub async fn demote_pool_model(
     model_name: &str,
 ) -> AppResult<()> {
     // 单条 UPDATE 内的标量子查询在 SQLite 里是原子的: MAX 读到的是语句开始前的快照,
-    // 并发降序最多产生并列 priority, 读取端 ORDER BY priority 的次序稳定即可。
+    // 并发降序最多产生并列 priority, 读取端按 (priority, id) 排序保证次序确定。
     sqlx::query(
         "UPDATE subscription_model_pool
          SET priority = (SELECT COALESCE(MAX(priority), 0) + 1 FROM subscription_model_pool
@@ -477,6 +478,8 @@ pub async fn demote_pool_model(
     Ok(())
 }
 
+/// 从能力分类模型池里取某订阅 + 某 capability 的全部启用模型, 按 priority 升序.
+/// 并列 priority (并发降序的产物) 按 id 定序, 避免两次请求读到不同队头。
 pub async fn list_pool_models(
     pool: &SqlitePool,
     sub_id: Uuid,
@@ -485,7 +488,7 @@ pub async fn list_pool_models(
     let rows = sqlx::query(
         "SELECT model_name, supported_inputs FROM subscription_model_pool
          WHERE subscription_id = ? AND capability = ? AND enabled = 1
-         ORDER BY priority ASC",
+         ORDER BY priority ASC, id ASC",
     )
     .bind(sub_id.to_string())
     .bind(capability)
@@ -738,12 +741,13 @@ fn row_to_pool_entry(row: &sqlx::sqlite::SqliteRow) -> AppResult<ModelPoolEntry>
 }
 
 /// 读某个订阅的全部模型池内容, 按 capability + priority 排序.
+/// 与 `list_pool_models` 同样的 (priority, id) 定序: 编辑器看到的队头 = 调度实际用的队头。
 pub async fn load_model_pool(pool: &SqlitePool, sub_id: Uuid) -> AppResult<Vec<ModelPoolEntry>> {
     let rows = sqlx::query(
         "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
          FROM subscription_model_pool
          WHERE subscription_id = ?
-         ORDER BY capability ASC, priority ASC",
+         ORDER BY capability ASC, priority ASC, id ASC",
     )
     .bind(sub_id.to_string())
     .fetch_all(pool)
@@ -811,7 +815,7 @@ pub async fn load_all_model_pools(pool: &SqlitePool) -> AppResult<Vec<ModelPoolE
     let rows = sqlx::query(
         "SELECT id, subscription_id, capability, model_name, priority, enabled, supported_inputs
          FROM subscription_model_pool
-         ORDER BY subscription_id ASC, capability ASC, priority ASC",
+         ORDER BY subscription_id ASC, capability ASC, priority ASC, id ASC",
     )
     .fetch_all(pool)
     .await?;
@@ -1184,5 +1188,51 @@ mod jev_tests {
 
         // 已删除/不存在的模型: 影响 0 行, 不报错
         demote_pool_model(&pool, row.id, "llm", "not-in-chain").await.expect("missing model ok");
+    }
+
+    /// 队列语义: 队头失败 → 挪到队尾, 队列继续从新队头开始; 全链各失败一次正好
+    /// 轮转一圈回到原序。每次降序都是独立的 DB 读 (list_pool_models), 顺带证明
+    /// 顺序是持久的, 不是内存态。
+    #[tokio::test]
+    async fn demote_pool_model_rotates_like_a_queue() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let row = SubscriptionRow::test_fixture("zhipu", "default");
+        insert(&pool, &row).await.expect("insert");
+
+        let entries: Vec<ModelPoolEntry> = ["glm-a", "glm-b", "glm-c"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| ModelPoolEntry {
+                id: format!("llm-{name}"),
+                subscription_id: row.id,
+                capability: "llm".into(),
+                model_name: (*name).into(),
+                priority: i as i64 + 1,
+                enabled: true,
+                supported_inputs: Some(default_inputs_for_capability("llm")),
+            })
+            .collect();
+        save_model_pool(&pool, row.id, &entries).await.expect("save");
+
+        let order = |rows: Vec<(String, Option<Vec<String>>)>| -> Vec<String> {
+            rows.into_iter().map(|(m, _)| m).collect()
+        };
+
+        // 队头失败三次, 每次失败后队头都前进一格 (环状轮转)
+        for (failed, expected) in [
+            ("glm-a", vec!["glm-b", "glm-c", "glm-a"]),
+            ("glm-b", vec!["glm-c", "glm-a", "glm-b"]),
+            ("glm-c", vec!["glm-a", "glm-b", "glm-c"]),
+        ] {
+            demote_pool_model(&pool, row.id, "llm", failed).await.expect("demote");
+            let got = order(list_pool_models(&pool, row.id, "llm").await.unwrap());
+            assert_eq!(got, expected, "demote {failed} 后");
+        }
+
+        // 顺序落在库里: 编辑器的读法 (load_model_pool) 与调度读法一致
+        let pool_entries = load_model_pool(&pool, row.id).await.unwrap();
+        let names: Vec<&str> = pool_entries.iter().map(|e| e.model_name.as_str()).collect();
+        assert_eq!(names, vec!["glm-a", "glm-b", "glm-c"]);
     }
 }
