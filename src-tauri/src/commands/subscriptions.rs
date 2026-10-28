@@ -950,6 +950,62 @@ pub async fn test_pool_connection(
     Ok(results)
 }
 
+/// 单个模型的连通性测试 (增量测试用): 前端逐个模型调用, 每测完一个立刻上色,
+/// 不必等整条链跑完才出结果。与 `test_pool_connection` 同源 (同一个
+/// `ping::probe_subscription`), 只是粒度到一行。
+#[tauri::command]
+pub async fn test_pool_model(
+    state: State<'_, AppState>,
+    id: String,
+    capability: String,
+    model_name: String,
+) -> AppResult<PoolTestItem> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
+    let rt = {
+        let subs = state.subscriptions.read().await;
+        subs.get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::SubscriptionNotFound(id.to_string()))?
+    };
+    let row = {
+        let g = rt.read().await;
+        g.row.clone()
+    };
+
+    // 只测确实在这条能力链里的模型: 前端刚加、还没保存的行不该被当成"测试失败"
+    let entry = crate::subscription::store::load_model_pool(&state.db, id)
+        .await?
+        .into_iter()
+        .find(|e| e.capability == capability.as_str() && e.model_name == model_name);
+    let Some(entry) = entry else {
+        return Err(AppError::BadRequest(format!(
+            "模型 {model_name} 不在 {capability} 能力链里 (可能还没保存)"
+        )));
+    };
+
+    if !entry.enabled {
+        return Ok(PoolTestItem {
+            model_name,
+            priority: entry.priority,
+            enabled: false,
+            ok: false,
+            message: "未启用, 跳过测试".into(),
+            http_status: None,
+        });
+    }
+
+    let clock = crate::subscription::schedule::WallClock::now();
+    let probe = ping::probe_subscription(&state, &row, &model_name, None, clock).await;
+    Ok(PoolTestItem {
+        model_name,
+        priority: entry.priority,
+        enabled: true,
+        ok: probe.ok,
+        message: probe.message,
+        http_status: probe.http_status,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelPoolEntryDto {
     pub id: String,

@@ -20,6 +20,9 @@ import { api } from "@/api/tauri";
 
 const CAPABILITIES: CapabilityCategory[] = ["vision", "llm", "multimodal", "speech", "embedding"];
 
+/** 测试结果的行键: 同一模型可能同时挂在两条能力链里, 只用模型名会串色 */
+export const poolTestKey = (cap: string, model: string) => `${cap}\u0000${model}`;
+
 interface Props {
   /** 当前订阅 id (load/save 时用) */
   subscriptionId: string;
@@ -32,6 +35,21 @@ interface Props {
   /** 刷新模型列表; 返回拉取到的模型, 供「自动获取并填充」在同一次点击内直接使用 */
   onRefresh?: () => void | Promise<ModelInfo[] | null>;
   disabled?: boolean;
+  /**
+   * 由父组件托管测试结果: 传入后本组件不再自己跑测试, 颜色/进度/统计全部读这里。
+   * 页面级「按列表测试全部模型」和组件内「全部测试 <tab>」由此共用同一份结果 ——
+   * 否则两套状态各记一份, 用户点不同按钮会看到"颜色时有时无"。
+   */
+  externalTest?: {
+    /** 键 = poolTestKey(capability, model) */
+    results: Record<string, PoolTestItem>;
+    /** 正在测的那一行 */
+    testingKey: string | null;
+    running: boolean;
+    progress: { done: number; total: number } | null;
+    /** 触发某能力分类的逐行测试 */
+    run: (cap: CapabilityCategory) => void;
+  };
 }
 
 /** 5 个能力分类 Tab + 每类下多个模型行 (可排序/可切换启用/可删除). */
@@ -43,43 +61,97 @@ export function ModelPoolPicker({
   loading,
   onRefresh,
   disabled,
+  externalTest,
 }: Props) {
   const [active, setActive] = useState<CapabilityCategory>("llm");
   const [testLoading, setTestLoading] = useState(false);
-  /** 按 model_name 索引的测试结果, 用于每行前面显示 ✓/✗/- 状态 */
+  /** 测试结果: 键 = `能力分类\0模型名` —— 同一个模型可能同时挂在两条链里, 只用模型名会串色 */
   const [testResults, setTestResults] = useState<Record<string, PoolTestItem>>({});
+  /** 正在测的那一行 (逐行测试 → 该行单独转圈) */
+  const [testingKey, setTestingKey] = useState<string | null>(null);
+  /** 逐行测试进度 (仅当前 tab) */
+  const [testProgress, setTestProgress] = useState<{ done: number; total: number } | null>(null);
   /** 「自动获取并填充」的执行态 + 结果提示 */
   const [autoFillAllLoading, setAutoFillAllLoading] = useState(false);
   const [autoFillAllMsg, setAutoFillAllMsg] = useState<string | null>(null);
 
-  // 切换 tab 时清空上次测试结果
+  // 结果来源: 父组件托管时一律读 externalTest, 否则用本地自己跑出来的那份
+  const results = externalTest ? externalTest.results : testResults;
+  const activeTestingKey = externalTest ? externalTest.testingKey : testingKey;
+  const testRunning = externalTest ? externalTest.running : testLoading;
+  const testProg = externalTest ? externalTest.progress : testProgress;
+
+  // 切换 tab 不再清空结果: 各分类分开存, 切回来颜色还在 (之前清空是"颜色时有时无"的原因)
   function switchCap(c: CapabilityCategory) {
     setActive(c);
-    setTestResults({});
   }
 
   async function runPoolTest() {
+    if (testLoading) return;
+    const cap = active;
     setTestLoading(true);
-    setTestResults({});
+    setTestingKey(null);
     try {
-      const list = await api.testPoolConnection(subscriptionId, active);
-      const idx: Record<string, PoolTestItem> = {};
-      for (const item of list) {
-        idx[item.model_name] = item;
+      // 以库里的条目为准: 刚加还没保存的行发给后端只会报"不在链里", 先标灰并说明
+      const saved = await api.loadModelPool(subscriptionId).catch(() => [] as ModelPoolEntry[]);
+      const savedModels = new Set(
+        saved.filter((e) => e.capability === cap).map((e) => e.model_name),
+      );
+      const rows = entriesByCap[cap];
+
+      // 先铺一遍状态, 整列立刻有反馈: 未保存/未启用灰掉, 待测的留空转圈
+      const seed: Record<string, PoolTestItem> = { ...testResults };
+      for (const r of rows) {
+        const key = poolTestKey(cap, r.model_name);
+        if (!savedModels.has(r.model_name)) {
+          seed[key] = {
+            model_name: r.model_name,
+            priority: r.priority,
+            enabled: false,
+            ok: false,
+            message: "尚未保存到订阅, 保存后才能测试",
+          };
+        } else if (!r.enabled) {
+          seed[key] = {
+            model_name: r.model_name,
+            priority: r.priority,
+            enabled: false,
+            ok: false,
+            message: "未启用, 跳过测试",
+          };
+        } else {
+          delete seed[key];
+        }
       }
-      setTestResults(idx);
-    } catch (e) {
-      // 整批失败, 给一个占位
-      setTestResults({
-        "(error)": {
-          model_name: "(error)",
-          priority: 0,
-          enabled: false,
-          ok: false,
-          message: String(e),
-        },
-      });
+      setTestResults(seed);
+
+      // 逐行测试: 每测完一个就写一个结果, 颜色立刻出现, 不等整条链跑完
+      const queue = rows.filter((r) => r.enabled && savedModels.has(r.model_name));
+      setTestProgress({ done: 0, total: queue.length });
+      for (let i = 0; i < queue.length; i++) {
+        const r = queue[i];
+        const key = poolTestKey(cap, r.model_name);
+        setTestingKey(key);
+        try {
+          const item = await api.testPoolModel(subscriptionId, cap, r.model_name);
+          setTestResults((prev) => ({ ...prev, [key]: item }));
+        } catch (e) {
+          setTestResults((prev) => ({
+            ...prev,
+            [key]: {
+              model_name: r.model_name,
+              priority: r.priority,
+              enabled: true,
+              ok: false,
+              message: String(e),
+            },
+          }));
+        } finally {
+          setTestProgress({ done: i + 1, total: queue.length });
+        }
+      }
     } finally {
+      setTestingKey(null);
       setTestLoading(false);
     }
   }
@@ -313,12 +385,14 @@ export function ModelPoolPicker({
           <button
             type="button"
             className="btn sm"
-            onClick={runPoolTest}
-            disabled={disabled || testLoading}
+            onClick={() => (externalTest ? externalTest.run(active) : void runPoolTest())}
+            disabled={disabled || testRunning}
             title={`逐个测试 ${CAPABILITY_LABEL[active]} 分类下所有模型的连通性`}
           >
-            <RefreshCw size={12} className={testLoading ? "animate-spin" : undefined} />
-            {testLoading ? "测试中..." : `全部测试 ${CAPABILITY_LABEL[active]}`}
+            <RefreshCw size={12} className={testRunning ? "animate-spin" : undefined} />
+            {testRunning
+              ? `测试中 ${testProg?.done ?? 0}/${testProg?.total ?? 0}...`
+              : `全部测试 ${CAPABILITY_LABEL[active]}`}
           </button>
           {autoFillCandidates.length > 0 && (
             <button
@@ -364,52 +438,58 @@ export function ModelPoolPicker({
         路由时按优先级 (数字最小优先) 取可用模型; 首选失败自动降级到下一个.
       </div>
 
-      {/* 测试结果汇总条 — 批量测试后一行显示成功/失败/跳过统计 */}
-      {Object.keys(testResults).length > 0 && !testResults["(error)"] && (
-        <div
-          style={{
-            marginBottom: 10,
-            padding: "8px 12px",
-            borderRadius: 6,
-            border: "1px solid var(--border-2)",
-            background: "var(--bg-elev, transparent)",
-            fontSize: 12,
-            display: "flex",
-            gap: 14,
-            alignItems: "center",
-          }}
-        >
-          {(() => {
-            const items = Object.values(testResults);
-            const ok = items.filter((t) => t.enabled && t.ok).length;
-            const fail = items.filter((t) => t.enabled && !t.ok).length;
-            const skip = items.filter((t) => !t.enabled).length;
-            return (
-              <>
-                <span style={{ fontWeight: 600 }}>测试结果 ({items.length})</span>
-                {ok > 0 && (
-                  <span style={{ color: "#22c55e" }}>
-                    <Check size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
-                    成功 {ok}
-                  </span>
-                )}
-                {fail > 0 && (
-                  <span style={{ color: "#ef4444" }}>
-                    <X size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
-                    失败 {fail}
-                  </span>
-                )}
-                {skip > 0 && (
-                  <span style={{ color: "#9ca3af" }}>
-                    <Minus size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
-                    跳过 {skip}
-                  </span>
-                )}
-              </>
-            );
-          })()}
-        </div>
-      )}
+      {/* 测试结果汇总条 — 只看当前 tab 的行; 逐行测试时数字会一个个涨上来 */}
+      {(() => {
+        const items = Object.entries(results)
+          .filter(([k]) => k.startsWith(`${active}\u0000`))
+          .map(([, v]) => v);
+        if (items.length === 0) return null;
+        const ok = items.filter((t) => t.enabled && t.ok).length;
+        const fail = items.filter((t) => t.enabled && !t.ok).length;
+        const skip = items.filter((t) => !t.enabled).length;
+        const pending = testRunning && testProg ? testProg.total - testProg.done : 0;
+        return (
+          <div
+            style={{
+              marginBottom: 10,
+              padding: "8px 12px",
+              borderRadius: 6,
+              border: "1px solid var(--border-2)",
+              background: "var(--bg-elev, transparent)",
+              fontSize: 12,
+              display: "flex",
+              gap: 14,
+              alignItems: "center",
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>测试结果 ({items.length})</span>
+            {ok > 0 && (
+              <span style={{ color: "#22c55e" }}>
+                <Check size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
+                成功 {ok}
+              </span>
+            )}
+            {fail > 0 && (
+              <span style={{ color: "#ef4444" }}>
+                <X size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
+                失败 {fail}
+              </span>
+            )}
+            {skip > 0 && (
+              <span style={{ color: "#9ca3af" }}>
+                <Minus size={11} style={{ verticalAlign: -2, marginRight: 2 }} />
+                跳过 {skip}
+              </span>
+            )}
+            {pending > 0 && (
+              <span style={{ color: "#6b7280" }}>
+                <RefreshCw size={11} className="animate-spin" style={{ verticalAlign: -2, marginRight: 2 }} />
+                待测 {pending}
+              </span>
+            )}
+          </div>
+        );
+      })()}
 
       {/* 列头 */}
       <div
@@ -470,7 +550,8 @@ export function ModelPoolPicker({
             total={entriesByCap[active].length}
             models={models}
             disabled={disabled}
-            testItem={testResults[entry.model_name]}
+            testItem={results[poolTestKey(active, entry.model_name)]}
+            testing={activeTestingKey === poolTestKey(active, entry.model_name)}
             onModelNameChange={(v) => updateCap(active, idx, { model_name: v })}
             onInputsChange={(v) => updateCap(active, idx, { supported_inputs: v })}
             onEnabledToggle={() => updateCap(active, idx, { enabled: !entry.enabled })}
@@ -506,6 +587,7 @@ function EntryRow({
   models,
   disabled,
   testItem,
+  testing,
   onModelNameChange,
   onInputsChange,
   onEnabledToggle,
@@ -520,6 +602,8 @@ function EntryRow({
   disabled?: boolean;
   /** 该模型的连通性测试结果 (undefined = 未测过) */
   testItem?: PoolTestItem;
+  /** 正在测这一行 (逐行测试时该行单独转圈) */
+  testing?: boolean;
   onModelNameChange: (v: string) => void;
   onInputsChange: (v: InputModality[]) => void;
   onEnabledToggle: () => void;
@@ -571,8 +655,25 @@ function EntryRow({
         opacity: entry.enabled ? 1 : 0.55,
       }}
     >
-      {/* 连通性状态图标: 未测试→虚线圈问号 / 成功→绿圆白勾 / 失败→红圆白叉 / 未启用→灰圆白减号 */}
-      {!testItem ? (
+      {/* 连通性状态图标: 测试中→蓝圈转圈 / 未测试→虚线圈问号 / 成功→绿圆白勾 / 失败→红圆白叉 / 未启用→灰圆白减号 */}
+      {testing ? (
+        <div
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 11,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            border: "1.5px solid #93c5fd",
+            background: "transparent",
+          }}
+          title="正在测试..."
+        >
+          <RefreshCw size={12} className="animate-spin" color="#3b82f6" />
+        </div>
+      ) : !testItem ? (
         <div
           style={{
             width: 22,

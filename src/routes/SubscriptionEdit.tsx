@@ -27,7 +27,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { ModelSlotPicker } from "@/components/ModelSlotPicker";
-import { ModelPoolPicker } from "@/components/ModelPoolPicker";
+import { ModelPoolPicker, poolTestKey } from "@/components/ModelPoolPicker";
 import { SubscriptionBalancePanel } from "@/components/SubscriptionBalanceCard";
 import { SubscriptionQuotaCard } from "@/components/SubscriptionQuotaCard";
 import { api } from "@/api/tauri";
@@ -59,6 +59,9 @@ import { uniformSlots } from "@/lib/modelSlots";
 import { lastErrorText, testResultText } from "@/lib/backendText";
 import { providerName } from "@/lib/providerText";
 import { UrlParamFields, urlParamErrors } from "@/components/UrlParamFields";
+
+/** 池测试的遍历顺序 (与池总览的列顺序一致) */
+const POOL_TEST_ORDER = ["vision", "llm", "multimodal", "speech", "embedding"];
 import { formatTokenShorthand, parseTokenShorthand } from "@/lib/quota";
 import { errorText } from "@/lib/errorText";
 
@@ -132,11 +135,17 @@ export function SubscriptionEditPage() {
   /** 池模式: 该订阅的能力链条目 (与订阅字段一起保存) */
   const [poolEntries, setPoolEntries] = useState<ModelPoolEntry[]>([]);
   const [poolSaving, setPoolSaving] = useState(false);
-  /** 池模式批量测试: 逐模型结果 (跨 5 个能力分类) */
+  /** 池模式逐模型测试: 结果键 = poolTestKey(capability, model), 页面与内嵌组件共用这一份 */
+  const [poolTestResults, setPoolTestResults] = useState<Record<string, PoolTestItem>>({});
+  /** 本次测试覆盖了哪些行 (用于统计启用/成功/失败) */
+  const [poolTestMeta, setPoolTestMeta] = useState<
+    { capability: string; model_name: string; enabled: boolean }[]
+  >([]);
+  const [poolTestingKey, setPoolTestingKey] = useState<string | null>(null);
+  const [poolTestProgress, setPoolTestProgress] = useState<{ done: number; total: number } | null>(
+    null,
+  );
   const [poolTestRunning, setPoolTestRunning] = useState(false);
-  const [poolTestItems, setPoolTestItems] = useState<
-    { capability: string; item: PoolTestItem }[] | null
-  >(null);
   /** ?test=1 自动测试只跑一次 */
   const didAutoTest = useRef(false);
 
@@ -198,7 +207,7 @@ export function SubscriptionEditPage() {
     if (searchParams.get("test") !== "1") return;
     if (didAutoTest.current) return;
     didAutoTest.current = true;
-    void testAllPoolModels();
+    void runPoolTests(POOL_TEST_ORDER);
     navigate(`/pool/subscriptions/${id}`, { replace: true });
   }, [poolMode, id, searchParams, navigate]);
 
@@ -322,29 +331,79 @@ export function SubscriptionEditPage() {
   }
 
   /**
-   * 池模式: 按能力链列表逐个模型测试。
+   * 池模式: 按能力链列表逐个模型测试 (指定能力分类; 传全部 5 个即"测试全部")。
    * 不走 test_connection —— 那个用四槽选出的"代表模型", 对池订阅可能测到
    * 根本不在池里、或 key 未开通的模型 (403 AccessDenied), 结论没参考价值。
+   * 逐行调用 test_pool_model: 每测完一个就写一行, 颜色与统计立刻更新。
+   * 结果存在页面级 state 里, 内嵌的 ModelPoolPicker 通过 externalTest 读同一份。
    */
-  async function testAllPoolModels() {
-    if (!id) return;
+  async function runPoolTests(caps: string[]) {
+    if (!id || poolTestRunning) return;
     setPoolTestRunning(true);
-    setPoolTestItems(null);
+    setPoolTestingKey(null);
     try {
-      const out: { capability: string; item: PoolTestItem }[] = [];
-      for (const cap of ["vision", "llm", "multimodal", "speech", "embedding"]) {
-        try {
-          const items = await api.testPoolConnection(id, cap);
-          for (const item of items) {
-            if (item.model_name === "(空)") continue; // 空分类占位, 不计入
-            out.push({ capability: cap, item });
-          }
-        } catch {
-          // 单个分类失败不影响其他分类
+      const saved = await api.loadModelPool(id);
+      const queue = saved
+        .filter((e) => caps.includes(e.capability))
+        .slice()
+        .sort(
+          (a, b) =>
+            POOL_TEST_ORDER.indexOf(a.capability) - POOL_TEST_ORDER.indexOf(b.capability) ||
+            a.priority - b.priority,
+        );
+      setPoolTestMeta(
+        queue.map((e) => ({
+          capability: e.capability,
+          model_name: e.model_name,
+          enabled: e.enabled,
+        })),
+      );
+
+      // 只重置本次覆盖的分类; 未启用的行立刻标灰跳过, 启用的留空等着测
+      setPoolTestResults((prev) => {
+        const next: Record<string, PoolTestItem> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (!caps.includes(k.split("\u0000")[0])) next[k] = v;
         }
+        for (const e of queue) {
+          if (!e.enabled) {
+            next[poolTestKey(e.capability, e.model_name)] = {
+              model_name: e.model_name,
+              priority: e.priority,
+              enabled: false,
+              ok: false,
+              message: "未启用, 跳过测试",
+            };
+          }
+        }
+        return next;
+      });
+
+      const enabledRows = queue.filter((e) => e.enabled);
+      setPoolTestProgress({ done: 0, total: enabledRows.length });
+
+      for (let i = 0; i < enabledRows.length; i++) {
+        const e = enabledRows[i];
+        const key = poolTestKey(e.capability, e.model_name);
+        setPoolTestingKey(key);
+        let item: PoolTestItem;
+        try {
+          item = await api.testPoolModel(id, e.capability, e.model_name);
+        } catch (err) {
+          item = {
+            model_name: e.model_name,
+            priority: e.priority,
+            enabled: true,
+            ok: false,
+            message: errorText(err),
+          };
+        }
+        // 测完一个就落一个, 统计数字逐个增长
+        setPoolTestResults((prev) => ({ ...prev, [key]: item }));
+        setPoolTestProgress({ done: i + 1, total: enabledRows.length });
       }
-      setPoolTestItems(out);
     } finally {
+      setPoolTestingKey(null);
       setPoolTestRunning(false);
     }
   }
@@ -655,6 +714,13 @@ export function SubscriptionEditPage() {
                     models={models}
                     loading={fetchingModels}
                     onRefresh={refreshModels}
+                    externalTest={{
+                      results: poolTestResults,
+                      testingKey: poolTestingKey,
+                      running: poolTestRunning,
+                      progress: poolTestProgress,
+                      run: (cap) => void runPoolTests([cap]),
+                    }}
                   />
                 </CardContent>
               </Card>
@@ -707,7 +773,7 @@ export function SubscriptionEditPage() {
       {/* 底部常驻操作区: 与顶栏对称地挂在 .page-flow 之外, 不随内容滚动。
           反馈紧挨着触发它的按钮 —— 结果若跟着内容滚动, 用户在内容区底部点保存就看不见。 */}
       <div className="page-foot">
-        {(testResult || saveError || (poolMode && poolTestItems)) && (
+        {(testResult || saveError || (poolMode && poolTestMeta.length > 0)) && (
           <div className="page-foot-feedback">
             <div className="page-col space-y-2">
               {testResult && (
@@ -730,15 +796,26 @@ export function SubscriptionEditPage() {
                   <AlertDescription>{saveError}</AlertDescription>
                 </Alert>
               )}
-              {poolMode && poolTestItems && (() => {
-                const enabled = poolTestItems.filter((x) => x.item.enabled);
-                const okN = enabled.filter((x) => x.item.ok).length;
-                const fails = enabled.filter((x) => !x.item.ok);
+              {poolMode && poolTestMeta.length > 0 && (() => {
+                const enabledMeta = poolTestMeta.filter((m) => m.enabled);
+                const items = enabledMeta
+                  .map((m) => poolTestResults[poolTestKey(m.capability, m.model_name)])
+                  .filter((i): i is PoolTestItem => !!i);
+                const okN = items.filter((i) => i.ok).length;
+                const fails = enabledMeta
+                  .map((m) => ({ meta: m, item: poolTestResults[poolTestKey(m.capability, m.model_name)] }))
+                  .filter((x): x is { meta: (typeof enabledMeta)[number]; item: PoolTestItem } =>
+                    !!x.item && !x.item.ok,
+                  );
+                const pending = enabledMeta.length - items.length;
                 return (
                   <Alert variant={fails.length === 0 ? "default" : "destructive"}>
                     <AlertDescription>
                       <div>
-                        按列表测试完成: 启用 {enabled.length} 个 · 成功 {okN} · 失败 {fails.length}
+                        {poolTestRunning
+                          ? `正在按列表测试 ${items.length}/${enabledMeta.length}…  已成功 ${okN} · 已失败 ${fails.length}`
+                          : `按列表测试完成: 启用 ${enabledMeta.length} 个 · 成功 ${okN} · 失败 ${fails.length}`}
+                        {pending > 0 && !poolTestRunning && ` · 未测 ${pending}`}
                       </div>
                       {fails.length > 0 && (
                         <div className="mt-1 text-xs">
@@ -746,7 +823,7 @@ export function SubscriptionEditPage() {
                           {fails
                             .map(
                               (f) =>
-                                `${f.item.model_name} (${f.capability}${
+                                `${f.meta.model_name} (${f.meta.capability}${
                                   f.item.http_status ? ` · HTTP ${f.item.http_status}` : ""
                                 })`,
                             )
@@ -773,11 +850,13 @@ export function SubscriptionEditPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => (poolMode ? void testAllPoolModels() : void testConnection())}
+                onClick={() =>
+                  poolMode ? void runPoolTests(POOL_TEST_ORDER) : void testConnection()
+                }
                 disabled={poolTestRunning}
               >
                 {poolTestRunning
-                  ? "测试中…"
+                  ? `测试中 ${poolTestProgress?.done ?? 0}/${poolTestProgress?.total ?? 0}…`
                   : poolMode
                     ? "按列表测试全部模型"
                     : t("subscriptionEdit.testConn")}

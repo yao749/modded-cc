@@ -136,6 +136,7 @@ web_commands! {
     get_host_clock() => commands::subscriptions::get_host_clock().await,
     reset_total_quota_usage(id: String) => commands::subscriptions::reset_total_quota_usage(st, args.id).await,
     test_pool_connection(id: String, capability: String) => commands::subscriptions::test_pool_connection(st, args.id, args.capability).await,
+    test_pool_model(id: String, capability: String, model_name: String) => commands::subscriptions::test_pool_model(st, args.id, args.capability, args.model_name).await,
     load_model_pool(subscription_id: String) => commands::subscriptions::load_model_pool(st, args.subscription_id).await,
     save_model_pool(input: SaveModelPoolInput) => commands::subscriptions::save_model_pool(st, args.input).await,
     // ChatGPT OAuth

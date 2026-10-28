@@ -94,6 +94,13 @@ export const api = {
     invoke<void>("save_model_pool", { input: { subscription_id: subscriptionId, entries } as { subscription_id: string; entries: Omit<ModelPoolEntry, "subscription_id">[] } }),
   testPoolConnection: (subscriptionId: string, capability: string) =>
     invoke<import("@/types").PoolTestItem[]>("test_pool_connection", { id: subscriptionId, capability }),
+  /** 单模型测试: 逐个调用即可让每行测完立刻上色 (不用等整条链跑完) */
+  testPoolModel: (subscriptionId: string, capability: string, modelName: string) =>
+    invoke<import("@/types").PoolTestItem>("test_pool_model", {
+      id: subscriptionId,
+      capability,
+      modelName,
+    }),
 
   // ChatGPT OAuth (Phase 1, OpenAI Codex provider)
   startChatGptDeviceFlow: () =>

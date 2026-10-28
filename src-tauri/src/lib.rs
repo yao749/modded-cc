@@ -141,6 +141,7 @@ pub fn run() {
             commands::subscriptions::get_host_clock,
             commands::subscriptions::reset_total_quota_usage,
             commands::subscriptions::test_pool_connection,
+            commands::subscriptions::test_pool_model,
             commands::subscriptions::load_model_pool,
             commands::subscriptions::save_model_pool,
             commands::virtual_models::list_virtual_models,
