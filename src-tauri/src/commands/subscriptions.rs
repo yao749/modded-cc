@@ -938,9 +938,23 @@ pub async fn test_pool_connection(
         }
         let clock = crate::subscription::schedule::WallClock::now();
         let probe = ping::probe_subscription(&state, &row, &entry.model_name, None, clock).await;
+        // 测试失败 = 这个模型当前不可用, 与调度失败同样处理: 就地降序到链尾,
+        // 下次请求不再从它开始 (手动测试也会改顺序, 这是有意的队列语义)。
+        let priority = if probe.ok {
+            entry.priority
+        } else {
+            crate::subscription::store::demote_pool_model(
+                &state.db,
+                id,
+                &capability,
+                &entry.model_name,
+            )
+            .await
+            .unwrap_or(entry.priority)
+        };
         results.push(PoolTestItem {
             model_name: entry.model_name.clone(),
-            priority: entry.priority,
+            priority,
             enabled: true,
             ok: probe.ok,
             message: probe.message,
@@ -996,9 +1010,18 @@ pub async fn test_pool_model(
 
     let clock = crate::subscription::schedule::WallClock::now();
     let probe = ping::probe_subscription(&state, &row, &model_name, None, clock).await;
+    // 测试失败 → 就地降序到链尾 (与调度失败同一套队列语义), 返回新 priority
+    // 供前端同步本地顺序; 成功则顺序不变。
+    let priority = if probe.ok {
+        entry.priority
+    } else {
+        crate::subscription::store::demote_pool_model(&state.db, id, &capability, &model_name)
+            .await
+            .unwrap_or(entry.priority)
+    };
     Ok(PoolTestItem {
         model_name,
-        priority: entry.priority,
+        priority,
         enabled: true,
         ok: probe.ok,
         message: probe.message,

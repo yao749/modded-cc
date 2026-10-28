@@ -62,6 +62,29 @@ import { UrlParamFields, urlParamErrors } from "@/components/UrlParamFields";
 
 /** 池测试的遍历顺序 (与池总览的列顺序一致) */
 const POOL_TEST_ORDER = ["vision", "llm", "multimodal", "speech", "embedding"];
+
+/**
+ * 测试失败后后端会把该模型 priority 挪到链尾并落库。把它同步回本地条目:
+ * 先按 `能力分类\0模型名` 对齐, 用库里的新 priority 覆盖;
+ * 本地新增但还没保存的行原样保留 (第一次保存时才入库), 不能整份覆盖掉。
+ */
+function mergeSavedPriorities(
+  local: ModelPoolEntry[],
+  saved: ModelPoolEntry[],
+): ModelPoolEntry[] {
+  const key = (e: ModelPoolEntry) => `${e.capability}\u0000${e.model_name}`;
+  const savedMap = new Map(saved.map((e) => [key(e), e]));
+  const localKeys = new Set(local.map(key));
+  const out = local.map((l) => {
+    const s = savedMap.get(key(l));
+    return s ? { ...l, priority: s.priority } : l;
+  });
+  // 库里新增、本地没有的条目 (别处写入) 也带上, 避免下次保存把它们删掉
+  for (const s of saved) {
+    if (!localKeys.has(key(s))) out.push(s);
+  }
+  return out;
+}
 import { formatTokenShorthand, parseTokenShorthand } from "@/lib/quota";
 import { errorText } from "@/lib/errorText";
 
@@ -337,6 +360,20 @@ export function SubscriptionEditPage() {
    * 逐行调用 test_pool_model: 每测完一个就写一行, 颜色与统计立刻更新。
    * 结果存在页面级 state 里, 内嵌的 ModelPoolPicker 通过 externalTest 读同一份。
    */
+  /**
+   * 测试后同步顺序: 测试失败的模型后端已降序到链尾并落库, 这里把新 priority
+   * 拉回本地 —— 否则用户点一次保存会用旧 priority 覆盖, 降序白做。
+   */
+  async function syncPoolPriorities() {
+    if (!id) return;
+    try {
+      const saved = await api.loadModelPool(id);
+      setPoolEntries((prev) => mergeSavedPriorities(prev, saved));
+    } catch {
+      // 同步失败不影响测试结果展示; 下次保存按旧顺序写入即可
+    }
+  }
+
   async function runPoolTests(caps: string[]) {
     if (!id || poolTestRunning) return;
     setPoolTestRunning(true);
@@ -402,6 +439,11 @@ export function SubscriptionEditPage() {
         setPoolTestResults((prev) => ({ ...prev, [key]: item }));
         setPoolTestProgress({ done: i + 1, total: enabledRows.length });
       }
+
+      // 失败的模型后端已经降序到链尾 (写库了)。这里把新 priority 同步回本地,
+      // 否则用户随后点一次保存会用旧 priority 覆盖, 降序白做 —— 而且编辑器里
+      // 列表按 priority 排序, 同步后失败的模型会立刻沉到底部。
+      await syncPoolPriorities();
     } finally {
       setPoolTestingKey(null);
       setPoolTestRunning(false);
@@ -828,6 +870,11 @@ export function SubscriptionEditPage() {
                                 })`,
                             )
                             .join("、")}
+                        </div>
+                      )}
+                      {fails.length > 0 && !poolTestRunning && (
+                        <div className="mt-1 text-xs">
+                          失败的模型已自动排到各自能力链的队尾, 下次请求不会再先撞它。
                         </div>
                       )}
                     </AlertDescription>

@@ -453,13 +453,16 @@ pub async fn delete(pool: &SqlitePool, id: &Uuid) -> AppResult<()> {
 /// (priority = 当前 MAX + 1)。chain 模式某模型 attempt 失败后调用 —— 下一次请求
 /// 它排到最后, 队列继续从新的队头开始, 一直失败就一直往队尾挪。
 /// 因为直接写库, 重启/刷新都不会回到原位 (编辑器里能看到顺序真的变了)。
-/// 模型行已被删除时影响 0 行, 视为成功 (尽力而为)。
+/// 模型行已被删除时影响 0 行, 视为成功 (尽力而为), 返回 0。
+///
+/// 返回降序后的新 priority: 手动测试失败时前端要拿它同步本地顺序,
+/// 否则用户在编辑器里再点一次保存会把旧 priority 写回去, 冲掉降序。
 pub async fn demote_pool_model(
     pool: &SqlitePool,
     sub_id: Uuid,
     capability: &str,
     model_name: &str,
-) -> AppResult<()> {
+) -> AppResult<i64> {
     // 单条 UPDATE 内的标量子查询在 SQLite 里是原子的: MAX 读到的是语句开始前的快照,
     // 并发降序最多产生并列 priority, 读取端按 (priority, id) 排序保证次序确定。
     sqlx::query(
@@ -475,7 +478,18 @@ pub async fn demote_pool_model(
     .bind(model_name)
     .execute(pool)
     .await?;
-    Ok(())
+
+    // 回读新 priority 给调用方 (模型不存在时返回 0)
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT priority FROM subscription_model_pool
+         WHERE subscription_id = ? AND capability = ? AND model_name = ?",
+    )
+    .bind(sub_id.to_string())
+    .bind(capability)
+    .bind(model_name)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0).unwrap_or(0))
 }
 
 /// 从能力分类模型池里取某订阅 + 某 capability 的全部启用模型, 按 priority 升序.
@@ -1170,7 +1184,9 @@ mod jev_tests {
         save_model_pool(&pool, row.id, &entries).await.expect("save");
 
         // 中间模型失败一次 → 挪到 llm 链尾
-        demote_pool_model(&pool, row.id, "llm", "glm-b").await.expect("demote");
+        let new_prio = demote_pool_model(&pool, row.id, "llm", "glm-b").await.expect("demote");
+        // 返回值就是降序后的新 priority (前端用它同步本地顺序, 免得保存时写回旧值)
+        assert_eq!(new_prio, 4, "demote 应回传链尾 priority = MAX+1");
         let llm = list_pool_models(&pool, row.id, "llm").await.unwrap();
         let names: Vec<&str> = llm.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(names, vec!["glm-a", "glm-c", "glm-b"]);
