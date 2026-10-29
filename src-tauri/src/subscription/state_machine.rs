@@ -335,11 +335,9 @@ fn classify_http(
             // 请求内容问题，不计入错误（§5.2）
             SubscriptionState::Healthy
         }
-        401 | 403 => {
-            *last_error = Some(LastError::AuthFailed { status }.message());
-            rt.last_error_message = last_error.clone();
-            SubscriptionState::AuthFailed
-        }
+        // B 变体 (2026-10): 401/403 不当 AuthFailed 终态, 不写 last_error, 不进冷却。
+        // 坏 Key 订阅的模型由 pipeline 的 demote_failed_subject 沉到链尾, 稳态下跳过。
+        401 | 403 => SubscriptionState::Healthy,
         429 => {
             *last_error = Some(LastError::RateLimited.message());
             rt.last_error_message = last_error.clone();
@@ -386,11 +384,15 @@ mod tests {
     }
 
     #[test]
-    fn healthy_to_auth_failed_on_401() {
+    fn healthy_stays_healthy_on_401_b_variant() {
+        // B 变体 (2026-10): 401/403 不当 AuthFailed 终态, 订阅保持 Healthy,
+        // 坏 Key 的隔离交给 pipeline 的模型级降序。
         let mut rt = runtime();
         let (t, _, _) = transition(&mut rt, &Event::HttpStatus(401), None);
-        assert!(t.state_changed);
-        assert_eq!(rt.state, SubscriptionState::AuthFailed);
+        assert!(!t.state_changed);
+        assert_eq!(rt.state, SubscriptionState::Healthy);
+        assert!(!rt.row.is_auth_failed);
+        assert!(rt.last_error_message.is_none());
     }
 
     #[test]
@@ -474,11 +476,16 @@ mod tests {
 
     #[test]
     fn auth_failed_only_clears_on_user_key_update() {
+        // AuthFailed 状态仍存在 (scheduler/recheck_worker/TUI 引用), 复活
+        // 逻辑只对 UserUpdateKey 响应, CooldownExpired 不自动恢复。
+        // B 变体: HTTP 401 不再触发 AuthFailed, 这里手动设置状态测试复活分支。
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus(401), None);
-        assert_eq!(rt.state, SubscriptionState::AuthFailed);
+        rt.state = SubscriptionState::AuthFailed;
+        rt.row.is_auth_failed = true;
+
         let (t, _, _) = transition(&mut rt, &Event::CooldownExpired, None);
         assert!(!t.state_changed);
+
         let (t, _, _) = transition(&mut rt, &Event::UserUpdateKey, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
@@ -486,10 +493,10 @@ mod tests {
 
     #[test]
     fn manual_reset_revives_from_auth_failed() {
+        // 手动复活: UserManualReset 应能把 AuthFailed 状态拉回 Healthy, 与 UserUpdateKey 等价。
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus(401), None);
-        assert_eq!(rt.state, SubscriptionState::AuthFailed);
-        assert!(rt.row.is_auth_failed);
+        rt.state = SubscriptionState::AuthFailed;
+        rt.row.is_auth_failed = true;
 
         let (t, _, _) = transition(&mut rt, &Event::UserManualReset, None);
         assert!(t.state_changed);

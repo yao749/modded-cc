@@ -242,7 +242,13 @@ pub async fn run_candidates<S: AttemptSink + Send>(cands: &[Candidate], sink: &m
         sink.record(c, &r, retry_count).await;
         match r {
             AttemptResult::Http { status, body, body_text } => {
-                if let ShouldRetry::No = classify_response(status.as_u16(), None) {
+                // 只有 2xx 才算 Done (成功返回客户端)。
+                // 4xx / 5xx 不管 ShouldRetry::Yes 还是 No, 都 continue 试下一条候选:
+                //   - 401/403/429 → classify_response 判 No 是 B 变体的"切下一家"语义,
+                //     不是"Done 返回客户端"; 循环耗尽后走 Exhausted。
+                //   - 400/404/422 等请求本身错 → 记 last_rejection, 循环耗尽后 RequestRejected。
+                //   - 5xx → classify_response 判 Yes 继续, 循环耗尽后走 Exhausted。
+                if status.is_success() {
                     return LoopEnd::Done { index, status, body };
                 }
                 last_rejection = is_request_error(status).then_some((status, body, body_text));
