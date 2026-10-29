@@ -7,11 +7,12 @@ use uuid::Uuid;
 
 use super::crypto::{seal, validate_password, KdfCost};
 use super::format::{
-    header_field, subscription_to_export, ExportFile, ExportVirtualModel, SecretBind, SecretItem,
-    SecretRefs, SecretsPlain, FIELD_API_KEY, FORMAT, VERSION,
+    header_field, subscription_to_export, ExportFile, ExportModelPoolEntry, ExportVirtualModel,
+    SecretBind, SecretItem, SecretRefs, SecretsPlain, FIELD_API_KEY, FORMAT, VERSION,
 };
 use crate::error::AppResult;
 use crate::subscription::model::SubscriptionRow;
+use crate::subscription::store::ModelPoolEntry;
 use crate::virtual_model::model::{RoutingMode, VirtualModelName};
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,8 @@ pub struct SecretOptions<'a> {
 pub fn build_export(
     rows: &[SubscriptionRow],
     vms: &[VirtualModelSnapshot],
+    // 全量模型池条目 (扁平列, 每条带 subscription_id). 可为空切片.
+    model_pools: &[ModelPoolEntry],
     secrets: Option<SecretOptions<'_>>,
     app_version: &str,
     now: DateTime<Utc>,
@@ -85,6 +88,26 @@ pub fn build_export(
         .filter(|vm: &ExportVirtualModel| !(vm.name.is_jev() && vm.subscription_ids.is_empty()))
         .collect();
 
+    // 模型池条目: 从 ModelPoolEntry 转成 ExportModelPoolEntry, 丢掉内部主键 id.
+    // 按 (subscription_id, capability, priority) 排序, 保证导出顺序稳定.
+    let mut pools: Vec<ExportModelPoolEntry> = model_pools
+        .iter()
+        .map(|e| ExportModelPoolEntry {
+            subscription_id: e.subscription_id,
+            capability: e.capability.clone(),
+            model_name: e.model_name.clone(),
+            priority: e.priority,
+            enabled: e.enabled,
+            supported_inputs: e.supported_inputs.clone(),
+        })
+        .collect();
+    pools.sort_by(|a, b| {
+        a.subscription_id
+            .cmp(&b.subscription_id)
+            .then(a.capability.cmp(&b.capability))
+            .then(a.priority.cmp(&b.priority))
+    });
+
     let envelope = match secrets {
         Some(o) => {
             let plain = SecretsPlain {
@@ -103,6 +126,7 @@ pub fn build_export(
         exported_at: now,
         subscriptions,
         virtual_models,
+        model_pools: pools,
         secrets: envelope,
     })
 }
@@ -140,7 +164,7 @@ mod tests {
             mode: RoutingMode::Sequential,
             subscription_ids: vec![r[0].id],
         });
-        let file = build_export(&r, &v, None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&r, &v, &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         assert_eq!(file.virtual_models.len(), 11);
         assert!(file.virtual_models.iter().any(|v| v.name.is_jev()));
     }
@@ -148,7 +172,7 @@ mod tests {
     #[test]
     fn plain_export_has_no_secrets_anywhere() {
         let r = rows();
-        let file = build_export(&r, &vms(&r), None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&r, &vms(&r), &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         assert!(file.secrets.is_none());
         assert!(file.subscriptions.iter().all(|s| s.secret_refs.is_none()));
         let text = serde_json::to_string(&file).unwrap();
@@ -164,7 +188,7 @@ mod tests {
     fn encrypted_export_binds_each_secret_to_its_destinations() {
         let r = rows();
         let secrets = SecretOptions { password: "0123456789", auth_token: "tok-x", cost: KdfCost::FAST };
-        let file = build_export(&r, &vms(&r), Some(secrets), "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&r, &vms(&r), &[] as &[crate::subscription::store::ModelPoolEntry], Some(secrets), "6.1.0", Utc::now()).unwrap();
         let text = serde_json::to_string(&file).unwrap();
         assert!(!text.contains("sk-a") && !text.contains("tok-x"), "明文里不许出现密钥");
 
@@ -187,13 +211,13 @@ mod tests {
     fn short_password_is_rejected() {
         let r = rows();
         let secrets = SecretOptions { password: "short", auth_token: "t", cost: KdfCost::FAST };
-        assert!(build_export(&r, &vms(&r), Some(secrets), "6.1.0", Utc::now()).is_err());
+        assert!(build_export(&r, &vms(&r), &[] as &[crate::subscription::store::ModelPoolEntry], Some(secrets), "6.1.0", Utc::now()).is_err());
     }
 
     #[test]
     fn exported_text_parses_back() {
         let r = rows();
-        let file = build_export(&r, &vms(&r), None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&r, &vms(&r), &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         let text = serde_json::to_string_pretty(&file).unwrap();
         let back = parse_file(&text).unwrap();
         assert_eq!(back.subscriptions.len(), 2);
@@ -202,7 +226,7 @@ mod tests {
     #[test]
     fn parse_rejects_wrong_format_newer_version_and_duplicates() {
         let r = rows();
-        let file = build_export(&r, &vms(&r), None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&r, &vms(&r), &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         let mut v = serde_json::to_value(&file).unwrap();
 
         let mut wrong = v.clone();
@@ -226,7 +250,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored() {
         let r = rows();
-        let file = build_export(&r, &vms(&r), None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&r, &vms(&r), &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         let mut v = serde_json::to_value(&file).unwrap();
         v["future_top_level"] = "x".into();
         v["subscriptions"][0]["future_field"] = 1.into();

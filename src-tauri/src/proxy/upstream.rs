@@ -19,11 +19,15 @@ pub enum UpstreamResponse {
         /// 原始响应文本。仅在非 2xx 时填充, 用于错误路径诊断展示;
         /// 成功路径不保留, 避免每个响应多 hold 一份 KB 级 String。
         body_text: Option<String>,
+        /// 上游 Retry-After 响应头解析值, clamp 过 [30s, 30min]。
+        retry_after: Option<Duration>,
     },
     Streaming {
         status: StatusCode,
         headers: ReqHeaderMap,
         stream: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+        /// 上游 Retry-After 响应头解析值, clamp 过 [30s, 30min]。
+        retry_after: Option<Duration>,
     },
 }
 
@@ -73,11 +77,19 @@ pub async fn send(
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let resp_headers = resp.headers().clone();
 
+    // Retry-After 解析 (从 reqwest HeaderMap 拿字符串, 纯函数解析避免类型耦合)
+    let retry_after = resp_headers
+        .get("retry-after")
+        .or_else(|| resp_headers.get("Retry-After"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| crate::proxy::retry::parse_retry_after_value(s.trim()));
+
     if is_streaming && status.is_success() {
         Ok(UpstreamResponse::Streaming {
             status,
             headers: resp_headers,
             stream: Box::pin(resp.bytes_stream()),
+            retry_after,
         })
     } else {
         // 非流式：完整读取
@@ -90,6 +102,7 @@ pub async fn send(
             headers: resp_headers,
             body,
             body_text,
+            retry_after,
         })
     }
 }

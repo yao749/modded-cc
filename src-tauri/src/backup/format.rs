@@ -34,8 +34,23 @@ pub struct ExportFile {
     pub subscriptions: Vec<ExportSubscription>,
     #[serde(default)]
     pub virtual_models: Vec<ExportVirtualModel>,
+    /// 能力分类模型池条目. 扁平列, 每条带 subscription_id, 导入时按 id 分组覆盖写入.
+    /// 旧导出文件没有这个字段, serde(default) 兼容.
+    #[serde(default)]
+    pub model_pools: Vec<ExportModelPoolEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<SecretsEnvelope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportModelPoolEntry {
+    pub subscription_id: Uuid,
+    pub capability: String,
+    pub model_name: String,
+    pub priority: i64,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_inputs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

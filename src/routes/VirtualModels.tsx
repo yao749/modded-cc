@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/StatusBadge";
+import { PoolParadigmCard } from "@/components/PoolParadigmCard";
 import { ProviderLogo } from "@/components/ProviderLogo";
 import { SortableSubscriptionList } from "@/components/SortableSubscriptionList";
 import { StarPrompt } from "@/components/StarPrompt";
@@ -86,15 +87,31 @@ export function VirtualModelsPage() {
             </div>
           </div>
         ) : (
-          orderedVms.map((vm) => (
+          orderedVms
+            .filter((vm) => !isJev(vm.name))
+            .map((vm) => (
+              <VirtualModelCard
+                key={vm.name}
+                vm={vm}
+                subsMap={subsMap}
+                allSubs={subs.data ?? []}
+              />
+            ))
+        )}
+
+        {/* 池范式: 与四槽 / 决策并列的第 7 块, 排在 model-jev 上方 */}
+        <PoolParadigmCard />
+
+        {orderedVms
+          .filter((vm) => isJev(vm.name))
+          .map((vm) => (
             <VirtualModelCard
               key={vm.name}
               vm={vm}
               subsMap={subsMap}
               allSubs={subs.data ?? []}
             />
-          ))
-        )}
+          ))}
       </div>
 
       <StarPrompt className="page-end" />

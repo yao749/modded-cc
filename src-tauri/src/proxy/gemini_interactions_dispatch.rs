@@ -160,7 +160,7 @@ pub async fn dispatch_gemini_interactions_attempt(
     };
 
     let (status, resp_headers, stream) = match upstream_response {
-        upstream::UpstreamResponse::Streaming { status, headers, stream } => {
+        upstream::UpstreamResponse::Streaming { status, headers, stream, retry_after: _ } => {
             (status, headers, stream)
         }
         upstream::UpstreamResponse::NonStreaming { status, body_text, .. } => {

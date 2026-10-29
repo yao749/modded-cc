@@ -180,7 +180,7 @@ pub async fn dispatch_oauth_attempt(
     };
 
     let (status, resp_headers, stream) = match upstream_response {
-        upstream::UpstreamResponse::Streaming { status, headers, stream } => {
+        upstream::UpstreamResponse::Streaming { status, headers, stream, retry_after: _ } => {
             (status, headers, stream)
         }
         upstream::UpstreamResponse::NonStreaming { status, body_text, .. } => {
@@ -841,7 +841,7 @@ pub async fn dispatch_kiro_attempt(
         }
     };
     let (status, resp_headers, stream) = match upstream_response {
-        upstream::UpstreamResponse::Streaming { status, headers, stream } => (status, headers, stream),
+        upstream::UpstreamResponse::Streaming { status, headers, stream, retry_after: _ } => (status, headers, stream),
         upstream::UpstreamResponse::NonStreaming { status, body_text, .. } => {
             return Err(OAuthDispatchError::Upstream {
                 status: Some(status.as_u16()),

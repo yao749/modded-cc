@@ -2386,6 +2386,97 @@ html:not([data-platform="macos"]) .main.flush { padding-top: 0; }
   .slot-card.jev .slot-head.compact { flex-wrap: wrap; padding-right: 0; padding-top: 24px; }
 }
 
+/* === 能力池范式块 ===
+ * 第 7 块虚拟模型 (model-llm / model-vision / model-multimodal / model-speech /
+ * model-embedding): 与四槽、model-jev 并列, 放在 jev 决策卡上方。
+ * 吊牌沿用 jev 那套「挂牌」语言, 只把薄荷绿换成天空蓝; 底纹同为极淡斜线。
+ * 卡片内只做总览 (每链几订阅 / 几模型 / 队头模型), 编辑仍在「能力池」页。 */
+.slot-card.pool {
+  position: relative;
+  margin-top: 18px;
+  box-shadow: 5px 5px 0 var(--fill-sky);
+  background:
+    repeating-linear-gradient(135deg, transparent 0 14px, color-mix(in srgb, var(--fill-sky) 18%, transparent) 14px 15px),
+    var(--surface);
+}
+.slot-card.pool .slot-head.compact { padding-right: 196px; }
+.pool-hangtag .jev-hangtag-tag { background: var(--fill-sky); }
+.pool-manage {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 11.5px;
+}
+/* 池的链路是模型级队列, 五列一行比堆叠省高度; side 区放统计 + 接入提示 */
+.slot-card.pool .slot-body { display: block; }
+.pool-chains { display: flex; flex-direction: column; gap: 6px; }
+.pool-chain {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) auto minmax(0, 220px) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1.3px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.pool-chain:hover { border-color: var(--stroke); background: var(--surface-3); }
+.pool-chain.empty { opacity: .6; }
+.pool-chain-name { font-size: 12px; font-weight: 600; color: var(--ink); }
+.pool-chain-label {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pool-chain-stats { font-size: 11px; color: var(--ink-4); white-space: nowrap; }
+.pool-chain-head {
+  font-size: 11.5px;
+  color: var(--accent-ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pool-chain-head.empty { color: var(--ink-5); }
+.pool-chain-mode { font-size: 10.5px; white-space: nowrap; }
+.pool-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 9px;
+  flex-wrap: wrap;
+}
+.pool-side-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-4);
+  white-space: nowrap;
+}
+.pool-side-count b { font-size: 15px; color: var(--accent-ink); font-family: var(--font-mono); }
+.pool-side .pool-access { flex: 1; min-width: 320px; margin-top: 0; }
+@media (max-width: 900px) {
+  .slot-card.pool .slot-head.compact { flex-wrap: wrap; padding-right: 0; padding-top: 24px; }
+  .pool-chain {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 3px;
+  }
+  .pool-chain-label { display: none; }
+  .pool-chain-head { grid-column: 1 / -1; }
+}
+
 /* ============================================================
  * 实时路由页: 页头 + 四张卡片 (路由图 / 接入信息 / API 入口 / 虚拟模型映射)
  * ============================================================ */

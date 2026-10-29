@@ -57,12 +57,25 @@ pub fn apply<'a>(
     rt: Arc<RwLock<SubscriptionRuntime>>,
     event: Event,
 ) -> Pin<Box<dyn Future<Output = AppResult<Transition>> + Send + 'a>> {
+    apply_with_hint(pool, app, event_tx, rt, event, None)
+}
+
+/// 带 Retry-After hint 的 apply 变体. 冷却逻辑优先使用 hint, 没给就用默认硬编码.
+/// 常规调用用 `apply` 就够了; pipeline 层从上游响应头解析到 Retry-After 时用这个.
+pub fn apply_with_hint<'a>(
+    pool: &'a SqlitePool,
+    app: &'a AppHandle,
+    event_tx: &'a mpsc::Sender<EventEntry>,
+    rt: Arc<RwLock<SubscriptionRuntime>>,
+    event: Event,
+    retry_after_hint: Option<Duration>,
+) -> Pin<Box<dyn Future<Output = AppResult<Transition>> + Send + 'a>> {
     Box::pin(async move {
         let prev_state;
         let (transition, id, error_message_update) = {
             let mut guard = rt.write().await;
             prev_state = guard.state;
-            transition(&mut guard, &event)
+            transition(&mut guard, &event, retry_after_hint)
         };
 
         if transition.state_changed {
@@ -107,6 +120,7 @@ pub fn apply<'a>(
             let rt = rt.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(duration).await;
+                // 冷却定时器触发时没有上游响应, 走普通 apply (hint=None).
                 if let Err(e) = apply(&pool, &app, &event_tx_clone, rt, Event::CooldownExpired).await {
                     warn!(?e, "cooldown apply 失败");
                 }
@@ -134,6 +148,7 @@ fn describe_event(e: &Event) -> &'static str {
 fn transition(
     rt: &mut SubscriptionRuntime,
     event: &Event,
+    retry_after_hint: Option<Duration>,
 ) -> (Transition, Uuid, Option<String>) {
     let now = Utc::now();
     let prev_state = rt.state;
@@ -240,27 +255,38 @@ fn transition(
         rt.state = new_state;
         rt.state_entered_at = now;
         rt.row.updated_at = now;
+
+        /// 用 hint 覆盖默认冷却时间, 没 hint 就用 fallback_secs.
+        fn cooldown_secs(hint: Option<Duration>, fallback_secs: u64) -> u64 {
+            hint.map(|d| d.as_secs()).unwrap_or(fallback_secs)
+        }
+
         match new_state {
             SubscriptionState::RateLimited => {
-                // 短期 RPM/TPM 限流: 60s 冷却即可
-                rt.cooldown_until = Some(now + chrono::Duration::seconds(60));
-                schedule_cooldown = Some(Duration::from_secs(60));
+                // 短期 RPM/TPM 限流. 上游给了 Retry-After 就尊重, 没给默认 60s.
+                let secs = cooldown_secs(retry_after_hint, 60);
+                rt.cooldown_until = Some(now + chrono::Duration::seconds(secs as i64));
+                schedule_cooldown = Some(Duration::from_secs(secs));
             }
             SubscriptionState::QuotaExhausted => {
-                // 5h/月度配额耗尽: 30min 冷却避免来回切换浪费请求.
-                // 不解析 message 里的精确 reset 时间, 文本格式 fragile.
-                rt.cooldown_until = Some(now + chrono::Duration::seconds(1800));
-                schedule_cooldown = Some(Duration::from_secs(1800));
+                // 5h/月度配额耗尽. 上游给了 Retry-After 就尊重 (哪怕短于 30min),
+                // 没给默认 30min 避免来回切换浪费请求.
+                let secs = cooldown_secs(retry_after_hint, 1800);
+                rt.cooldown_until = Some(now + chrono::Duration::seconds(secs as i64));
+                schedule_cooldown = Some(Duration::from_secs(secs));
             }
             SubscriptionState::TransientError => {
-                let secs = match rt.transient_error_level {
+                // 5xx 连续三次. Retry-After 在这个场景少见, 但尊重上游给出的值;
+                // 没给就按递增: 30→60→120→300s.
+                let default_secs: u64 = match rt.transient_error_level {
                     0 => 30,
                     1 => 60,
                     2 => 120,
                     _ => 300,
                 };
-                rt.cooldown_until = Some(now + chrono::Duration::seconds(secs));
-                schedule_cooldown = Some(Duration::from_secs(secs as u64));
+                let secs = cooldown_secs(retry_after_hint, default_secs);
+                rt.cooldown_until = Some(now + chrono::Duration::seconds(secs as i64));
+                schedule_cooldown = Some(Duration::from_secs(secs));
                 rt.transient_error_level = rt.transient_error_level.saturating_add(1);
             }
             SubscriptionState::AuthFailed => {
@@ -353,7 +379,7 @@ mod tests {
     #[test]
     fn healthy_to_rate_limited_on_429() {
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(429));
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(429), None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::RateLimited);
         assert!(rt.cooldown_until.is_some());
@@ -362,7 +388,7 @@ mod tests {
     #[test]
     fn healthy_to_auth_failed_on_401() {
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(401));
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(401), None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::AuthFailed);
     }
@@ -372,7 +398,7 @@ mod tests {
         // 即便 retry.rs 把 400 改为可重试,state_machine 应保留「不冷却」语义
         // 避免客户端 bug 把所有订阅冷却。
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(400));
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(400), None);
         assert!(!t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
         assert!(rt.cooldown_until.is_none());
@@ -384,7 +410,7 @@ mod tests {
         // 404/422 等同 400 的语义: 跳下家但不冷却
         let mut rt = runtime();
         for status in [404, 422, 410, 408] {
-            let (t, _, _) = transition(&mut rt, &Event::HttpStatus(status));
+            let (t, _, _) = transition(&mut rt, &Event::HttpStatus(status), None);
             assert!(!t.state_changed, "status {} should not change state", status);
             assert_eq!(rt.state, SubscriptionState::Healthy);
             assert!(rt.cooldown_until.is_none());
@@ -396,11 +422,11 @@ mod tests {
     fn transient_error_after_three_fives() {
         let mut rt = runtime();
         for _ in 0..2 {
-            let (t, _, _) = transition(&mut rt, &Event::HttpStatus(500));
+            let (t, _, _) = transition(&mut rt, &Event::HttpStatus(500), None);
             assert!(!t.state_changed);
             assert_eq!(rt.state, SubscriptionState::Healthy);
         }
-        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(500));
+        let (t, _, _) = transition(&mut rt, &Event::HttpStatus(500), None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::TransientError);
     }
@@ -409,7 +435,7 @@ mod tests {
     fn exponential_backoff_levels() {
         let mut rt = runtime();
         for _ in 0..3 {
-            transition(&mut rt, &Event::HttpStatus(500));
+            transition(&mut rt, &Event::HttpStatus(500), None);
         }
         assert_eq!(rt.state, SubscriptionState::TransientError);
         let cooldown = rt.cooldown_until.unwrap();
@@ -421,9 +447,9 @@ mod tests {
     fn cooldown_expired_returns_to_healthy() {
         let mut rt = runtime();
         for _ in 0..3 {
-            transition(&mut rt, &Event::HttpStatus(500));
+            transition(&mut rt, &Event::HttpStatus(500), None);
         }
-        let (t, _, _) = transition(&mut rt, &Event::CooldownExpired);
+        let (t, _, _) = transition(&mut rt, &Event::CooldownExpired, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
     }
@@ -431,9 +457,9 @@ mod tests {
     #[test]
     fn disabled_preserved_through_events() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::UserDisable);
+        transition(&mut rt, &Event::UserDisable, None);
         assert_eq!(rt.state, SubscriptionState::Disabled);
-        let (t, _, _) = transition(&mut rt, &Event::RequestSucceeded);
+        let (t, _, _) = transition(&mut rt, &Event::RequestSucceeded, None);
         assert!(!t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Disabled);
     }
@@ -441,19 +467,19 @@ mod tests {
     #[test]
     fn request_success_resets_error_count() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus(500));
-        transition(&mut rt, &Event::RequestSucceeded);
+        transition(&mut rt, &Event::HttpStatus(500), None);
+        transition(&mut rt, &Event::RequestSucceeded, None);
         assert_eq!(rt.consecutive_errors, 0);
     }
 
     #[test]
     fn auth_failed_only_clears_on_user_key_update() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus(401));
+        transition(&mut rt, &Event::HttpStatus(401), None);
         assert_eq!(rt.state, SubscriptionState::AuthFailed);
-        let (t, _, _) = transition(&mut rt, &Event::CooldownExpired);
+        let (t, _, _) = transition(&mut rt, &Event::CooldownExpired, None);
         assert!(!t.state_changed);
-        let (t, _, _) = transition(&mut rt, &Event::UserUpdateKey);
+        let (t, _, _) = transition(&mut rt, &Event::UserUpdateKey, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
     }
@@ -461,11 +487,11 @@ mod tests {
     #[test]
     fn manual_reset_revives_from_auth_failed() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus(401));
+        transition(&mut rt, &Event::HttpStatus(401), None);
         assert_eq!(rt.state, SubscriptionState::AuthFailed);
         assert!(rt.row.is_auth_failed);
 
-        let (t, _, _) = transition(&mut rt, &Event::UserManualReset);
+        let (t, _, _) = transition(&mut rt, &Event::UserManualReset, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
         assert!(!rt.row.is_auth_failed);
@@ -475,11 +501,11 @@ mod tests {
     #[test]
     fn manual_reset_clears_rate_limited_cooldown() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::HttpStatus(429));
+        transition(&mut rt, &Event::HttpStatus(429), None);
         assert_eq!(rt.state, SubscriptionState::RateLimited);
         assert!(rt.cooldown_until.is_some());
 
-        let (t, _, _) = transition(&mut rt, &Event::UserManualReset);
+        let (t, _, _) = transition(&mut rt, &Event::UserManualReset, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
         assert!(rt.cooldown_until.is_none());
@@ -489,12 +515,12 @@ mod tests {
     fn manual_reset_clears_transient_error_level() {
         let mut rt = runtime();
         for _ in 0..3 {
-            transition(&mut rt, &Event::HttpStatus(500));
+            transition(&mut rt, &Event::HttpStatus(500), None);
         }
         assert_eq!(rt.state, SubscriptionState::TransientError);
         assert!(rt.transient_error_level > 0);
 
-        let (t, _, _) = transition(&mut rt, &Event::UserManualReset);
+        let (t, _, _) = transition(&mut rt, &Event::UserManualReset, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
         assert_eq!(rt.transient_error_level, 0);
@@ -504,11 +530,11 @@ mod tests {
     #[test]
     fn manual_reset_does_not_unbreak_disabled() {
         let mut rt = runtime();
-        transition(&mut rt, &Event::UserDisable);
+        transition(&mut rt, &Event::UserDisable, None);
         assert_eq!(rt.state, SubscriptionState::Disabled);
 
         // 手动重置不应自动启用被用户主动关掉的订阅
-        let (t, _, _) = transition(&mut rt, &Event::UserManualReset);
+        let (t, _, _) = transition(&mut rt, &Event::UserManualReset, None);
         assert!(!t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Disabled);
         assert!(!rt.row.enabled);
@@ -517,7 +543,7 @@ mod tests {
     #[test]
     fn manual_reset_idempotent_on_healthy() {
         let mut rt = runtime();
-        let (t, _, _) = transition(&mut rt, &Event::UserManualReset);
+        let (t, _, _) = transition(&mut rt, &Event::UserManualReset, None);
         assert!(!t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
     }
@@ -528,6 +554,7 @@ mod tests {
         let (t, _, _) = transition(
             &mut rt,
             &Event::UpstreamSseError { is_quota_exhausted: false },
+            None,
         );
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::RateLimited);
@@ -541,6 +568,7 @@ mod tests {
         let (t, _, _) = transition(
             &mut rt,
             &Event::UpstreamSseError { is_quota_exhausted: true },
+            None,
         );
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::QuotaExhausted);
@@ -555,9 +583,10 @@ mod tests {
         transition(
             &mut rt,
             &Event::UpstreamSseError { is_quota_exhausted: true },
+            None,
         );
         assert_eq!(rt.state, SubscriptionState::QuotaExhausted);
-        let (t, _, _) = transition(&mut rt, &Event::CooldownExpired);
+        let (t, _, _) = transition(&mut rt, &Event::CooldownExpired, None);
         assert!(t.state_changed);
         assert_eq!(rt.state, SubscriptionState::Healthy);
     }

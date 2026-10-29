@@ -242,6 +242,8 @@ pub struct ImportPlan {
     /// Full new binding list for each virtual model that changes.
     pub bindings: Vec<(VirtualModelName, Vec<Uuid>)>,
     pub modes: Vec<(VirtualModelName, RoutingMode)>,
+    /// 模型池条目, 按 subscription_id 分组. 只包含本次新增订阅 (跳过本地已有订阅的池).
+    pub model_pools: Vec<(Uuid, Vec<crate::subscription::store::ModelPoolEntry>)>,
     pub report: ImportReport,
 }
 
@@ -343,7 +345,30 @@ pub fn plan(
         }
     }
 
-    ImportPlan { inserts, bindings, modes, report }
+    // 模型池: 按 subscription_id 分组, 但只保留本次新增的订阅 (已存在的跳过, 不覆盖本地池).
+    let mut pool_by_sub: HashMap<Uuid, Vec<crate::subscription::store::ModelPoolEntry>> = HashMap::new();
+    for entry in &file.model_pools {
+        if !new_ids.contains(&entry.subscription_id) {
+            continue;
+        }
+        // id 必须在 (subscription_id, capability, model_name) 三维内唯一 ——
+        // 同模型可跨多个 capability (gpt-4o 既是 llm 也是 multimodal), 只拼 sub+model 会撞 PRIMARY KEY.
+        let synthetic_id = format!("pool-{}-{}-{}", entry.subscription_id, entry.capability, entry.model_name);
+        let e = crate::subscription::store::ModelPoolEntry {
+            id: synthetic_id,
+            subscription_id: entry.subscription_id,
+            capability: entry.capability.clone(),
+            model_name: entry.model_name.clone(),
+            priority: entry.priority,
+            enabled: entry.enabled,
+            supported_inputs: entry.supported_inputs.clone(),
+        };
+        pool_by_sub.entry(entry.subscription_id).or_default().push(e);
+    }
+    let mut model_pools: Vec<(Uuid, Vec<crate::subscription::store::ModelPoolEntry>)> = pool_by_sub.into_iter().collect();
+    model_pools.sort_by_key(|(id, _)| *id);
+
+    ImportPlan { inserts, bindings, modes, model_pools, report }
 }
 
 pub async fn apply(pool: &sqlx::SqlitePool, plan: &ImportPlan) -> AppResult<()> {
@@ -353,6 +378,10 @@ pub async fn apply(pool: &sqlx::SqlitePool, plan: &ImportPlan) -> AppResult<()> 
     let mut tx = pool.begin().await?;
     for row in &plan.inserts {
         sub_store::insert_on(&mut tx, row).await?;
+    }
+    // 模型池条目: 覆盖式写入 (DELETE + INSERT), 与订阅写入同一事务.
+    for (sub_id, entries) in &plan.model_pools {
+        sub_store::save_model_pool_on(&mut tx, *sub_id, entries).await?;
     }
     for (name, ids) in &plan.bindings {
         vm_store::save_bindings_on(&mut tx, *name, ids).await?;
@@ -416,7 +445,7 @@ mod tests {
             subscription_ids: rows.iter().map(|r| r.id).collect(),
         }];
         let secrets = with_secrets.then(|| SecretOptions { password: PW, auth_token: "tok", cost: KdfCost::FAST });
-        let file = build_export(&rows, &vms, secrets, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(&rows, &vms, &[] as &[crate::subscription::store::ModelPoolEntry], secrets, "6.1.0", Utc::now()).unwrap();
         Fixture { rows, file }
     }
 
@@ -501,7 +530,7 @@ mod tests {
     fn builtin_subscription_without_secrets_gets_template_headers_back_from_the_registry() {
         let providers = Arc::new(crate::provider::loader::load_all().unwrap());
         let row = cloudflare_gateway_row(&providers);
-        let file = build_export(std::slice::from_ref(&row), &[], None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(std::slice::from_ref(&row), &[], &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         let exported = &file.subscriptions[0];
         assert!(exported.redacted_headers.contains(&"cf-aig-authorization".to_string()), "前提: 无密码导出时模板头被当成敏感头去掉");
 
@@ -534,7 +563,7 @@ mod tests {
         row.endpoint_protocol = crate::provider::model::EndpointProtocol::Systemone;
         row.model_discovery.enabled = false;
         row.model_slots.jev = "clef-flash".into();
-        let file = build_export(std::slice::from_ref(&row), &[], None, "6.3.1", Utc::now()).unwrap();
+        let file = build_export(std::slice::from_ref(&row), &[], &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.3.1", Utc::now()).unwrap();
         let plan = plan(&file, None, &empty_local(), Utc::now());
         let got = &plan.inserts[0];
         assert_eq!(got.provider_id, "custom-systemone");
@@ -549,7 +578,7 @@ mod tests {
     fn builtin_subscription_connection_comes_from_the_registry_not_the_file() {
         let providers = Arc::new(crate::provider::loader::load_all().unwrap());
         let row = cloudflare_gateway_row(&providers);
-        let mut file = build_export(std::slice::from_ref(&row), &[], None, "6.1.0", Utc::now()).unwrap();
+        let mut file = build_export(std::slice::from_ref(&row), &[], &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         file.subscriptions[0].base_url = "https://evil.example/accounts/x/ai".into();
         file.subscriptions[0].required_headers.insert("cf-aig-gateway-id".into(), "other".into());
         let local = LocalState { providers, ..empty_local() };
@@ -563,7 +592,7 @@ mod tests {
         // The registry is empty here: same behaviour as before (redacted header kept blank).
         let providers = crate::provider::loader::load_all().unwrap();
         let row = cloudflare_gateway_row(&providers);
-        let file = build_export(std::slice::from_ref(&row), &[], None, "6.1.0", Utc::now()).unwrap();
+        let file = build_export(std::slice::from_ref(&row), &[], &[] as &[crate::subscription::store::ModelPoolEntry], None, "6.1.0", Utc::now()).unwrap();
         let got = &plan(&file, None, &empty_local(), Utc::now()).inserts[0];
         assert_eq!(got.required_headers.get("cf-aig-authorization").map(String::as_str), Some(""));
         assert_eq!(got.required_headers.get("cf-aig-gateway-id").map(String::as_str), Some("gw-1"));

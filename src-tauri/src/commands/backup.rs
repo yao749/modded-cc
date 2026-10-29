@@ -83,6 +83,13 @@ async fn snapshot_vms(state: &AppState) -> Vec<VirtualModelSnapshot> {
         .collect()
 }
 
+async fn snapshot_pools(state: &AppState) -> Vec<crate::subscription::store::ModelPoolEntry> {
+    // 全量模型池条目, 扁平列. 可能为空 (用户没配过池).
+    crate::subscription::store::load_all_model_pools(&state.db)
+        .await
+        .unwrap_or_default()
+}
+
 async fn local_state(state: &AppState) -> LocalState {
     let existing_ids: HashSet<_> = state.subscriptions.read().await.keys().copied().collect();
     let bindings: HashMap<_, _> = state
@@ -98,6 +105,7 @@ async fn local_state(state: &AppState) -> LocalState {
 async fn render_export(state: &AppState, password: Option<Zeroizing<String>>) -> AppResult<(String, usize)> {
     let rows = snapshot_rows(state).await;
     let vms = snapshot_vms(state).await;
+    let pools = snapshot_pools(state).await;
     let token = Zeroizing::new(state.settings.read().await.auth_token.clone());
     let count = rows.len();
     // Argon2 (64 MiB, t=3) takes a few hundred ms; keep it off the async workers.
@@ -107,7 +115,7 @@ async fn render_export(state: &AppState, password: Option<Zeroizing<String>>) ->
             auth_token: token.as_str(),
             cost: KdfCost::DEFAULT,
         });
-        let file = build_export(&rows, &vms, secrets, env!("CARGO_PKG_VERSION"), Utc::now())?;
+        let file = build_export(&rows, &vms, &pools, secrets, env!("CARGO_PKG_VERSION"), Utc::now())?;
         Ok(serde_json::to_string_pretty(&file)?)
     })
     .await

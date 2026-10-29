@@ -1,7 +1,8 @@
 # cc-router 配置与使用教程（Windows）
 
-> 基于源码 v6.4.0 整理。cc-router 是本地运行的大模型聚合网关：多个订阅的 API Key  
-> 聚合为一个 Anthropic 兼容端点，供 Claude Code / Codex / Open WebUI 等工具接入。
+> 基于源码 v6.5.0 整理。cc-router 是本地运行的大模型聚合网关：多个订阅的 API Key  
+> 聚合为一个 Anthropic / OpenAI 兼容端点，供 Claude Code / Codex / Trae / Open WebUI 等工具接入。  
+> 支持经典四槽范式与能力分类池（pool）范式，两套共存、可随时切换门禁。
 
 ---
 
@@ -79,7 +80,9 @@ pnpm tauri dev      # 开发模式：前端 + Rust 后端 + 代理同时跑
 | `auth_enabled`       | `true`     | 是否校验 token                          |
 | `auth_token`         | 自动生成       | 32 位 hex，客户端用它鉴权                    |
 | `cors_enabled`       | `true`     | 响应附加 CORS 头                         |
-| `preferred_language` | `"system"` | `system` / `zh` / `en`              |
+| `preferred_language` | `"system"` | `system` / `zh` / `zh-Hant` / `en` / `ja` |
+| `routing_mode`       | `"slots"`  | `slots`=经典四槽；`pool`=能力分类池（详见第十三节）     |
+| `log_retention_days` | `30`       | 请求日志保留天数（0=永久）；到期自动清理            |
 | `web_ui_enabled`     | `false`    | 是否在代理端口提供网页管理界面 `/ui`               |
 | `autostart`          | `false`    | 开机自启                                |
 | `debug_mode`         | `false`    | 调试模式（出站请求体落盘）                       |
@@ -167,8 +170,8 @@ model = "model-sonnet"
 
 - Base URL：`http://127.0.0.1:23456/v1`
 - API Key：cc-router 设置页的 token
-- 模型名：`model-fable` 等，或 `gpt-6-sol` 等档位别名
-- 模型列表可从 `GET /v1/models` 拉取
+- 模型名：`model-fable` 等四槽名，或 `model-llm` / `model-multimodal` 等**能力池名**（见第十三节）；`gpt-6-sol` 等档位别名也支持
+- 模型列表可从 `GET /v1/models` 拉取（该端点免鉴权）
 
 ---
 
@@ -215,6 +218,9 @@ claude "你好，简单回一句"
 | 想局域网用                   | 设置 `listen_all=true`，客户端指向你的局域网 IP                           |
 | 端口被占                    | 23456 被别的程序占用；改 `proxy_port` 后重启代理                           |
 | 提示 Port 1420 in use（开发） | `Get-NetTCPConnection -LocalPort 1420` 找到进程杀掉                |
+| 503「模型不存在」（池模式）     | 模型 ID 填了真实模型名（如 `qwen3.8-max`）；池模式只能填能力名 `model-llm` 等 |
+| 400 `invalid_request_error` | pool 模式下发了四槽旧名（`model-opus` 等）；改用 `model-llm` 或切回 slots 模式 |
+| 请求偶发变慢 / 限流         | 上游返回 `Retry-After` 时，cc-router 会按 30s~30min 冷却后自动重试，属正常      |
 
 ---
 
@@ -222,6 +228,77 @@ claude "你好，简单回一句"
 
 - 安装版：app 内自动更新（GitHub / 中国源可切）
 - 源码版：`git pull` + `pnpm install` + 重新 build
+
+---
+
+## 十三、能力分类池模式（pool）与 Trae 接入
+
+cc-router 有两套**互相独立、可共存**的路由范式：
+
+| 范式 | 虚拟模型名 | 典型用途 | 门禁 |
+| --- | --- | --- | --- |
+| 经典四槽 (slots) | `model-fable` / `model-opus` / `model-sonnet` / `model-haiku` | Claude Code 等 Anthropic 工具 | 默认开 |
+| 能力分类池 (pool) | `model-llm` / `model-vision` / `model-multimodal` / `model-speech` / `model-embedding` | OpenAI 协议工具（Trae / Open WebUI / Cline 等） | **任何模式下都可用** |
+| 两者通用 | `model-jev`（仅 `/v1/systemone` 入口）、`model-fallback` | — | — |
+
+`settings.routing_mode`（`slots` 默认 / `pool`）只决定**门禁**与 `/v1/models` 清单过滤：
+
+- `slots`（默认）：四槽旧名可用，**能力池名也可用**——能力池范式在任何模式下都不被拦截（2026-10 修订：原为两套互斥，现已解耦）。
+- `pool`：四槽旧名被拦截（返回 `400` 并提示改用能力名），只暴露能力池。
+
+> 关键：想用能力池（`model-llm` 等）**不需要**切到 pool 模式；slots 模式下直接填 `model-llm` 也能用。  
+> 切到 pool 模式的意义只是把四槽旧名挡掉，防止工具误发 `model-opus` 这类名字。
+
+### 用池订阅接入 Trae（OpenAI Chat Completions）
+
+`routing_mode` 保持 `slots` 即可（切 `pool` 也行）。在 Trae 里：
+
+| 字段 | 填什么 |
+| --- | --- |
+| API 格式 | OpenAI Chat Completions |
+| 自定义请求地址 | `http://127.0.0.1:23456/v1` |
+| 完整 URL 开关 | **关**（Trae 自动在末尾拼 `/chat/completions`） |
+| 模型 ID | `model-llm`（对话主力）；视觉用 `model-multimodal`；纯图理解用 `model-vision` |
+| API 密钥 | cc-router 设置页的**访问令牌**（token 留空会 401） |
+
+两个坑：
+
+- 地址末尾**不要**手填 `/chat/completions`——开关关闭时 Trae 自己拼，你填了会变成双拼 → 404。
+- 模型 ID 只能填**能力名**（`model-llm` 等）。填真实模型名（如 `qwen3.8-max`）会走 fallback → 经典组 → 0 候选 → **503**。
+
+接入前用 curl 验通道（代理需先启动）：
+
+```bash
+# 免鉴权, 看池里有哪些能力模型
+curl http://127.0.0.1:23456/v1/models
+
+# 走一次池链（把 <token> 换成你的访问令牌）
+curl http://127.0.0.1:23456/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"model":"model-llm","messages":[{"role":"user","content":"hi"}],"max_tokens":32}'
+```
+
+第二条返回 200 且有回复，Trae 照上表填即可通。若改过代理端口（默认 23456），地址里的端口同步换掉。
+
+### 池订阅的调度与降序
+
+每个能力虚拟模型支持三种调度策略（`RoutingMode`，与全局 `routing_mode` 是两码事）：
+
+- `sequential`（顺序）：按优先级从高到低，失败一个试下一个。
+- `round_robin`（轮询）：在多条候选间轮流。
+- `sticky`（会话亲和）：同一会话固定走同一条。
+
+某条候选连续失败会被**持久化降序**到链尾（写库），下次优先用更健康的候选；恢复后顺序保留。上游若返回 `Retry-After` 头，冷却时长会被 **clamp 到 30s~30min**（默认 1800s 上限），避免长时间空等或频繁重试。
+
+### 备份与还原（含模型池）
+
+应用内「设置 → 备份 / 导出」生成的备份文件**现已包含模型池配置**（各订阅的能力链与优先级）。还原时：
+
+- 本次**新增**的订阅，其池配置一并还原；
+- 本地**已存在**的订阅，其池配置**不会被覆盖**（与订阅调度/配额逻辑一致，避免抹掉你手动调过的优先级）。
+
+如需整体覆盖，先删掉对应订阅再导入。
 
 ---
 
