@@ -147,6 +147,8 @@ pub fn run() {
             commands::virtual_models::list_virtual_models,
             commands::virtual_models::update_virtual_model,
             commands::virtual_models::list_model_pools,
+            commands::virtual_models::list_pool_subscription_order,
+            commands::virtual_models::reorder_pool_subscriptions,
             commands::requests::list_requests,
             commands::requests::export_requests_csv,
             commands::requests::export_requests_csv_text,

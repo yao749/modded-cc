@@ -305,11 +305,11 @@ export type CapabilityCategory =
   | "speech"
   | "embedding";
 
-/** 能力分类 → 显示标签 (中文). */
+/** 能力分类 → 显示标签 (中文, v6.5 语义重定义). */
 export const CAPABILITY_LABEL: Record<CapabilityCategory, string> = {
-  vision: "视觉模型",
+  vision: "图像/视频生成",
   llm: "大语言模型",
-  multimodal: "多模态模型",
+  multimodal: "全模态翻译",
   speech: "语音模型",
   embedding: "向量嵌入",
 };
@@ -334,25 +334,27 @@ export interface ModelPoolEntry {
   /** 同 capability 下的优先级, 0 = 最高. */
   priority: number;
   enabled: boolean;
-  /** 该模型支持的输入模态, 默认从 capability 推断:
-   *  - vision/multimodal → ["text", "image"]
-   *  - speech → ["text", "audio"]
-   *  - llm/embedding → ["text"]
-   * 借鉴 DSH 的 input: [text, image] 字段. */
+  /** 该模型支持的输入模态, 默认从 capability 推断 (v6.5 语义重定义):
+   *  - vision     → ["text"] (文生图/文生视频只要提示词, 输出不算输入)
+   *  - multimodal→ ["text", "document", "image", "audio"] (全模态翻译 + 图片理解)
+   *  - llm       → ["text"] (纯文本生成/对话)
+   *  - speech    → ["text", "audio"]
+   *  - embedding → ["text"] */
   supported_inputs: InputModality[];
 }
 
-/** 三种输入模态. */
-export type InputModality = "text" | "image" | "audio";
+/** 四种输入模态 (v6.5 加 document). */
+export type InputModality = "text" | "image" | "audio" | "document";
 
-/** 从 capability 推断默认的 supported_inputs. */
+/** 从 capability 推断默认的 supported_inputs (v6.5 语义重定义). */
 export function defaultInputsForCapability(
   cap: CapabilityCategory,
 ): InputModality[] {
   switch (cap) {
     case "vision":
+      return ["text"];
     case "multimodal":
-      return ["text", "image"];
+      return ["text", "document", "image", "audio"];
     case "speech":
       return ["text", "audio"];
     default:

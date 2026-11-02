@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ProviderLogo } from "@/components/ProviderLogo";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +14,7 @@ import { ModelPoolPicker } from "@/components/ModelPoolPicker";
 import { StatusBadge } from "@/components/StatusBadge";
 import { api } from "@/api/tauri";
 import { useSubscriptions, useSetSubscriptionEnabled, useDeleteSubscription } from "@/hooks/useSubscriptions";
+import { VIRTUAL_MODELS_KEY } from "@/hooks/useVirtualModels";
 import { useT } from "@/i18n";
 import { CAPABILITY_LABEL, type CapabilityCategory, type ModelInfo, type ModelPoolEntry, type SubscriptionDto } from "@/types";
 
@@ -32,6 +35,23 @@ export function PoolPage() {
   const subs = useSubscriptions("pool");
   const queryClient = useQueryClient();
   const pools = useQuery({ queryKey: MODEL_POOLS_KEY, queryFn: () => api.listModelPools() });
+
+  // 池订阅的全局顺序 (等价于 5 个能力模型绑定顺序的合并)
+  const orderQuery = useQuery({
+    queryKey: ["pool-sub-order"],
+    queryFn: () => api.listPoolSubscriptionOrder(),
+  });
+  const [order, setOrder] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (orderQuery.data) setOrder(orderQuery.data);
+  }, [orderQuery.data]);
+  const reorderMut = useMutation({
+    mutationFn: (next: string[]) => api.reorderPoolSubscriptions(next),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pool-sub-order"] });
+      queryClient.invalidateQueries({ queryKey: VIRTUAL_MODELS_KEY });
+    },
+  });
 
   /** 正在编辑的订阅 */
   const [editing, setEditing] = useState<string | null>(null);
@@ -128,6 +148,43 @@ export function PoolPage() {
     [rows, bySub],
   );
 
+  const subsById = useMemo(() => {
+    const m = new Map<string, SubscriptionDto>();
+    for (const s of rows) m.set(s.id, s);
+    return m;
+  }, [rows]);
+
+  /** 按全局顺序渲染的行; 只含真正绑定到某个能力池的订阅 (即会参与路由的成员) */
+  const orderRows = useMemo(() => {
+    const seen = new Set<string>();
+    const out: SubscriptionDto[] = [];
+    for (const id of order ?? []) {
+      const s = subsById.get(id);
+      if (s && !seen.has(id)) {
+        seen.add(id);
+        out.push(s);
+      }
+    }
+    return out;
+  }, [order, subsById]);
+
+  /** 上下箭头换位: 立即本地生效并落库 (每次交换把完整顺序发给后端) */
+  function moveOrder(idx: number, dir: -1 | 1) {
+    const j = idx + dir;
+    if (j < 0 || j >= orderRows.length) return;
+    const ids = orderRows.map((s) => s.id);
+    [ids[idx], ids[j]] = [ids[j], ids[idx]];
+    setOrder(ids);
+    reorderMut.mutate(ids);
+  }
+
+  /** 某订阅在本池里启用的能力名 (仅用于顺序行副标题) */
+  function capsOf(subId: string): string {
+    const entries = bySub.get(subId) ?? [];
+    const caps = CAPABILITIES.filter((c) => entries.some((e) => e.capability === c && e.enabled));
+    return caps.length === 0 ? "—" : caps.map((c) => CAPABILITY_LABEL[c]).join(" / ");
+  }
+
   return (
     <>
       <div className="page-header">
@@ -223,6 +280,71 @@ export function PoolPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 订阅顺序: 全局统一 (5 个能力池共用), 上下箭头调整 */}
+      <div className="page-header" style={{ marginTop: 24 }}>
+        <h2>{t("pool.order.title")}</h2>
+        <div className="subtitle">{t("pool.order.subtitle")}</div>
+      </div>
+
+      {orderRows.length === 0 ? (
+        <div className="card section">
+          <div className="card-body text-sm text-muted-foreground">{t("pool.order.empty")}</div>
+        </div>
+      ) : (
+        <div className="card section">
+          <div className="card-body" style={{ display: "grid", gap: 8 }}>
+            <div className="field-hint" style={{ marginTop: 0 }}>{t("pool.order.hint")}</div>
+            {orderRows.map((sub, idx) => (
+              <div
+                key={sub.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "8px 10px",
+                  border: "1px solid var(--border-2)",
+                  borderRadius: 8,
+                }}
+              >
+                <span
+                  className="priority mono"
+                  style={{ width: 22, textAlign: "center", color: "var(--ink-2)", fontSize: 12 }}
+                >
+                  {idx + 1}
+                </span>
+                <ProviderLogo iconId={sub.provider_icon} size={18} iconSize={11} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 500 }}>{sub.display_name}</div>
+                  <div className="text-xs text-muted-foreground">{capsOf(sub.id)}</div>
+                </div>
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  style={{ padding: "4px 6px" }}
+                  disabled={idx === 0 || reorderMut.isPending}
+                  onClick={() => moveOrder(idx, -1)}
+                  title={t("pool.order.moveUp")}
+                  aria-label={t("pool.order.moveUp")}
+                >
+                  <ChevronUp size={13} />
+                </button>
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  style={{ padding: "4px 6px" }}
+                  disabled={idx === orderRows.length - 1 || reorderMut.isPending}
+                  onClick={() => moveOrder(idx, 1)}
+                  title={t("pool.order.moveDown")}
+                  aria-label={t("pool.order.moveDown")}
+                >
+                  <ChevronDown size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 管理订阅: 能力池自己的订阅管理, 与经典「订阅管理」页分开 */}
       <div className="page-header" style={{ marginTop: 24 }}>

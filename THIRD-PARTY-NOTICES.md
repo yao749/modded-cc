@@ -3,6 +3,8 @@
 cc-router 本体以 MIT 许可证发布 (见 [LICENSE](LICENSE))。本文件声明项目使用的第三方
 组件及其许可证。
 
+> **魔改声明**：本分支的 cc-router 为 **cc** 的二次开发分支（魔改 / fork），原作者 **cc**（[@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者；原项目的版权与许可仍归属原作者 cc。
+
 > 字体部分由 `scripts/collect-receipt-fonts.mjs` 从 `node_modules` 生成, 请勿手工编辑。
 > 许可证正文保留英文原文 —— 译本不具法律效力。
 

@@ -26,6 +26,8 @@
   <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 Official Site ccrouter.app</a>
 </p>
 
+> **About this fork**: This project is a fork / modified version of **cc-router**, originally created by **cc** (hosted at [@//cc/](https://github.com/finch-xu/cc-router)). I am only a secondary developer, not the original author, and do not speak for them. All changes in this branch are maintained by me; the original project's copyright and license remain with the original author cc.
+
 A locally-running LLM aggregation gateway with a desktop GUI, zero-code setup: bundle your scattered `Token Plan`, `Coding Plan`, and LLM API quotas into a single virtual Plan, and plug it into Claude Code, Claude Desktop App, OpenClaw, OpenCode, Codex and more —— save money! save tokens! 100% local!
 
 > ⚠️ Notice: this tool only switches between subscription plans you already own. Request bodies are passed through almost verbatim — no reverse engineering, no jailbreak, no circumvention. You are responsible for complying with each plan's terms of service. cc-router is intended for use with coding tools like Claude Code only; do not use it for anything else.

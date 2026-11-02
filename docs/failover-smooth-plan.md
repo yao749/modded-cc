@@ -1,8 +1,12 @@
 # 方案：池订阅故障转移「纯丝滑」模式（变体 B）
 
-> 状态：讨论稿（仅方案，未改代码）
+> 状态：**已实现**（2026-10-30 复核）。
+>   - `retry.rs:99` 与 `state_machine.rs:338` 的 B 变体改动已随 `a715fa4` 提交；
+>   - 「池模式（chain）下任何失败立即 `break 'sub_loop` 切下一订阅 + 统一 demote」的 pipeline 改动在工作区，**尚未提交**。
 > 关联：`docs/pool-subscription-page-plan.md`
 > 决策：用户选定 **B** —— 401/403 不进 `AuthFailed` 终态、不显示「凭证失效」、不进冷却；Key 坏了也当普通失败转移，一声不吭。统一策略仍是「任何报错 → 模型级降序 + 切换订阅」。
+
+> **魔改声明**：本文档所记述的 cc-router 为 **cc** 的二次开发分支（魔改 / fork），原作者 **cc**（[@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者。
 
 ---
 

@@ -22,13 +22,13 @@ pub enum VirtualModelName {
 
     // ---- 以下 5 个为能力分类虚拟模型, 走模型池路由 (与四槽共存互不干扰) ----
 
-    /// 视觉模型池 (图像生成/编辑/理解)
+    /// 媒体生成池 (文生图 / 文生视频)
     #[serde(rename = "model-vision")]
     Vision,
-    /// 大语言模型池 (文本生成/对话)
+    /// 大语言模型池 (纯文本生成/对话)
     #[serde(rename = "model-llm")]
     Llm,
-    /// 多模态模型池 (文本+图像混合输入输出)
+    /// 全模态翻译池 (MT-uni: 文本/文档/图片/音频 → 译文, 保留原排版; 兼图片理解)
     #[serde(rename = "model-multimodal")]
     Multimodal,
     /// 语音模型池 (TTS/ASR)
@@ -63,9 +63,9 @@ impl CapabilityCategory {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Vision => "视觉模型",
+            Self::Vision => "图像/视频生成",
             Self::Llm => "大语言模型",
-            Self::Multimodal => "多模态模型",
+            Self::Multimodal => "全模态翻译",
             Self::Speech => "语音模型",
             Self::Embedding => "向量嵌入",
         }

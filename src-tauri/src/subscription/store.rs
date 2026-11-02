@@ -726,10 +726,18 @@ pub struct ModelPoolEntry {
     pub supported_inputs: Option<Vec<String>>,
 }
 
-/// 从 capability 推断默认的 supported_inputs (新建条目时用).
+/// 从 capability 推断默认的 supported_inputs (新建条目时用, v6.5 语义重定义).
 pub fn default_inputs_for_capability(cap: &str) -> Vec<String> {
     match cap {
-        "vision" | "multimodal" => vec!["text".into(), "image".into()],
+        // 媒体生成池: 文生图/文生视频只要提示词, 输出不算输入
+        "vision" => vec!["text".into()],
+        // 全模态翻译池: 文本/文档/图片/音频全覆盖, 兼图片理解
+        "multimodal" => vec![
+            "text".into(),
+            "document".into(),
+            "image".into(),
+            "audio".into(),
+        ],
         "speech" => vec!["text".into(), "audio".into()],
         _ => vec!["text".into()],
     }

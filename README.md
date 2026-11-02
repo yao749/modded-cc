@@ -26,6 +26,8 @@
   <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 官方网站ccrouter.app</a>
 </p>
 
+> **关于本分支（魔改声明）**：本项目是 **cc-router** 的二次开发分支（魔改 / fork）。**原作者为 cc**（项目托管于 [@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者，也不代表原作者立场；本分支的全部改动由维护者负责，原项目的版权与许可仍归属原作者 cc。
+
 本地运行的大模型聚合网关，GUI桌面端app，零代码部署，把零散的 `Token Plan`、`Coding Plan`、大模型 API 额度聚合成一个虚拟 Plan，一键接入 Claude Code、Claude Desktop App、OpenClaw、OpenCode、Codex 等工具 —— 省钱！省 Token！完全本地运行！
 
 > 注意⚠️ 本工具仅限于自动切换订阅套餐，请求体几乎完全透传，不涉及逆向、不涉及破解等操作。用户需自行遵守每个编程套餐的使用规则。此工具只能用于 Claude Code 等编程工具，切勿用于其他用途。

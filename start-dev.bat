@@ -1,6 +1,7 @@
 @echo off
 setlocal
-cd /d E:\cc-router-main
+REM 获取本批处理文件所在目录并切换过去 (避免依赖写死的路径)
+cd /d "%~dp0"
 
 echo ============================================
 echo   cc-router dev launcher

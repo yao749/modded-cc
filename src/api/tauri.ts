@@ -133,6 +133,11 @@ export const api = {
   updateVirtualModel: (name: VirtualModelName, input: UpdateVirtualModelInput) =>
     invoke<void>("update_virtual_model", { name, input }),
   listModelPools: () => invoke<import("@/types").ModelPoolEntry[]>("list_model_pools"),
+  /** 池订阅全局展示顺序 (等价于各能力模型绑定顺序的合并) */
+  listPoolSubscriptionOrder: () => invoke<string[]>("list_pool_subscription_order"),
+  /** 按给定全局顺序重排所有能力池模型的订阅绑定 (只改顺序, 不改成员) */
+  reorderPoolSubscriptions: (order: string[]) =>
+    invoke<void>("reorder_pool_subscriptions", { order }),
 
   // request logs
   listRequests: (

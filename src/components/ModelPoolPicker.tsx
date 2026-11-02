@@ -1,12 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { RefreshCw, CircleAlert, ChevronUp, ChevronDown, Trash2, Plus, ToggleLeft, ToggleRight, Check, X, Minus, CircleHelp, Sparkles } from "lucide-react";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   CAPABILITY_LABEL,
   defaultInputsForCapability,
@@ -759,46 +752,14 @@ function EntryRow({
         {idx + 1}
       </div>
 
-      {/* 模型输入 (优先用下拉, 没有发现列表时退化成输入) */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        {discoveryCandidates.length > 0 ? (
-          <Select
-            value={entry.model_name}
-            onValueChange={onModelNameChange}
-            disabled={disabled}
-          >
-            <SelectTrigger className="font-mono" style={{ width: "100%", height: 30 }}>
-              <SelectValue placeholder="选择或输入模型名" />
-            </SelectTrigger>
-            <SelectContent>
-              {/* 总是把当前值放进来避免 Radix 卸载选中项 */}
-              <SelectItem value={entry.model_name} className="font-mono">
-                {entry.model_name}
-              </SelectItem>
-              {discoveryCandidates
-                .filter((m) => m.id !== entry.model_name)
-                .map((m) => (
-                  <SelectItem key={m.id} value={m.id} className="font-mono">
-                    {m.display_name || m.id}
-                    {m.inferred_capability && (
-                      <span style={{ marginLeft: 6, opacity: 0.6, fontSize: 11 }}>
-                        · 推断: {CAPABILITY_LABEL[m.inferred_capability]}
-                      </span>
-                    )}
-                  </SelectItem>
-                ))}
-            </SelectContent>
-          </Select>
-        ) : (
-          <input
-            className="input mono"
-            style={{ width: "100%", height: 30 }}
-            value={entry.model_name}
-            onChange={(e) => onModelNameChange(e.target.value)}
-            placeholder="输入上游模型名 (如 gpt-4o)"
-            disabled={disabled}
-          />
-        )}
+      {/* 模型输入: 可编辑下拉框 (input 永远可自由输入, 发现列表只作建议) */}
+      <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+        <ModelNameCombobox
+          value={entry.model_name}
+          onChange={onModelNameChange}
+          options={discoveryCandidates}
+          disabled={disabled}
+        />
         {inferredMismatch && (
           <div
             style={{
@@ -825,7 +786,7 @@ function EntryRow({
         }}
         title="该模型支持的输入模态, 路由时会校验请求体是否兼容"
       >
-        {(["text", "image", "audio"] as InputModality[]).map((mod) => {
+        {(["text", "image", "audio", "document"] as InputModality[]).map((mod) => {
           const active = entry.supported_inputs.includes(mod);
           return (
             <button
@@ -847,7 +808,7 @@ function EntryRow({
                 whiteSpace: "nowrap",
               }}
             >
-              {mod === "text" ? "文本" : mod === "image" ? "图片" : "音频"}
+              {mod === "text" ? "文本" : mod === "image" ? "图片" : mod === "audio" ? "音频" : "文档"}
             </button>
           );
         })}
@@ -916,5 +877,193 @@ function EntryRow({
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * 可编辑下拉框: 输入框永远可自由打字, 下拉列表只是建议。
+ *
+ * 之前用 Radix `<Select>` 有个硬伤 —— 它只允许从选项里挑, 不支持自由文本。
+ * 一旦「模型发现列表」拉到过 (刷新模型列表 / 自动获取并填充), 模型名就变成纯下拉,
+ * 上游 `/models` 没返回的模型、或自定义模型名都填不进去, 「手动输入」建的空行也只能下拉。
+ *
+ * 现在改成 input + 行内建议列表:
+ *   - 任意文本都可输入 (自由文本即最终值, 不会被强制改回列表项);
+ *   - 列表项作为建议, 按输入过滤, 支持 ↑/↓ 选择、回车确认、Esc 关闭;
+ *   - 菜单绝对定位在输入框正下方 (必要时上翻), 随所在容器滚动, 不被 Dialog 模态层拦截。
+ */
+function ModelNameCombobox({
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: ModelInfo[];
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(-1);
+  /** 视口下方放不下时向上弹 */
+  const [flipUp, setFlipUp] = useState(false);
+  /** 用户正在输入才按内容过滤; 刚聚焦时展示全部建议 (否则只会命中当前值那一条) */
+  const [dirty, setDirty] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const query = value.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!dirty || !query) return options;
+    return options.filter(
+      (m) =>
+        m.id.toLowerCase().includes(query) ||
+        (m.display_name ?? "").toLowerCase().includes(query),
+    );
+  }, [options, query, dirty]);
+
+  function openMenu() {
+    const el = inputRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const menuMax = 240;
+    // 下方放不下且上方空间更大 → 向上弹
+    setFlipUp(window.innerHeight - r.bottom < menuMax && r.top > menuMax);
+    setOpen(true);
+    setHover(-1);
+  }
+
+  function closeMenu() {
+    setOpen(false);
+    setHover(-1);
+  }
+
+  function pick(m: ModelInfo) {
+    onChange(m.id);
+    setDirty(false);
+    closeMenu();
+  }
+
+  function onKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
+    if (!open) {
+      if (e.key === "ArrowDown" && options.length > 0) {
+        e.preventDefault();
+        openMenu();
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHover((h) => Math.min(h + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHover((h) => Math.max(h - 1, 0));
+    } else if (e.key === "Enter") {
+      if (hover >= 0 && hover < filtered.length) {
+        e.preventDefault();
+        pick(filtered[hover]);
+      } else {
+        // 没有高亮项: 保留当前自由文本
+        closeMenu();
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeMenu();
+    }
+  }
+
+  // 点击外部 → 关闭菜单 (菜单绝对定位在行内, 随容器滚动, 无需额外监听 scroll/resize)
+  useEffect(() => {
+    if (!open) return;
+    function onDocMouseDown(ev: MouseEvent) {
+      const t = ev.target as HTMLElement | null;
+      if (inputRef.current?.contains(t as Node)) return;
+      if (t?.closest?.("[data-model-combobox-menu]")) return;
+      closeMenu();
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        className="input mono"
+        style={{ width: "100%", height: 30 }}
+        value={value}
+        onChange={(e) => {
+          setDirty(true);
+          onChange(e.target.value);
+          if (!open && options.length > 0) openMenu();
+        }}
+        onFocus={() => {
+          setDirty(false);
+          if (options.length > 0) openMenu();
+        }}
+        onKeyDown={onKeyDown}
+        placeholder="输入或选择上游模型名 (如 gpt-4o)"
+        disabled={disabled}
+        autoComplete="off"
+        spellCheck={false}
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+      />
+      {open && filtered.length > 0 && (
+          <div
+            data-model-combobox-menu
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              ...(flipUp ? { bottom: "calc(100% + 4px)" } : { top: "calc(100% + 4px)" }),
+              maxHeight: 240,
+              overflowY: "auto",
+              zIndex: 40,
+              background: "var(--surface, #ffffff)",
+              border: "1px solid var(--line-2, #c9c5ba)",
+              borderRadius: 8,
+              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.18)",
+              padding: 4,
+            }}
+          >
+            {filtered.map((m, i) => (
+              <div
+                key={m.id}
+                // 用 mousedown + preventDefault: 抢在 input blur 之前选中, 点击不丢焦点
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(m);
+                }}
+                onMouseEnter={() => setHover(i)}
+                className="font-mono"
+                style={{
+                  padding: "6px 8px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  fontSize: 12,
+                  lineHeight: 1.4,
+                  background: i === hover ? "var(--surface-2, #f5f3ec)" : "transparent",
+                  color: "var(--ink, #141413)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+                title={m.id}
+              >
+                {m.display_name || m.id}
+                {m.display_name && m.display_name !== m.id && (
+                  <span style={{ marginLeft: 6, opacity: 0.55, fontSize: 11 }}>{m.id}</span>
+                )}
+                {m.inferred_capability && (
+                  <span style={{ marginLeft: 6, opacity: 0.55, fontSize: 11 }}>
+                    · 推断: {CAPABILITY_LABEL[m.inferred_capability]}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+    </>
   );
 }

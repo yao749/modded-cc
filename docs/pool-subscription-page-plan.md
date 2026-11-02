@@ -1,7 +1,12 @@
 # 方案：池专属的「添加订阅」页面
 
+> 状态：**已实现**（`/pool/new` → `src/routes/PoolSubscriptionNew.tsx`；步骤 2 用 `ModelPoolPicker` 配能力池条目，
+> 不再复用四槽 `ModelSlotPicker`）。2026-10-30 复核。
+>
 > 2026-10-28 · 需求：点击 池管理 → 添加订阅 时，不再跳转复用的经典订阅向导，
 > 而是进入一个为能力池范式设计的新页面。
+>
+> **魔改声明**：本文档所记述的 cc-router 为 **cc** 的二次开发分支（魔改 / fork），原作者 **cc**（[@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者。
 
 ---
 

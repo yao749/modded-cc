@@ -96,10 +96,35 @@ fn slot_forced_effort(slot_efforts: &SlotEfforts, vm_name: VirtualModelName) -> 
 ///   - OpenAI chat_completions: { type: "image_url" } → image
 ///   - OpenAI responses: input 里含 image_url / input_image → image
 ///   - 同时检查 audio 相关 type
+///   - v6.5 新增 document 检测: block type 含 file/document, 或 URL 扩展名匹配
+///     pdf/docx/pptx/xlsx/html/md/txt → document
 /// 返回 body 里实际出现过的模态集合 (可能为空).
 fn detect_request_inputs(body: &serde_json::Value) -> Vec<&'static str> {
     use serde_json::Value;
     let mut out = Vec::new();
+
+    // 轻量 document 扩展名匹配 (小写)
+    const DOC_EXTS: &[&str] = &["pdf", "docx", "doc", "pptx", "ppt", "xlsx", "xls", "html", "htm", "md", "txt", "csv", "json"];
+    fn is_doc_url(s: &str) -> bool {
+        let lower = s.to_ascii_lowercase();
+        // data URI: data:application/pdf;base64,... 或 word/excel/ppt 的 mime
+        if lower.starts_with("data:")
+            && (lower.contains("pdf")
+                || lower.contains("msword")
+                || lower.contains("officedocument"))
+        {
+            return true;
+        }
+        // 普通 URL: 看最后一个点后的扩展名
+        lower.rsplit('.').next().map(|ext| DOC_EXTS.contains(&ext)).unwrap_or(false)
+    }
+    fn mark_doc_if_url<'a>(out: &mut Vec<&'static str>, url: Option<&'a str>) {
+        if let Some(u) = url {
+            if is_doc_url(u) && !out.contains(&"document") {
+                out.push("document");
+            }
+        }
+    }
 
     // chat.completions 格式: messages[].content 可能是 string 或 [{type: ...}]
     if let Some(msgs) = body.pointer("/messages").and_then(Value::as_array) {
@@ -115,8 +140,13 @@ fn detect_request_inputs(body: &serde_json::Value) -> Vec<&'static str> {
                         "image_url" | "image" => if !out.contains(&"image") { out.push("image"); },
                         "input_image" => if !out.contains(&"image") { out.push("image"); },
                         "audio" | "audio_url" | "input_audio" => if !out.contains(&"audio") { out.push("audio"); },
+                        "file_url" | "file" | "document" => {
+                            if !out.contains(&"document") { out.push("document"); }
+                        }
                         _ => {}
                     }
+                    // 兜底: block 里的 url 字段若指向文档扩展名, 也标记 document
+                    mark_doc_if_url(&mut out, block.get("url").and_then(Value::as_str));
                 }
             }
         }
@@ -128,9 +158,13 @@ fn detect_request_inputs(body: &serde_json::Value) -> Vec<&'static str> {
                 match block_type {
                     "image_url" | "input_image" | "image" => if !out.contains(&"image") { out.push("image"); },
                     "audio_url" | "input_audio" | "audio" => if !out.contains(&"audio") { out.push("audio"); },
+                    "file_url" | "file" | "document" => {
+                        if !out.contains(&"document") { out.push("document"); }
+                    }
                     _ => {}
                 }
             }
+            mark_doc_if_url(&mut out, inp.get("url").and_then(Value::as_str));
         }
     }
 
@@ -417,6 +451,7 @@ pub async fn dispatch(
     let body_inputs = detect_request_inputs(&request_body);
     let body_has_image = body_inputs.contains(&"image");
     let body_has_audio = body_inputs.contains(&"audio");
+    let body_has_document = body_inputs.contains(&"document");
 
     'sub_loop: for sub_id in order.candidate_ids {
         let attempt_id = Uuid::new_v4();
@@ -507,8 +542,13 @@ pub async fn dispatch(
                             .as_deref()
                             .map(|v| v.iter().any(|s| s == "audio"))
                             .unwrap_or(false);
+                        let supports_document = supported_inputs
+                            .as_deref()
+                            .map(|v| v.iter().any(|s| s == "document"))
+                            .unwrap_or(false);
                         if (body_has_image && !supports_image)
                             || (body_has_audio && !supports_audio)
+                            || (body_has_document && !supports_document)
                         {
                             warn!(model=%m, "model pool entry input mismatch, dropping from chain");
                             false
@@ -726,11 +766,15 @@ pub async fn dispatch(
                     };
                     let _ = state.request_log_tx.try_send(entry);
 
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if retryable {
                         retry_count += 1;
                         continue;
                     }
-                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
+                    return Ok(oauth_dispatch::build_error_response(&err));
                 }
             }
         }
@@ -838,11 +882,15 @@ pub async fn dispatch(
                     };
                     let _ = state.request_log_tx.try_send(entry);
 
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if retryable {
                         retry_count += 1;
                         continue;
                     }
-                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
+                    return Ok(oauth_dispatch::build_error_response(&err));
                 }
             }
         }
@@ -960,11 +1008,15 @@ pub async fn dispatch(
                     };
                     let _ = state.request_log_tx.try_send(entry);
 
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if retryable {
                         retry_count += 1;
                         continue;
                     }
-                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
+                    return Ok(oauth_dispatch::build_error_response(&err));
                 }
             }
         }
@@ -1093,11 +1145,15 @@ pub async fn dispatch(
                     };
                     let _ = state.request_log_tx.try_send(entry);
 
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if retryable {
                         retry_count += 1;
                         continue;
                     }
-                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
+                    return Ok(oauth_dispatch::build_error_response(&err));
                 }
             }
         }
@@ -1225,11 +1281,15 @@ pub async fn dispatch(
                     };
                     let _ = state.request_log_tx.try_send(entry);
 
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if retryable {
                         retry_count += 1;
                         continue;
                     }
-                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
+                    return Ok(oauth_dispatch::build_error_response(&err));
                 }
             }
         }
@@ -1356,11 +1416,15 @@ pub async fn dispatch(
                     };
                     let _ = state.request_log_tx.try_send(entry);
 
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if retryable {
                         retry_count += 1;
                         continue;
                     }
-                    if chain_mode { break 'sub_loop; } else { return Ok(oauth_dispatch::build_error_response(&err)); }
+                    return Ok(oauth_dispatch::build_error_response(&err));
                 }
             }
         }
@@ -1595,9 +1659,18 @@ pub async fn dispatch(
                 };
                 let _ = state.request_log_tx.try_send(entry);
 
-                if let ShouldRetry::Yes(_) = should_retry {
-                    retry_count += 1;
-                    continue;
+                if !status.is_success() {
+                    demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
+                }
+                if !status.is_success() {
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
+                    if let ShouldRetry::Yes(_) = should_retry {
+                        retry_count += 1;
+                        continue;
+                    }
                 }
 
                 return Ok(build_non_streaming_response(status, resp_headers, final_body));
@@ -1622,15 +1695,18 @@ pub async fn dispatch(
                         retry_after,
                     )
                     .await;
+                    if chain_mode {
+                        retry_count += 1;
+                        break 'sub_loop;
+                    }
                     if matches!(
                         classify_response(status.as_u16(), None),
                         ShouldRetry::Yes(_)
                     ) {
                         retry_count += 1;
                         continue;
-                    } else {
-                        if chain_mode { break 'sub_loop; } else { return Ok(build_error_status(status)); }
                     }
+                    return Ok(build_error_status(status));
                 }
 
                 // 智谱等上游用 200 + `event: error` 表达限流; 不 peek 会被透传成假成功.
@@ -1709,6 +1785,9 @@ pub async fn dispatch(
                         let _ = state.request_log_tx.try_send(entry);
 
                         retry_count += 1;
+                        if chain_mode {
+                            break 'sub_loop;
+                        }
                         continue;
                     }
                     sse::PeekResult::Network(e) => {
@@ -1759,6 +1838,9 @@ pub async fn dispatch(
                         };
                         let _ = state.request_log_tx.try_send(entry);
                         retry_count += 1;
+                        if chain_mode {
+                            break 'sub_loop;
+                        }
                         continue;
                     }
                     sse::PeekResult::Malformed(bytes) => {
@@ -1784,7 +1866,11 @@ pub async fn dispatch(
                                 bytes.to_vec(),
                             ));
                         }
+                        demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
                         retry_count += 1;
+                        if chain_mode {
+                            break 'sub_loop;
+                        }
                         continue;
                     }
                     sse::PeekResult::Ok {
@@ -1892,7 +1978,11 @@ pub async fn dispatch(
                 };
                 let _ = state.request_log_tx.try_send(entry);
 
+                demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
                 retry_count += 1;
+                if chain_mode {
+                    break 'sub_loop;
+                }
                 continue;
             }
         }

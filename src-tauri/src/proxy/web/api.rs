@@ -156,6 +156,8 @@ web_commands! {
     // virtual models
     list_virtual_models() => commands::virtual_models::list_virtual_models(st).await,
     list_model_pools() => commands::virtual_models::list_model_pools(st).await,
+    list_pool_subscription_order() => commands::virtual_models::list_pool_subscription_order(st).await,
+    reorder_pool_subscriptions(order: Vec<String>) => commands::virtual_models::reorder_pool_subscriptions(st, args.order).await,
     update_virtual_model(name: String, input: UpdateVirtualModelInput) => commands::virtual_models::update_virtual_model(st, args.name, args.input).await,
     // request logs
     list_requests(page: u32, page_size: u32, filters: Option<RequestLogFilters>) => commands::requests::list_requests(st, args.page, args.page_size, args.filters).await,
