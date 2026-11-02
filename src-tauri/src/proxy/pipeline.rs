@@ -637,7 +637,7 @@ pub async fn dispatch(
                 break 'sub_loop;
             }
             if !chain_mode && slot_attempted {
-                break 'sub_loop;
+                break;
             }
             slot_attempted = true;
             // chain 模式: 从链里取下一个模型覆盖 real_model
@@ -645,7 +645,7 @@ pub async fn dispatch(
                 real_model = model_name;
             } else if chain_mode {
                 // chain 模式但链已耗尽 → 放弃此订阅
-                break 'sub_loop;
+                break;
             }
             // 四槽模式 + chain_iter None → real_model 保持快照层算好的值
 
@@ -768,7 +768,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if retryable {
                         retry_count += 1;
@@ -884,7 +884,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1010,7 +1010,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1147,7 +1147,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1283,7 +1283,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1418,7 +1418,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1665,7 +1665,7 @@ pub async fn dispatch(
                 if !status.is_success() {
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if let ShouldRetry::Yes(_) = should_retry {
                         retry_count += 1;
@@ -1697,7 +1697,7 @@ pub async fn dispatch(
                     .await;
                     if chain_mode {
                         retry_count += 1;
-                        break 'sub_loop;
+                        break;
                     }
                     if matches!(
                         classify_response(status.as_u16(), None),
@@ -1786,7 +1786,7 @@ pub async fn dispatch(
 
                         retry_count += 1;
                         if chain_mode {
-                            break 'sub_loop;
+                            break;
                         }
                         continue;
                     }
@@ -1839,7 +1839,7 @@ pub async fn dispatch(
                         let _ = state.request_log_tx.try_send(entry);
                         retry_count += 1;
                         if chain_mode {
-                            break 'sub_loop;
+                            break;
                         }
                         continue;
                     }
@@ -1869,7 +1869,7 @@ pub async fn dispatch(
                         demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
                         retry_count += 1;
                         if chain_mode {
-                            break 'sub_loop;
+                            break;
                         }
                         continue;
                     }
@@ -1981,7 +1981,7 @@ pub async fn dispatch(
                 demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
                 retry_count += 1;
                 if chain_mode {
-                    break 'sub_loop;
+                    break;
                 }
                 continue;
             }
