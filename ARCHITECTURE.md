@@ -2,15 +2,203 @@
 
 > 适用代码基线：仓库根 `E:\cc-router-main`，`package.json` / Cargo 版本 `6.5.0`。
 > 本文是**源码导读与架构分析**，面向已具备 Tauri / Rust / React 基础、需要快速建立全局心智模型的读者。
-> 阅读方式：第 1–6 章建立全局图；第 7–10 章是调度与协议核心；第 11–13 章是三端界面；第 14–17 章为横切能力、同步清单与二次深入指针。
+> 阅读方式：**第 0 章**先把项目跑起来、熟悉配置体系；**第 1–6 章**建立全局图；**第 7–10 章**是调度与协议核心；**第 11–13 章**是三端界面；**第 14–17 章**为横切能力、同步清单与二次深入指针。
 > 证据口径：模块职责来自源码文件头注释、`pub fn / pub struct / pub enum` 清单与主流程通读；超大文件（100KB 级）按"模块边界 + 关键函数 + 单测锁定语义"归纳，未逐字符展开，相关文件在第 17 章列为二次深入指针。
 >
 > **魔改声明**：本报告分析的 cc-router 为 **cc** 的二次开发分支（魔改 / fork），原作者 **cc**（[@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者。
 
 ---
 
+## 0. 开发环境与项目配置
+
+> 本章面向**开发者 / 贡献者**，集中罗列跑起来、改代码、加 provider、发版所需的一切配置。读完本章即可在本机上完成 `git clone → pnpm install → pnpm tauri:dev`，之后再按需进入 §1–§17 深入。
+
+### 0.1 前置依赖（必装）
+
+| 依赖 | 版本要求 | 说明 |
+| --- | --- | --- |
+| **Node.js** | ≥ 22 | `package.json` 无 engines 字段，但 release.yml 用 `node-version: 22`；推荐 LTS 22.x |
+| **pnpm** | ≥ 12 | release.yml 钉死 `version: 12`；`pnpm-workspace.yaml` 声明 workspace root；`npm i -g pnpm` 或 `corepack enable && corepack prepare pnpm@12 --activate` |
+| **Rust** | ≥ **1.90.0**（硬 MSRV） | `Cargo.toml::rust-version = "1.90.0"`，`tauri 2.12` + 官方插件链把 MSRV 从 1.77.2 一路升到 1.90，低于此版本 cargo 直接拒绝构建。安装：`rustup update stable` |
+| **Git** | ≥ 2.40 | 常规即可，无特殊要求 |
+
+**各平台额外系统依赖**（release.yml CI 实测）：
+
+| 平台 | 额外依赖 |
+| --- | --- |
+| **Windows** | 无（MSVC 工具链随 `rustup default stable` 自动装；Windows SDK 10+ 随 Visual Studio Build Tools） |
+| **macOS** | Xcode Command Line Tools（`xcode-select --install`）；Apple Silicon / Intel 原生 runner 均已验证 |
+| **Ubuntu 22.04**（Linux x64 / arm64） | `libwebkit2gtk-4.1-dev librsvg2-dev patchelf libayatana-appindicator3-dev file squashfs-tools xvfb x11-utils`（release.yml 第 539–550 行逐条列出） |
+
+### 0.2 快速启动
+
+```powershell
+# Windows 一键启动（会自动检查 pnpm → install → tauri:dev）
+start-dev.bat
+
+# 或手动执行
+pnpm install                    # 装前端依赖
+pnpm tauri:dev                  # 同时起前端 dev server（1420）+ 编译 Rust + 打开桌面窗口
+```
+
+启动后：
+- 桌面窗口自动弹出（`tauri.conf.json::visible:false` 但 dev 模式默认强制可见）
+- 前端 dev server：`http://127.0.0.1:1420`（HMR 端口 1421；`strictPort:true`，端口被占用直接报错）
+- 代理默认不启动（首次启动无订阅），去界面"设置 → 代理"手动启动或添加订阅后自动启动
+
+### 0.3 前端脚本（`package.json::scripts`）
+
+| 命令 | 等价于 | 用途 |
+| --- | --- | --- |
+| `pnpm dev` | `vite` | 仅前端 dev server（1420），**不起 Rust** |
+| `pnpm build` | `tsc --noEmit && vite build` | 前端 TypeScript 类型检查 + 生产构建（输出到 `dist/`，`base: "./"` 让同一份产物既能挂 `tauri://localhost` 也能挂 `/ui/`） |
+| `pnpm preview` | `vite preview` | 预览 `dist/`，不经过 Tauri |
+| `pnpm tauri` | `tauri` | Tauri CLI 入口子命令（`tauri --help` 看全部） |
+| **`pnpm tauri:dev`** | `tauri dev` | 日常开发主力命令；`tauri.conf.json::beforeDevCommand` 先跑 `node scripts/build-tui-sidecar.mjs && pnpm dev`，确保 sidecar 和前端都就位才编 Rust |
+| **`pnpm tauri:build`** | `tauri build` | 生产构建（走 `Cargo.toml::profile.release`：panic=abort、LTO、CU=1、opt=s、strip） |
+| `pnpm check:i18n` | `node scripts/check-i18n.mjs` | 四语 JSON 完整性校验（缺 key / key 数量不等报错） |
+| `pnpm check:schedule` | `node scripts/check-slot-schedule.mjs` | 槽位分时段规则校验 |
+| `pnpm check:onboarding` | `node scripts/check-onboarding.mjs` | 引导页完整性校验 |
+| `pnpm version:set` | `node scripts/set-version.mjs` | 批量升级所有版本号（package.json / Cargo.toml / 4 个 tauri.conf / release-notes meta.json） |
+
+> `package.json::pnpm.overrides`（第 80–91 行）钉住了 7 个依赖的版本下限，解决 `mermaid js-cookie uuid dompurify source-map-js @babel/core @codemirror/state` 的已知 CVE 或兼容性问题。升级上游依赖时勿忘同步审视。
+
+### 0.4 Rust workspace 结构（`src-tauri/Cargo.toml`）
+
+```toml
+[workspace]
+members = [".", "crates/cc-router-tui"]
+```
+
+两个 crate：
+
+| crate | 路径 | `lib.name` | 产出物 | 备注 |
+| --- | --- | --- | --- | --- |
+| **主 crate `cc-router`** | `src-tauri/` | `cc_router_lib` | Tauri 桌面 app；`cargo test --lib` 跑它 + 跑 1 条契约测试 | 依赖 `tauri-plugin-*`、`axum 0.8`、`sqlx 0.9`、`reqwest 0.13`、`rustls 0.23`、`tokio` full、`jsonschema`、`tracing` |
+| **TUI sidecar `cc-router-tui`** | `src-tauri/crates/cc-router-tui/` | — | 独立可执行二进制 `cc-router-tui` | **不依赖主 crate 类型**；只经 HTTP/SSE 连桌面 app 的 `/ui/api`；主 crate 的 dev-dependencies 反过来依赖它做契约测试 |
+
+常用 Cargo 命令：
+
+```powershell
+cargo check --lib                 # 只做类型检查 + 编译检查，最快
+cargo test --lib                  # 跑主 crate 单元测试（1047 条）
+cargo test                        # 含集成测试 + TUI 测试 + contract
+cargo check -p cc-router-tui      # 单独检查 sidecar
+cargo build --release             # 生产构建 profile
+```
+
+### 0.5 Provider YAML 规范（`src-tauri/providers/*.yaml`）
+
+每个内置厂商一份 yaml，构建期由 `build.rs` 排序后 `include_str!` 内嵌进二进制；运行时 `provider/loader.rs` 逐文件过 `_schema.json` + 语义校验，单文件失败跳过、id 冲突 fatal。
+
+**最小字段**（`_schema.json::required`）：`id`（`[a-z0-9_]+`）、`display_name`、`compatibility`、`endpoints`、`auth`。
+
+**关键字段**：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `compatibility` | enum | `verified` / `partial` / `untested`，前端按此渲染信任徽章 |
+| `category` | enum | `first_party`（官方）/ `second_party`（非官方但独立）/ `aggregator`（聚合器如 OpenRouter） |
+| `endpoints[]` | array | 至少一条；含 `base_url`、`messages_path`（Anthropic Messages 路径）、`protocol`（`messages` 默认 / `systemone` Jev 专用） |
+| `auth` | object | `type`（7 种 AuthType wire 值，见 §18.5）、`header_name`、`header_format`（`raw` / `bearer`） |
+| `required_headers` | map | 出站请求必须带上的固定头（如 Anthropic 的 `anthropic-version: "2023-06-01"`） |
+| `forward_headers` | array | 白名单入站头原样透传给上游（如某些代理需要 `x-request-id` 端到端传递） |
+| `model_discovery` | object | 开关 + 发现路径 + 缓存 TTL + 响应包络（`openai` / `gemini` / `cloudflare`） |
+| `balance_discovery` | object | 余额查询 URL + 解析器名（运行时反射调用 `subscription/balance_discovery.rs::parse_*`） |
+| `url_params` | array | 订阅创建时用户可填的 URL query 参数，前端渲染表单校验；`pattern` 是 URL 正则 |
+| `expose_reasoning` + `default_reasoning_effort` | bool + enum | 翻译层兜底，未注册 provider 时沿用默认 `(true, medium)` |
+
+**localizedText 约定**：品牌名（`display_name` / `description`）写四语对象；纯 UI 常量可写字符串跳过翻译。
+
+**样例**（`src-tauri/providers/anthropic.yaml`）：
+
+```yaml
+id: anthropic
+display_name: "Anthropic"
+icon: anthropic
+category: first_party
+description:
+  zh: "Anthropic 官方 API（按量付费）"
+  zh-Hant: "Anthropic 官方 API（按量計費）"
+  en: "Official Anthropic API (pay-as-you-go)"
+  ja: "Anthropic 公式 API（従量課金）"
+
+compatibility: untested
+
+endpoints:
+  - id: api_paygo
+    label: "官方 · 按量付费 API"
+    base_url: "https://api.anthropic.com"
+    messages_path: "/v1/messages"
+    region: global
+    billing: pay_as_you_go
+
+default_endpoint: api_paygo
+
+auth:
+  type: api_key
+  header_name: "x-api-key"
+  header_format: raw
+
+required_headers:
+  anthropic-version: "2023-06-01"
+
+model_discovery:
+  enabled: true
+  path: "/v1/models"
+  cache_ttl_hours: 24
+```
+
+### 0.6 Tauri 核心配置（`src-tauri/tauri.conf.json`）
+
+| 字段 | 值 | 说明 |
+| --- | --- | --- |
+| `productName` | `cc-router` | 窗口标题、二进制名 |
+| `identifier` | `com.cc-router.desktop` | macOS bundle id、Windows AppUserModelId |
+| `build.beforeDevCommand` | `node scripts/build-tui-sidecar.mjs && pnpm dev` | dev 前先编 sidecar 再启前端 |
+| `build.devUrl` | `http://127.0.0.1:1420` | Vite dev server 必须与此同 host |
+| `windows[0]` | 1360×840（最小 1120×720）、`visible:false`（首帧由 `window.rs` 按显示器自适应）、decorations=false | 窗口几何 + 无边框，自定义标题栏在 `WindowChrome.tsx` |
+| `app.security.csp` | `default-src 'self'; connect-src ...; img-src ...; font-src ...; script-src 'self'` | 开源自域名 + GitHub + OSS 国内镜像；**无 `unsafe-eval`** |
+| `bundle.externalBin` | `["binaries/cc-router-tui"]` | sidecar 二进制随发版包分发；dev 模式由 `build-tui-sidecar.mjs` 生成 |
+| `bundle.updater.endpoints` | GitHub Releases `latest.json` | 另加国内镜像 `d.cc-router.catonthe.top/latest.json` |
+
+### 0.7 Release profile 优化项（`Cargo.toml`）
+
+```toml
+[profile.release]
+panic = "abort"           # panic 直接终止进程，不打印回溯
+codegen-units = 1         # 单编译单元，LTO 能跨所有模块内联
+lto = true                # 跨 crate LTO
+opt-level = "s"           # 体积优先而非速度优先
+strip = true              # 去除符号表
+
+# 过程宏 / build 脚本只在构建期运行, 不进产物.
+# macOS 26 (Darwin 27) 的 dyld 会拒绝加载被 strip 的过程宏 dylib ("mis-aligned LINKEDIT string pool"),
+# 导致 release 构建在 sqlx 的宏上失败; 对它们关掉 strip 无损.
+[profile.release.build-override]
+strip = false
+```
+
+### 0.8 辅助脚本一览（`scripts/*.mjs`）
+
+| 脚本 | 用途 |
+| --- | --- |
+| `build-tui-sidecar.mjs` | 编 sidecar：先看 `cc-router-tui` 里是否有 `.exe`，没有则用 `target/debug/cc-router-tui*` 填充 `binaries/`；dev 模式让 Tauri 的 `externalBin` 找到它 |
+| `check-i18n.mjs` | 四语 JSON 完整性校验（key 对齐） |
+| `check-slot-schedule.mjs` | 槽位分时段规则合法性校验（JSON Schema + 组合逻辑） |
+| `check-onboarding.mjs` | 引导页配置完整性校验 |
+| `set-version.mjs` | 全仓批量升级版本号 |
+| `release-body.mjs` | 从 `release-notes/<版本>/` 生成 GitHub Release 正文 markdown |
+| `generate-latest-json.mjs` | 从 GitHub Release 的 `.sig` artifact 生成 Tauri updater 所需的 `latest.json` |
+| `make-macos-icon.mjs` | 从一张 1024×1024 源图生成 macOS 全套 icns |
+| `collect-receipt-fonts.mjs` | 收集小票所需的 6 套像素字体 |
+| `gen-simplified-only.mjs` | 从 zh-Hant 反推 zh-Hant-only.txt |
+
+---
+
 ## 目录
 
+- [0. 开发环境与项目配置](#0-开发环境与项目配置)
 - [1. 项目定位与一句话架构](#1-项目定位与一句话架构)
 - [2. 技术栈与代码规模（实盘统计）](#2-技术栈与代码规模实盘统计)
 - [3. 仓库目录索引](#3-仓库目录索引)
