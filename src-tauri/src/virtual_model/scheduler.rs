@@ -36,7 +36,9 @@ fn schedulable(
     now: DateTime<Utc>,
     clock: WallClock,
 ) -> bool {
-    rt.is_dispatchable(now) && provides_slot_at(&rt.row, vm, clock)
+    rt.is_dispatchable(now)
+        && provides_slot_at(&rt.row, vm, clock)
+        && rt.row.enable_scheduled(clock)
 }
 
 /// 根据调度模式把 `subscription_ids` 扫描成一个候选顺序。

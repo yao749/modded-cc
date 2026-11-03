@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, ChevronsDown, ChevronsUp, Shuffle, ArrowUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProviderLogo } from "@/components/ProviderLogo";
 import {
@@ -50,6 +50,10 @@ export function PoolPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["pool-sub-order"] });
       queryClient.invalidateQueries({ queryKey: VIRTUAL_MODELS_KEY });
+    },
+    onError: () => {
+      // 乐观更新失败 → 从后端真值恢复, 等 orderQuery 重拉后 useEffect 会同步到 order state
+      queryClient.invalidateQueries({ queryKey: ["pool-sub-order"] });
     },
   });
 
@@ -170,10 +174,57 @@ export function PoolPage() {
 
   /** 上下箭头换位: 立即本地生效并落库 (每次交换把完整顺序发给后端) */
   function moveOrder(idx: number, dir: -1 | 1) {
+    if (reorderMut.isPending) return;
+    if (idx < 0 || idx >= orderRows.length) return;
     const j = idx + dir;
     if (j < 0 || j >= orderRows.length) return;
     const ids = orderRows.map((s) => s.id);
     [ids[idx], ids[j]] = [ids[j], ids[idx]];
+    setOrder(ids);
+    reorderMut.mutate(ids);
+  }
+
+  /** 置顶: 把指定订阅移到第一个位置 */
+  function moveToTop(idx: number) {
+    if (reorderMut.isPending) return;
+    if (idx <= 0) return;
+    const ids = orderRows.map((s) => s.id);
+    const [moved] = ids.splice(idx, 1);
+    ids.unshift(moved);
+    setOrder(ids);
+    reorderMut.mutate(ids);
+  }
+
+  /** 置底: 把指定订阅移到最后一个位置 */
+  function moveToBottom(idx: number) {
+    if (reorderMut.isPending) return;
+    if (idx < 0 || idx >= orderRows.length - 1) return;
+    const ids = orderRows.map((s) => s.id);
+    const [moved] = ids.splice(idx, 1);
+    ids.push(moved);
+    setOrder(ids);
+    reorderMut.mutate(ids);
+  }
+
+  /** 随机打乱全局顺序 */
+  function shuffleOrder() {
+    if (reorderMut.isPending) return;
+    if (orderRows.length < 2) return;
+    const ids = orderRows.map((s) => s.id);
+    // Fisher-Yates shuffle
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    setOrder(ids);
+    reorderMut.mutate(ids);
+  }
+
+  /** 反转全局顺序 */
+  function reverseOrder() {
+    if (reorderMut.isPending) return;
+    if (orderRows.length < 2) return;
+    const ids = orderRows.map((s) => s.id).reverse();
     setOrder(ids);
     reorderMut.mutate(ids);
   }
@@ -281,7 +332,7 @@ export function PoolPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 订阅顺序: 全局统一 (5 个能力池共用), 上下箭头调整 */}
+      {/* 订阅顺序: 全局统一 (5 个能力池共用), 多种按钮调整 */}
       <div className="page-header" style={{ marginTop: 24 }}>
         <h2>{t("pool.order.title")}</h2>
         <div className="subtitle">{t("pool.order.subtitle")}</div>
@@ -295,6 +346,31 @@ export function PoolPage() {
         <div className="card section">
           <div className="card-body" style={{ display: "grid", gap: 8 }}>
             <div className="field-hint" style={{ marginTop: 0 }}>{t("pool.order.hint")}</div>
+
+            {/* 全局操作按钮: 打乱 / 反转 */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="btn sm ghost"
+                disabled={orderRows.length < 2 || reorderMut.isPending}
+                onClick={shuffleOrder}
+                title={t("pool.order.shuffle")}
+              >
+                <Shuffle size={13} style={{ marginRight: 4 }} />
+                {t("pool.order.shuffle")}
+              </button>
+              <button
+                type="button"
+                className="btn sm ghost"
+                disabled={orderRows.length < 2 || reorderMut.isPending}
+                onClick={reverseOrder}
+                title={t("pool.order.reverse")}
+              >
+                <ArrowUpDown size={13} style={{ marginRight: 4 }} />
+                {t("pool.order.reverse")}
+              </button>
+            </div>
+
             {orderRows.map((sub, idx) => (
               <div
                 key={sub.id}
@@ -318,28 +394,53 @@ export function PoolPage() {
                   <div style={{ fontWeight: 500 }}>{sub.display_name}</div>
                   <div className="text-xs text-muted-foreground">{capsOf(sub.id)}</div>
                 </div>
-                <button
-                  type="button"
-                  className="btn sm ghost"
-                  style={{ padding: "4px 6px" }}
-                  disabled={idx === 0 || reorderMut.isPending}
-                  onClick={() => moveOrder(idx, -1)}
-                  title={t("pool.order.moveUp")}
-                  aria-label={t("pool.order.moveUp")}
-                >
-                  <ChevronUp size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="btn sm ghost"
-                  style={{ padding: "4px 6px" }}
-                  disabled={idx === orderRows.length - 1 || reorderMut.isPending}
-                  onClick={() => moveOrder(idx, 1)}
-                  title={t("pool.order.moveDown")}
-                  aria-label={t("pool.order.moveDown")}
-                >
-                  <ChevronDown size={13} />
-                </button>
+                {/* 每行 4 个按钮: 置顶 / 上移 / 下移 / 置底 */}
+                <div style={{ display: "flex", gap: 2 }}>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ padding: "4px 6px" }}
+                    disabled={idx === 0 || reorderMut.isPending}
+                    onClick={() => moveToTop(idx)}
+                    title={t("pool.order.moveTop")}
+                    aria-label={t("pool.order.moveTop")}
+                  >
+                    <ChevronsUp size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ padding: "4px 6px" }}
+                    disabled={idx === 0 || reorderMut.isPending}
+                    onClick={() => moveOrder(idx, -1)}
+                    title={t("pool.order.moveUp")}
+                    aria-label={t("pool.order.moveUp")}
+                  >
+                    <ChevronUp size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ padding: "4px 6px" }}
+                    disabled={idx === orderRows.length - 1 || reorderMut.isPending}
+                    onClick={() => moveOrder(idx, 1)}
+                    title={t("pool.order.moveDown")}
+                    aria-label={t("pool.order.moveDown")}
+                  >
+                    <ChevronDown size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ padding: "4px 6px" }}
+                    disabled={idx === orderRows.length - 1 || reorderMut.isPending}
+                    onClick={() => moveToBottom(idx)}
+                    title={t("pool.order.moveBottom")}
+                    aria-label={t("pool.order.moveBottom")}
+                  >
+                    <ChevronsDown size={13} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>

@@ -29,6 +29,15 @@ pub struct ScheduleRule {
     pub effort: Option<String>,
 }
 
+/// 订阅级定时开关窗口 (能力池订阅用): 在这些窗口内订阅才参与调度, 窗口外等同于手动停用。
+/// 语义与 [`ScheduleRule`] 的 `days` / `start` / `end` 完全一致, 只是没有模型 / 思考强度。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnableWindow {
+    pub days: Vec<u8>,
+    pub start: String,
+    pub end: String,
+}
+
 /// Per-slot rule lists. Same serde recipe as `SlotEfforts`: old rows (`'{}'`) deserialize to
 /// all-empty, unknown keys are ignored.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -118,21 +127,31 @@ fn prev_weekday(d: u8) -> u8 {
     }
 }
 
-/// Whether a (well-formed) rule covers `at`. Malformed rules never match.
-fn rule_matches(rule: &ScheduleRule, at: WallClock) -> bool {
-    let (Some(s), Some(e)) = (parse_hhmm(&rule.start), parse_hhmm(&rule.end)) else {
+/// Whether a (days, start, end) window covers `at`. Malformed windows never match.
+fn window_matches(days: &[u8], start: &str, end: &str, at: WallClock) -> bool {
+    let (Some(s), Some(e)) = (parse_hhmm(start), parse_hhmm(end)) else {
         return false;
     };
     if s >= MINUTES_PER_DAY || s == e {
         return false;
     }
-    let today = rule.days.contains(&at.weekday);
+    let today = days.contains(&at.weekday);
     if s < e {
         today && s <= at.minute && at.minute < e
     } else {
         (today && at.minute >= s)
-            || (rule.days.contains(&prev_weekday(at.weekday)) && at.minute < e)
+            || (days.contains(&prev_weekday(at.weekday)) && at.minute < e)
     }
+}
+
+/// Whether a (well-formed) rule covers `at`. Malformed rules never match.
+fn rule_matches(rule: &ScheduleRule, at: WallClock) -> bool {
+    window_matches(&rule.days, &rule.start, &rule.end, at)
+}
+
+/// 定时开关: `windows` 为空 = 没有定时限制 (恒启用); 否则只有命中任一窗口才算启用。
+pub fn within_enable_windows(windows: &[EnableWindow], at: WallClock) -> bool {
+    windows.is_empty() || windows.iter().any(|w| window_matches(&w.days, &w.start, &w.end, at))
 }
 
 /// Model to use right now: first matching rule wins (list order), else the slot default.
@@ -223,6 +242,41 @@ pub fn validate_slot_schedules(s: &SlotSchedules) -> Result<(), String> {
         }
         for (i, rule) in rules.iter().enumerate() {
             validate_rule(rule).map_err(|msg| format!("{label} 第 {} 条时段: {msg}", i + 1))?;
+        }
+    }
+    Ok(())
+}
+
+/// 校验订阅级定时开关 (能力池订阅用)。规则与分时段一致, 只是没有模型 / 思考强度。
+pub fn validate_enable_windows(windows: &[EnableWindow]) -> Result<(), String> {
+    if windows.len() > MAX_RULES_PER_SLOT {
+        return Err(format!("定时开关最多 {MAX_RULES_PER_SLOT} 条"));
+    }
+    for (i, w) in windows.iter().enumerate() {
+        if w.days.is_empty() {
+            return Err(format!("第 {} 条定时: 至少选择一个星期", i + 1));
+        }
+        let mut seen = HashSet::new();
+        for &d in &w.days {
+            if !(1..=7).contains(&d) {
+                return Err(format!("第 {} 条定时: 星期必须在 1-7 之间", i + 1));
+            }
+            if !seen.insert(d) {
+                return Err(format!("第 {} 条定时: 星期重复", i + 1));
+            }
+        }
+        let half_hour = |s: &str| parse_hhmm(s).filter(|m| m % 30 == 0);
+        let Some(start) = half_hour(&w.start) else {
+            return Err(format!("第 {} 条定时: 开始时间必须是整点或半点", i + 1));
+        };
+        if start >= MINUTES_PER_DAY {
+            return Err(format!("第 {} 条定时: 开始时间不能是 24:00", i + 1));
+        }
+        let Some(end) = half_hour(&w.end) else {
+            return Err(format!("第 {} 条定时: 结束时间必须是整点或半点", i + 1));
+        };
+        if start == end {
+            return Err(format!("第 {} 条定时: 开始与结束时间不能相同", i + 1));
         }
     }
     Ok(())

@@ -45,6 +45,8 @@ import type {
   StorageStatsDto,
   SubscriptionDto,
   SubscriptionPatch,
+  SlotSchedules,
+  EnableWindow,
   TestConnectionResult,
   TlsStatus,
   TokenQuotas,
@@ -84,6 +86,10 @@ export const api = {
     invoke<RefreshBalanceResult>("refresh_subscription_balance", { id }),
   updateTokenQuotas: (id: string, quotas: TokenQuotas) =>
     invoke<SubscriptionDto>("update_token_quotas", { id, quotas }),
+  updateSlotSchedules: (id: string, schedules: SlotSchedules) =>
+    invoke<SubscriptionDto>("update_slot_schedules", { id, schedules }),
+  updateEnableWindows: (id: string, windows: EnableWindow[]) =>
+    invoke<SubscriptionDto>("update_enable_windows", { id, windows }),
   resetTotalQuotaUsage: (id: string) =>
     invoke<SubscriptionDto>("reset_total_quota_usage", { id }),
 

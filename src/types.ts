@@ -250,6 +250,13 @@ export interface ScheduleRule {
 /** 每槽位的规则列表; 空列表的 key 后端不返回。与 Rust `SlotSchedules` 对齐。 */
 export type SlotSchedules = Partial<Record<FourSlot, ScheduleRule[]>>;
 
+/** 订阅级定时开关窗口 (能力池订阅用): days/start/end 语义与 `ScheduleRule` 一致, 只是没有模型/思考强度。与 Rust `EnableWindow` 对齐。 */
+export interface EnableWindow {
+  days: number[];
+  start: string;
+  end: string;
+}
+
 /** 各槽位此刻生效的模型 (宿主机时钟); 未配置 / 空白为 null。 */
 export type SlotModelsNow = Record<FourSlot, string | null>;
 
@@ -428,6 +435,8 @@ export interface SubscriptionDto {
   token_quotas: TokenQuotas;
   /** 每槽位分时段模型规则。后端总是带这个 key (可以是 {})。 */
   slot_schedules: SlotSchedules;
+  /** 订阅级定时开关窗口 (能力池订阅用)。后端总是带这个 key (可以是 [])。 */
+  enable_windows: EnableWindow[];
   /** 各槽位此刻生效的模型 (宿主机时钟求值), 四个 key 总是都在。 */
   slot_models_now: SlotModelsNow;
   /** 四周期用量快照, 固定按 daily/weekly/monthly/total 顺序返回 4 条。 */

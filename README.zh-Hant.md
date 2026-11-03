@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
-  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+">
+  <img src="https://img.shields.io/badge/Rust-1.94+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.94+">
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5">
   <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS">
@@ -26,7 +26,13 @@
   <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 官方網站ccrouter.app</a>
 </p>
 
-> **關於本分支（魔改聲明）**：本專案是 **cc-router** 的二次開發分支（魔改 / fork）。**原作者為 cc**（專案託管於 [@//cc/](https://github.com/finch-xu/cc-router)）。本人僅為二次開發者，並非原作者，也不代表原作者立場；本分支的全部改動由維護者負責，原專案的版權與許可仍歸屬原作者 cc。
+> 🔧 **魔改分支**：本倉庫是 [cc-router](https://github.com/finch-xu/cc-router) 的二次開發（魔改）版，在原版全部功能之上新增：
+>
+> - **能力分類模型池** —— 經典四槽之外新增 5 個能力虛擬模型（vision / llm / multimodal / speech / embedding），訂閱支援**依序/輪詢/工作階段親和**三按鈕調度（輪詢模式每個訂閱只試 chain 首模型即換訂閱，流暢均勻），**置頂/置底/打亂/反轉**六按鈕重排，失敗自動降序到隊尾
+> - **失敗即切換訂閱** —— **所有錯誤都切換**（含 401/403 Auth 錯誤），失敗模型沉尾落庫，Retry-After 冷卻 + 全域重試上限防止無限重試，池鏈耗盡後自動繼續試下一個訂閱
+> - **池訂閱定時開關** —— 按星期 + 時段配置開啟視窗，視窗外訂閱自動停用
+>
+> 詳見 [魔改功能](#魔改功能)。
 
 本地執行的大模型聚合閘道，GUI桌面端app，零程式碼部署，把零散的 `Token Plan`、`Coding Plan`、大模型 API 額度聚合成一個虛擬 Plan，一鍵接入 Claude Code、Claude Desktop App、OpenClaw、OpenCode、Codex 等工具 —— 省錢！省 Token！完全本地執行！
 
@@ -342,6 +348,22 @@ curl http://127.0.0.1:23456/v1/systemone \
   </tr>
 </table>
 
+### 分時段虛擬模型
+
+用戶端繼續使用同一個虛擬模型，cc-router 按星期和時段自動切換各訂閱槽位對應的真實模型。在桌面 app 的訂閱編輯頁中，可以為 `fable`、`opus`、`sonnet`、`haiku` 分別設定時段規則。
+
+- **按時間安排模型** —— 為規則選擇星期、起訖時間和真實模型，右側日曆直觀呈現一週的安排；規則也可以複製到其他槽位。
+- **預設模型備援** —— 未符合時段規則時使用槽位的預設模型；如果未設定預設模型，該訂閱在未涵蓋的時間不參與這個槽位的調度。
+- **預覽調度關係** —— 在虛擬模型頁選擇星期並拖曳時間軸，檢視對應時刻的模型對應和調度關係；點擊「現在」回到目前時刻。時間以執行 cc-router 的電腦為準。
+
+**模型槽位：設定時段規則與日曆預覽**
+
+![cc-router 模型槽位的分時段規則設定與每週日曆預覽](assets/screenshots/zh/slot-schedules.png)
+
+**虛擬模型：檢視各訂閱的模型與生效時段**
+
+![cc-router 虛擬模型的分時段路由、訂閱與生效時段預覽](assets/screenshots/zh/virtual-model-schedules.png)
+
 ## 常見問題&使用場景
 
 <details>
@@ -400,7 +422,7 @@ CC 請求來了就按對應轉發，不用再頻繁改 `~/.claude/settings.json`
 - Tailwind 4
 - React 19
 
-依賴：Node.js ≥ 20（推薦 pnpm），Rust ≥ 1.90（建議直接用 rustup 最新 stable），Xcode CLT（macOS）。
+依賴：Node.js ≥ 22.22（推薦 pnpm），Rust ≥ 1.94（建議直接用 rustup 最新 stable），Xcode CLT（macOS）。
 
 ```bash
 pnpm install
@@ -432,7 +454,7 @@ Tauri 在 Windows 上打包依賴 MSVC，CI 用的也是 `x86_64-pc-windows-msvc
 
 ```powershell
 rustup show          # active toolchain 應帶 -msvc 字尾
-rustc --version      # 應 ≥ 1.90
+rustc --version      # 應 ≥ 1.94
 ```
 
 **2. 需要 Visual Studio Build Tools**
@@ -464,6 +486,19 @@ Get-NetTCPConnection -LocalPort 1420 -State Listen |
 ## 新增 provider
 
 如果你使用`Claude Code`，我提供了一個`SKILL`，可以執行`new-provider`並附加provider的官方文件或介面位址等資訊，能夠自動建立provider的設定。
+
+## 魔改功能
+
+- **能力分類模型池** —— 經典四槽（fable/opus/sonnet/haiku + fallback + jev）之外，新增五個能力分類虛擬模型：`model-vision`（圖像/影片生成）、`model-llm`（大語言模型/純文字）、`model-multimodal`（全模態翻譯）、`model-speech`（語音）、`model-embedding`（向量嵌入），走獨立的模型池路由。可用一般 API Key 建立「池訂閱」，按能力分類維護模型鏈：同類下多個模型按優先級排序，失敗自動降序到隊尾並落庫，與經典四槽訂閱互不連通。訂閱順序管理提供上移/下移/置頂/置底/隨機打亂/反轉六個按鈕；調度策略（依序 / 輪詢 / 工作階段親和）與經典四槽卡片同款顯式三按鈕，每個能力虛擬模型獨立設定。各模式在池鏈下的行為差異：
+  - **依序**：同訂閱 chain 逐個嘗試，全部耗盡才換下一個訂閱（適合信任度高的單一訂閱場景）
+  - **輪詢**：每個訂閱只嘗試 chain 首模型，失敗立刻換訂閱（保證請求均勻打到所有訂閱，失敗模型沉尾下次再試）
+  - **工作階段親和**：釘住的訂閱 chain 內逐個嘗試，耗盡後按輪詢序兜底（同工作階段盡量走同訂閱的備用模型）
+- **失敗即切換訂閱** —— **所有錯誤都切換**（含 401/403 Auth 錯誤），失敗模型自動沉尾落庫；Retry-After 冷卻（30 秒 ~ 30 分鐘）與全域重試上限（15 次）防止無限重試；池鏈耗盡後自動繼續試下一個訂閱，不會卡死在第一條。
+- **訂閱級定時開關**（池訂閱）—— 按星期 + 時段設定「開啟時段」，時段之外訂閱自動停用，用於錯峰使用或只在指定時段啟用某家訂閱。
+
+## 關於原版
+
+本倉庫是 [cc-router](https://github.com/finch-xu/cc-router)（作者 [finch-xu](https://github.com/finch-xu/cc-router)）的二次開發（魔改）分支。除上述魔改外，其餘功能均來自原版，MIT 協定與原版保持一致。
 
 ## 授權條款
 

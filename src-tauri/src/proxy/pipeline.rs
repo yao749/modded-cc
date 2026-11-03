@@ -273,11 +273,14 @@ pub(crate) fn routing_mode_gate(
 }
 
 /// 把一次 attempt 的 dispatch 错误翻译成 (状态机事件, 是否值得 failover)。
+/// **所有错误都切换**: Auth(401/403) 也标记 retryable, 让请求自动 failover 到下一家。
+/// 虽然 Auth 错误切了也白切 (同一个坏 key 所有订阅都 Auth 失败), 但这样至少不会卡死
+/// 在第一条订阅, 503 summary 会列出所有订阅的真实失败原因方便排查。
 fn dispatch_err_to_event(err: &OAuthDispatchError) -> (state_machine::Event, bool) {
     match err {
         OAuthDispatchError::Auth(_) => (
             state_machine::Event::HttpStatus(401),
-            false,
+            true, // 所有错误都切换 ✅
         ),
         OAuthDispatchError::Upstream { status, .. } => {
             let s = status.unwrap_or(502);
@@ -401,12 +404,22 @@ pub async fn dispatch(
         let subs_map = state.subscriptions.read().await;
         let mut summary = Vec::new();
         let now = Utc::now();
+        let clock = crate::subscription::schedule::WallClock::now();
         for sub_id in &vm_config.subscription_ids {
             if let Some(rt) = subs_map.get(sub_id) {
                 let g = rt.read().await;
-                let reason = match g.row.token_quotas.first_exceeded(&g.quota_usage, now) {
-                    Some(p) => format!("已达 {} token 限额", p.label_zh()),
-                    None => format!("{:?}", g.state),
+                let reason = if !g.row.enable_scheduled(clock) {
+                    format!(
+                        "定时窗口外 (周{} {:02}:{:02})",
+                        clock.weekday,
+                        clock.minute / 60,
+                        clock.minute % 60,
+                    )
+                } else {
+                    match g.row.token_quotas.first_exceeded(&g.quota_usage, now) {
+                        Some(p) => format!("已达 {} token 限额", p.label_zh()),
+                        None => format!("{:?}", g.state),
+                    }
                 };
                 summary.push(format!("- {}: {}", g.row.display_name, reason));
             }
@@ -414,13 +427,8 @@ pub async fn dispatch(
         return Ok(overloaded::response_with_summary(vm_name, &summary));
     }
 
-    // 更新轮询索引（round_robin / sticky 未命中时；sticky 命中钉住返回 None 不前进）
-    if let Some(idx) = order.chosen_index {
-        let mut guard = state.virtual_models.write().await;
-        if let Some(cfg) = guard.get_mut(&vm_name) {
-            cfg.last_used_index = idx;
-        }
-    }
+    // 轮询索引不再在这里推进 — pool VM 下 chosen_index 可能指向被 pipeline 跳过的订阅
+    // (无 pool 模型 / input mismatch 等), 改为在 sub_loop 里每次进入 candidate 时推进。
 
     let mut retry_count: u32 = 0;
     let start = Instant::now();
@@ -454,6 +462,15 @@ pub async fn dispatch(
     let body_has_document = body_inputs.contains(&"document");
 
     'sub_loop: for sub_id in order.candidate_ids {
+        // 推进轮询索引到当前 candidate 的全局位置 —— 无论后续是否被 continue 跳过,
+        // 都让 RoundRobin/Sticky 下次从更后面开始, 避免被跳过的订阅拖垮公平性
+        if let Some(idx) = vm_config.subscription_ids.iter().position(|s| *s == sub_id) {
+            let mut guard = state.virtual_models.write().await;
+            if let Some(cfg) = guard.get_mut(&vm_name) {
+                cfg.last_used_index = idx;
+            }
+        }
+
         let attempt_id = Uuid::new_v4();
         let rt = {
             let subs_map = state.subscriptions.read().await;
@@ -643,6 +660,13 @@ pub async fn dispatch(
             // chain 模式: 从链里取下一个模型覆盖 real_model
             if let Some((model_name, _)) = chain_iter.next() {
                 real_model = model_name;
+                // RoundRobin + chain: 每个订阅只试 chain 第一个模型, 失败直接换订阅.
+                // 把 chain_iter 清空, 后续 continue 回来会自然落到"链已耗尽 → break"分支,
+                // 然后 dispatch_loop 闭合后的 continue 'sub_loop 接手去试下一个订阅.
+                // Sequential / Sticky 保留整条 chain 遍历, 在同订阅内 fallback 到备用模型.
+                if chain_mode && vm_config.mode == RoutingMode::RoundRobin {
+                    chain_iter = Vec::new().into_iter();
+                }
             } else if chain_mode {
                 // chain 模式但链已耗尽 → 放弃此订阅
                 break;
@@ -768,7 +792,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if retryable {
                         retry_count += 1;
@@ -884,7 +908,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1010,7 +1034,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1147,7 +1171,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1283,7 +1307,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1418,7 +1442,7 @@ pub async fn dispatch(
 
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if retryable {
                         retry_count += 1;
@@ -1665,7 +1689,7 @@ pub async fn dispatch(
                 if !status.is_success() {
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if let ShouldRetry::Yes(_) = should_retry {
                         retry_count += 1;
@@ -1697,7 +1721,7 @@ pub async fn dispatch(
                     .await;
                     if chain_mode {
                         retry_count += 1;
-                        break;
+                        continue;
                     }
                     if matches!(
                         classify_response(status.as_u16(), None),
@@ -1786,7 +1810,7 @@ pub async fn dispatch(
 
                         retry_count += 1;
                         if chain_mode {
-                            break;
+                            continue;
                         }
                         continue;
                     }
@@ -1839,7 +1863,7 @@ pub async fn dispatch(
                         let _ = state.request_log_tx.try_send(entry);
                         retry_count += 1;
                         if chain_mode {
-                            break;
+                            continue;
                         }
                         continue;
                     }
@@ -1869,7 +1893,7 @@ pub async fn dispatch(
                         demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
                         retry_count += 1;
                         if chain_mode {
-                            break;
+                            continue;
                         }
                         continue;
                     }
@@ -1981,12 +2005,14 @@ pub async fn dispatch(
                 demote_failed_subject(state, &vm_name, sub_id, chain_mode, chain_capability, &real_model).await;
                 retry_count += 1;
                 if chain_mode {
-                    break;
+                    continue;
                 }
                 continue;
             }
         }
         } // dispatch_loop 闭合
+        // chain_mode 链耗尽或非 chain_mode slot_attempted 后, 内层 loop break → 继续试下一个订阅
+        continue 'sub_loop;
     }
 
     // 所有候选都失败
@@ -2264,9 +2290,9 @@ mod tests {
     }
 
     #[test]
-    fn auth_error_maps_to_401() {
+    fn auth_error_maps_to_401_and_failover() {
         let (event, retryable) = dispatch_err_to_event(&OAuthDispatchError::Auth("bad token".into()));
         assert!(matches!(event, state_machine::Event::HttpStatus(401)));
-        assert!(!retryable, "auth 错误不该 failover");
+        assert!(retryable, "所有错误都切换: auth 错误也应 failover 到下一家");
     }
 }

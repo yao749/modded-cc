@@ -126,9 +126,9 @@ fn default_https_port() -> u16 {
     23457
 }
 fn default_retention() -> u32 {
-    // 默认 30 天, 兼顾查询历史的便利性和磁盘占用.
-    // 0 仍表示永久保留 (cleanup.rs 短路分支), 用户可在 Settings 手动改.
-    30
+    // 0 = 永久保留 (cleanup.rs 跳过删除)。小票/统计的原始数据都来自 requests 表,
+    // 默认不清理; 用户可在 Settings 主动选 7/30/90 天。
+    0
 }
 fn default_db_limit() -> u32 {
     500
@@ -294,9 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn default_retention_is_thirty_days() {
-        // 默认 30 天清理, 防止日志永久堆积. 用户可手动改 0 恢复永久保留.
-        assert_eq!(Settings::default().log_retention_days, 30);
+    fn default_retention_is_forever() {
+        // 0 = 永久保留 (cleanup.rs 的短路分支), 是刻意的默认值
+        assert_eq!(Settings::default().log_retention_days, 0);
     }
 
     #[test]

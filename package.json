@@ -1,7 +1,7 @@
 {
   "name": "cc-router",
   "private": true,
-  "version": "6.5.0",
+  "version": "6.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -77,16 +77,7 @@
     "typescript": "^7.0.2",
     "vite": "^8.2.4"
   },
-  "pnpm": {
-    "overrides": {
-      "mermaid": "^11.16.1",
-      "js-cookie": ">=3.0.7",
-      "uuid@11": ">=11.1.1",
-      "uuid@13": ">=13.0.1",
-      "dompurify": "^3.4.17",
-      "source-map-js": "^1.2.2",
-      "@babel/core": "^7.29.6",
-      "@codemirror/state": "6.7.1"
-    }
+  "engines": {
+    "node": ">=22.22.0"
   }
 }

@@ -5,7 +5,7 @@ import { ArrowRight, Copy } from "lucide-react";
 import { api } from "@/api/tauri";
 import { useProxyStatus } from "@/hooks/useSettings";
 import { useUpdateVirtualModel, useVirtualModels } from "@/hooks/useVirtualModels";
-import { MODE_LABEL_KEY, VM_META } from "@/lib/virtualModels";
+import { VM_META } from "@/lib/virtualModels";
 import { runtime } from "@/runtime";
 import { useT } from "@/i18n";
 import {
@@ -17,11 +17,14 @@ import {
   type VirtualModelName,
 } from "@/types";
 
-/** 三种调度模式的循环顺序, 点击 pill 时按此循环切换。 */
-const MODE_CYCLE: RoutingMode[] = ["sequential", "round_robin", "sticky"];
-function nextMode(cur: RoutingMode): RoutingMode {
-  const i = MODE_CYCLE.indexOf(cur);
-  return MODE_CYCLE[(i + 1) % MODE_CYCLE.length];
+/** 更新指定能力虚拟模型的调度模式 —— 与经典四槽卡片 update 签名一致。 */
+function setVmMode(
+  updateMut: ReturnType<typeof useUpdateVirtualModel>,
+  vmName: VirtualModelName,
+  vm: VirtualModelDto,
+  mode: RoutingMode,
+) {
+  updateMut.mutate({ name: vmName, input: { mode, subscription_ids: vm.subscription_ids } });
 }
 
 /** 与 /pool 总览页共用同一个 query key, 两页共享缓存。 */
@@ -105,11 +108,19 @@ export function PoolParadigmCard() {
             const meta = VM_META[row.vmName];
             const empty = row.models === 0;
             return (
-              <button
+              <div
                 key={row.vmName}
-                type="button"
                 className={empty ? "pool-chain empty" : "pool-chain"}
                 onClick={() => navigate("/pool")}
+                role="button"
+                tabIndex={0}
+                aria-label={`${row.vmName} ${t(meta.purposeKey)}`}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    navigate("/pool");
+                  }
+                }}
                 title={t("virtualModels.pool.rowHint")}
               >
                 <span className="pool-chain-name mono">{row.vmName}</span>
@@ -127,24 +138,42 @@ export function PoolParadigmCard() {
                 >
                   {row.head ?? "—"}
                 </span>
+                {/* 调度模式: 与经典四槽卡片同款三按钮 radio-group */}
                 {row.vm && (
-                  <button
-                    type="button"
-                    className="pill tag pool-chain-mode"
-                    title={t("virtualModels.pool.modeCycleHint", { current: t(MODE_LABEL_KEY[row.vm.mode]) })}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const next = nextMode(row.vm!.mode);
-                      updateMut.mutate({
-                        name: row.vmName,
-                        input: { mode: next, subscription_ids: row.vm!.subscription_ids },
-                      });
+                  <div
+                    className="radio-group sm pool-chain-mode-group"
+                    role="group"
+                    aria-label={t("virtualModels.mode.label")}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      // 只拦截会触发外层 button 导航的按键, Tab 等正常冒泡
+                      if (e.key === "Enter" || e.key === " ") e.stopPropagation();
                     }}
                   >
-                    {t(MODE_LABEL_KEY[row.vm.mode])}
-                  </button>
+                    <button
+                      type="button"
+                      className={row.vm.mode === "sequential" ? "on" : ""}
+                      onClick={() => setVmMode(updateMut, row.vmName, row.vm!, "sequential")}
+                    >
+                      {t("vm.mode.sequential")}
+                    </button>
+                    <button
+                      type="button"
+                      className={row.vm.mode === "round_robin" ? "on" : ""}
+                      onClick={() => setVmMode(updateMut, row.vmName, row.vm!, "round_robin")}
+                    >
+                      {t("vm.mode.round_robin")}
+                    </button>
+                    <button
+                      type="button"
+                      className={row.vm.mode === "sticky" ? "on" : ""}
+                      onClick={() => setVmMode(updateMut, row.vmName, row.vm!, "sticky")}
+                    >
+                      {t("vm.mode.sticky")}
+                    </button>
+                  </div>
                 )}
-              </button>
+              </div>
             );
           })}
         </div>

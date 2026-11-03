@@ -138,6 +138,7 @@ pub fn run() {
             commands::subscriptions::refresh_subscription_balance,
             commands::subscriptions::update_token_quotas,
             commands::subscriptions::update_slot_schedules,
+            commands::subscriptions::update_enable_windows,
             commands::subscriptions::get_host_clock,
             commands::subscriptions::reset_total_quota_usage,
             commands::subscriptions::test_pool_connection,

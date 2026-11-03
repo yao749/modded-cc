@@ -7,14 +7,16 @@ import type {
 } from "@/types";
 
 export const VM_ORDER: VirtualModelName[] = [
-  // 旧四槽体系 (保留完整)
   "model-fable",
   "model-opus",
   "model-sonnet",
   "model-haiku",
   "model-fallback",
   "model-jev",
-  // 新能力分类模型池
+];
+
+/** 魔改新增: 5 个能力分类虚拟模型 (走能力池而非经典四槽) */
+export const POOL_VM_ORDER: VirtualModelName[] = [
   "model-vision",
   "model-llm",
   "model-multimodal",
@@ -22,14 +24,10 @@ export const VM_ORDER: VirtualModelName[] = [
   "model-embedding",
 ];
 
-/** 能力分类虚拟模型名集合 (池门户的命名空间, 与四槽分开) */
-export const CAPABILITY_NAMES: ReadonlySet<VirtualModelName> = new Set([
-  "model-vision",
-  "model-llm",
-  "model-multimodal",
-  "model-speech",
-  "model-embedding",
-]);
+/** 与 POOL_VM_ORDER 同内容的 Set, 用于 VirtualModels 页面过滤非能力卡片 */
+export const CAPABILITY_NAMES: ReadonlySet<VirtualModelName> = new Set(POOL_VM_ORDER);
+
+export const ALL_VM_ORDER: VirtualModelName[] = [...VM_ORDER, ...POOL_VM_ORDER];
 
 export interface VmMeta {
   /** i18n key for the "purpose" line shown above the slot */
@@ -71,35 +69,35 @@ export const VM_META: Record<VirtualModelName, VmMeta> = {
     purposeEnKey: "vm.jev.purposeEn",
     labelKey: "vm.jev.label",
   },
-  // 新能力分类模型池 —— 不依赖 i18n, purposeKey/labelKey 先用通用值
+  // 魔改: 5 个能力池虚拟模型
   "model-vision": {
-    purposeKey: "vm.capability.vision.purpose",
-    purposeEnKey: "vm.capability.vision.purposeEn",
-    labelKey: "vm.capability.vision.label",
+    purposeKey: "vm.vision.purpose",
+    purposeEnKey: "vm.vision.purposeEn",
+    labelKey: "vm.vision.label",
   },
   "model-llm": {
-    purposeKey: "vm.capability.llm.purpose",
-    purposeEnKey: "vm.capability.llm.purposeEn",
-    labelKey: "vm.capability.llm.label",
+    purposeKey: "vm.llm.purpose",
+    purposeEnKey: "vm.llm.purposeEn",
+    labelKey: "vm.llm.label",
   },
   "model-multimodal": {
-    purposeKey: "vm.capability.multimodal.purpose",
-    purposeEnKey: "vm.capability.multimodal.purposeEn",
-    labelKey: "vm.capability.multimodal.label",
+    purposeKey: "vm.multimodal.purpose",
+    purposeEnKey: "vm.multimodal.purposeEn",
+    labelKey: "vm.multimodal.label",
   },
   "model-speech": {
-    purposeKey: "vm.capability.speech.purpose",
-    purposeEnKey: "vm.capability.speech.purposeEn",
-    labelKey: "vm.capability.speech.label",
+    purposeKey: "vm.speech.purpose",
+    purposeEnKey: "vm.speech.purposeEn",
+    labelKey: "vm.speech.label",
   },
   "model-embedding": {
-    purposeKey: "vm.capability.embedding.purpose",
-    purposeEnKey: "vm.capability.embedding.purposeEn",
-    labelKey: "vm.capability.embedding.label",
+    purposeKey: "vm.embedding.purpose",
+    purposeEnKey: "vm.embedding.purposeEn",
+    labelKey: "vm.embedding.label",
   },
 };
 
-/** fallback / jev 不绑四槽, 能力分类模型也不绑四槽 (走自己的模型池) */
+/** fallback / jev 不绑四槽 (fallback 走原样透传, jev 走自己的 jev 槽) */
 const SLOT_BY_VM: Record<VirtualModelName, SubscriptionSlot | null> = {
   "model-fable": "fable",
   "model-opus": "opus",
@@ -107,7 +105,7 @@ const SLOT_BY_VM: Record<VirtualModelName, SubscriptionSlot | null> = {
   "model-haiku": "haiku",
   "model-fallback": null,
   "model-jev": null,
-  // 能力分类模型池不绑旧四槽
+  // 魔改: pool 模型不绑槽位, 直接走能力匹配
   "model-vision": null,
   "model-llm": null,
   "model-multimodal": null,

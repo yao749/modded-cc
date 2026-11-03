@@ -23,7 +23,7 @@ use crate::subscription::{
     },
     model_discovery, ping,
     quota::TokenQuotas,
-    schedule::{validate_slot_schedules, SlotSchedules, WallClock},
+    schedule::{validate_enable_windows, validate_slot_schedules, EnableWindow, SlotSchedules, WallClock},
     state_machine, store,
 };
 
@@ -415,6 +415,7 @@ pub async fn create_subscription(
                 provider_icon: provider.icon.clone().unwrap_or_default(),
                 is_user_defined: false,
                 routing_group: input.routing_group.clone().unwrap_or_else(|| "classic".into()),
+                enable_windows: Vec::new(),
             }
         }
         CreateSource::Custom {
@@ -479,6 +480,7 @@ pub async fn create_subscription(
                 provider_icon: profile.icon.to_string(),
                 is_user_defined: true,
                 routing_group: input.routing_group.clone().unwrap_or_else(|| "classic".into()),
+                enable_windows: Vec::new(),
             }
         }
     };
@@ -1524,6 +1526,34 @@ pub async fn update_slot_schedules(
         let mut g = rt.write().await;
         check_schedules_for(g.row.endpoint_protocol, &schedules)?;
         g.row.slot_schedules = schedules;
+        g.row.updated_at = Utc::now();
+        g.row.clone()
+    };
+    store::update_row(&state.db, &row_snapshot).await?;
+    let referenced_by = referenced_by_names(&state, &id).await;
+    let guard = rt.read().await;
+    Ok(SubscriptionDto::from_runtime(&guard, referenced_by, &state.providers))
+}
+
+#[tauri::command]
+pub async fn update_enable_windows(
+    state: State<'_, AppState>,
+    id: String,
+    windows: Vec<EnableWindow>,
+) -> AppResult<SubscriptionDto> {
+    let id = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("无效 id".into()))?;
+    let rt = state
+        .get_subscription(&id)
+        .await
+        .ok_or_else(|| AppError::SubscriptionNotFound(id.to_string()))?;
+    let row_snapshot = {
+        let mut g = rt.write().await;
+        // 定时开关只对能力池订阅有意义; 经典订阅配了窗口就直接拒绝。
+        if g.row.routing_group != "pool" && !windows.is_empty() {
+            return Err(AppError::BadRequest("定时开关仅能力池订阅可用".into()));
+        }
+        validate_enable_windows(&windows).map_err(AppError::BadRequest)?;
+        g.row.enable_windows = windows;
         g.row.updated_at = Utc::now();
         g.row.clone()
     };

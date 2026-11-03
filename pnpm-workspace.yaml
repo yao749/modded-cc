@@ -2,3 +2,12 @@ packages:
   - '.'
 allowBuilds:
   core-js: false
+overrides:
+  js-cookie: '>=3.0.7'
+  uuid@11: '>=11.1.1'
+  uuid@13: '>=13.0.1'
+  dompurify: '^3.4.17'
+  source-map-js: '^1.2.2'
+  '@codemirror/state': '6.7.6'
+  mermaid@11: '^11.17.2'
+  '@babel/core@7': '^7.29.7'

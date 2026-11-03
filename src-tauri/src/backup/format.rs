@@ -12,7 +12,7 @@ use crate::provider::model::{
 };
 use crate::subscription::model::{ModelSlots, OAuthMetadata, SlotEfforts, SubscriptionRow};
 use crate::subscription::quota::TokenQuotas;
-use crate::subscription::schedule::SlotSchedules;
+use crate::subscription::schedule::{EnableWindow, SlotSchedules};
 use crate::virtual_model::model::{RoutingMode, VirtualModelName};
 
 pub const FORMAT: &str = "cc-router-export";
@@ -100,6 +100,9 @@ pub struct ExportSubscription {
     /// 路由分组: classic / pool. 默认 classic 兼容老导出文件.
     #[serde(default)]
     pub routing_group: String,
+    /// 订阅级定时开关窗口 (能力池订阅用). 默认空兼容老导出文件.
+    #[serde(default)]
+    pub enable_windows: Vec<EnableWindow>,
     /// Whether the source row had a non-empty api_key. Local models (Ollama etc.) legitimately
     /// have none, so an empty key alone must not be treated as "missing".
     #[serde(default)]
@@ -256,6 +259,7 @@ pub fn subscription_to_export(row: &SubscriptionRow) -> (ExportSubscription, Ext
         provider_icon,
         is_user_defined,
         routing_group,
+        enable_windows,
     } = row;
 
     let mut plain_headers = BTreeMap::new();
@@ -297,6 +301,7 @@ pub fn subscription_to_export(row: &SubscriptionRow) -> (ExportSubscription, Ext
         provider_icon: provider_icon.clone(),
         is_user_defined: *is_user_defined,
         routing_group: routing_group.clone(),
+        enable_windows: enable_windows.clone(),
         has_api_key,
         redacted_headers: secret_headers.keys().cloned().collect(),
         secret_refs: None,
@@ -349,6 +354,7 @@ pub fn export_to_row(
         provider_icon: sub.provider_icon.clone(),
         is_user_defined: sub.is_user_defined,
         routing_group: sub.routing_group.clone(),
+        enable_windows: sub.enable_windows.clone(),
     }
 }
 

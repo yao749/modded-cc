@@ -18,7 +18,7 @@ use crate::subscription::model::{
     SubscriptionRow, SubscriptionRuntime,
 };
 use crate::subscription::quota::{QuotaBucket, QuotaPeriod, QuotaUsage, TokenQuotas, ALL_PERIODS};
-use crate::subscription::schedule::SlotSchedules;
+use crate::subscription::schedule::{EnableWindow, SlotSchedules};
 
 /// 启动时从 DB 加载全部订阅，并初始化运行时状态。
 ///
@@ -39,7 +39,7 @@ pub async fn load_runtime(
                 model_discovery, balance_discovery,
                 provider_display_name, provider_icon, is_user_defined,
                 auth_type, oauth_metadata, slot_efforts, token_quotas, endpoint_protocol,
-                url_params, systemone_wire, slot_schedules, routing_group
+                url_params, systemone_wire, slot_schedules, routing_group, enable_windows
          FROM subscriptions",
     )
     .fetch_all(pool)
@@ -161,6 +161,16 @@ fn row_to_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<SubscriptionRow> {
             SlotSchedules::default()
         }
     };
+    // enable_windows 列在 migration 029 加, DEFAULT '[]' (= 没有定时开关). 同 slot_schedules
+    // 走宽容降级: 解析失败只是丢定时开关, 不该让整条订阅加载失败。
+    let enable_windows_json: String = row.try_get("enable_windows")?;
+    let enable_windows: Vec<EnableWindow> = match serde_json::from_str::<Vec<EnableWindow>>(&enable_windows_json) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, raw = %enable_windows_json, "enable_windows JSON 解析失败, 该订阅视为没有定时开关");
+            Vec::new()
+        }
+    };
     Ok(SubscriptionRow {
         id,
         provider_id: row.try_get("provider_id")?,
@@ -214,6 +224,7 @@ fn row_to_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<SubscriptionRow> {
             v != 0
         },
         routing_group: row.try_get("routing_group")?,
+        enable_windows,
     })
 }
 
@@ -241,6 +252,7 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
     let slot_efforts_json = serde_json::to_string(&sub.slot_efforts)?;
     let token_quotas_json = serde_json::to_string(&sub.token_quotas)?;
     let slot_schedules_json = serde_json::to_string(&sub.slot_schedules)?;
+    let enable_windows_json = serde_json::to_string(&sub.enable_windows)?;
     let url_params_json = serde_json::to_string(&sub.url_params)?;
     sqlx::query(
         "INSERT INTO subscriptions (id, provider_id, endpoint_id, display_name, api_key,
@@ -252,13 +264,13 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
             model_discovery, balance_discovery,
             provider_display_name, provider_icon, is_user_defined,
             auth_type, oauth_metadata, slot_efforts, token_quotas, endpoint_protocol,
-            url_params, systemone_wire, slot_schedules, routing_group)
+            url_params, systemone_wire, slot_schedules, routing_group, enable_windows)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, ?, ?,
                  ?, ?, ?, ?, ?,
                  ?, ?, ?,
                  ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?)",
+                 ?, ?, ?, ?, ?)",
     )
     .bind(sub.id.to_string())
     .bind(&sub.provider_id)
@@ -297,6 +309,7 @@ pub async fn insert_on(conn: &mut SqliteConnection, sub: &SubscriptionRow) -> Ap
     .bind(sub.systemone_wire.as_str())
     .bind(slot_schedules_json)
     .bind(&sub.routing_group)
+    .bind(enable_windows_json)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -341,6 +354,7 @@ pub async fn update_row(pool: &SqlitePool, sub: &SubscriptionRow) -> AppResult<(
     let slot_efforts_json = serde_json::to_string(&sub.slot_efforts)?;
     let token_quotas_json = serde_json::to_string(&sub.token_quotas)?;
     let slot_schedules_json = serde_json::to_string(&sub.slot_schedules)?;
+    let enable_windows_json = serde_json::to_string(&sub.enable_windows)?;
     let url_params_json = serde_json::to_string(&sub.url_params)?;
     sqlx::query(
         "UPDATE subscriptions SET
@@ -356,7 +370,8 @@ pub async fn update_row(pool: &SqlitePool, sub: &SubscriptionRow) -> AppResult<(
             provider_display_name = ?, provider_icon = ?, is_user_defined = ?,
             url_params = ?, systemone_wire = ?,
             slot_schedules = ?,
-            routing_group = ?
+            routing_group = ?,
+            enable_windows = ?
          WHERE id = ?",
     )
     .bind(&sub.endpoint_id)
@@ -389,6 +404,7 @@ pub async fn update_row(pool: &SqlitePool, sub: &SubscriptionRow) -> AppResult<(
     .bind(sub.systemone_wire.as_str())
     .bind(slot_schedules_json)
     .bind(&sub.routing_group)
+    .bind(enable_windows_json)
     .bind(sub.id.to_string())
     .execute(pool)
     .await?;

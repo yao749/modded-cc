@@ -10,7 +10,7 @@ use crate::provider::model::{
 };
 use crate::provider::Provider;
 use crate::subscription::quota::{QuotaPeriod, QuotaUsage, TokenQuotas};
-use crate::subscription::schedule::{effective_model, SlotSchedules, WallClock};
+use crate::subscription::schedule::{effective_model, within_enable_windows, EnableWindow, SlotSchedules, WallClock};
 use crate::virtual_model::model::SubscriptionSlot;
 
 /// OAuth 凭据元数据, 持久化为 `subscriptions.oauth_metadata` 列 (JSON 字符串).
@@ -291,6 +291,8 @@ pub struct SubscriptionRow {
     pub is_user_defined: bool,
     /// 路由分组: classic = 经典四槽组, pool = 能力池组. 两个组的订阅互不连通 (migration 027).
     pub routing_group: String,
+    /// 订阅级定时开关窗口 (migration 029, 仅能力池订阅用). 空 = 无定时限制.
+    pub enable_windows: Vec<EnableWindow>,
 }
 
 impl SubscriptionRow {
@@ -298,6 +300,15 @@ impl SubscriptionRow {
     /// rule, else the slot default. `None` when the result is blank.
     pub fn slot_model_at(&self, slot: SubscriptionSlot, at: WallClock) -> Option<&str> {
         effective_model(self.model_slots.get(slot), self.slot_schedules.get(slot), at)
+    }
+
+    /// 定时开关: 仅能力池订阅 (`routing_group == "pool"`) 且配了窗口时生效 (窗口外 = 停用);
+    /// 经典订阅与未配窗口的订阅恒 true。定时的依据是本地挂钟 [`WallClock`]。
+    pub fn enable_scheduled(&self, at: WallClock) -> bool {
+        if self.routing_group != "pool" {
+            return true;
+        }
+        within_enable_windows(&self.enable_windows, at)
     }
 
     /// Forced reasoning effort for `slot` at `at`: the winning time rule's own effort if it has
@@ -551,6 +562,10 @@ pub struct SubscriptionDto {
     /// 给只想显示「N 个可调度」的客户端 (TUI) 用, 免得它们各自重算这四个条件。
     #[serde(default)]
     pub is_dispatchable: bool,
+    /// 更精确的调度可用性: 在 `is_dispatchable` 之上叠加「订阅级定时开关」检查。
+    /// pool 订阅在 enable_windows 之外时, 这个字段为 false 而 `is_dispatchable` 仍可能为 true。
+    #[serde(default)]
+    pub is_effectively_dispatchable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_until: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -599,6 +614,9 @@ pub struct SubscriptionDto {
     /// 路由分组: classic / pool. 默认 classic 兼容老客户端 (migration 027).
     #[serde(default)]
     pub routing_group: String,
+    /// 订阅级定时开关窗口 (migration 029, 仅能力池订阅用). 空 = 无定时限制.
+    #[serde(default)]
+    pub enable_windows: Vec<EnableWindow>,
     /// api_key 是否非空。DTO 不带 Key 本身; 前端据此提示「待填写 API Key」(导入时缺 Key 的订阅)。
     #[serde(default)]
     pub has_api_key: bool,
@@ -683,6 +701,7 @@ impl SubscriptionRow {
             provider_icon: String::new(),
             is_user_defined: false,
             routing_group: "classic".into(),
+            enable_windows: Vec::new(),
         }
     }
 }
@@ -729,6 +748,9 @@ impl SubscriptionDto {
             enabled: rt.row.enabled,
             state: rt.state,
             is_dispatchable: rt.is_dispatchable(Utc::now()),
+            is_effectively_dispatchable: {
+                rt.is_dispatchable(Utc::now()) && rt.row.enable_scheduled(crate::subscription::schedule::WallClock::now())
+            },
             cooldown_until: rt.cooldown_until.map(|t| t.timestamp_millis()),
             last_error_message: rt.last_error_message.clone(),
             last_error_code: rt
@@ -769,6 +791,7 @@ impl SubscriptionDto {
             provider_icon: rt.row.provider_icon.clone(),
             is_user_defined: rt.row.is_user_defined,
             routing_group: rt.row.routing_group.clone(),
+            enable_windows: rt.row.enable_windows.clone(),
             has_api_key: !rt.row.api_key.is_empty(),
             auth_type: rt.row.auth_type,
             oauth_account: oauth_account_dto(&rt.row),

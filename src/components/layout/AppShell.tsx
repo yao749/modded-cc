@@ -1,11 +1,11 @@
 import { Outlet, matchPath, useLocation } from "react-router";
 import { Sidebar } from "./Sidebar";
-import { ModeBanner } from "./ModeBanner";
 import { WindowChrome } from "./WindowChrome";
 import { runtime } from "@/runtime";
 import { ReleaseNotesProvider } from "@/components/release-notes/ReleaseNotesController";
 import { useTheme } from "@/hooks/useTheme";
 import { isPlainBased } from "@/themes";
+import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
 
 /**
  * 走「通栏布局」的页面: main 不留 padding, 自身收成 flex column + overflow hidden,
@@ -37,10 +37,10 @@ export function AppShell() {
         {runtime.kind === "desktop" && <WindowChrome />}
         <Sidebar />
         <main className={flush ? "main flush" : "main"}>
-          <ModeBanner />
           <Outlet />
         </main>
       </div>
+      <OnboardingHost />
     </ReleaseNotesProvider>
   );
 }

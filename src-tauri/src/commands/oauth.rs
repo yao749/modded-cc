@@ -168,6 +168,7 @@ pub async fn create_chatgpt_oauth_subscription(
         provider_icon: provider.icon.clone().unwrap_or_default(),
         is_user_defined: false,
         routing_group: input.routing_group.clone().unwrap_or_else(|| "classic".into()),
+        enable_windows: Vec::new(),
     };
 
     store::insert(&state.db, &row).await?;
@@ -447,6 +448,7 @@ pub async fn create_kiro_subscription(
         provider_icon: provider.icon.clone().unwrap_or_default(),
         is_user_defined: false,
         routing_group: input.routing_group.clone().unwrap_or_else(|| "classic".into()),
+        enable_windows: Vec::new(),
     };
 
     store::insert(&state.db, &row).await?;

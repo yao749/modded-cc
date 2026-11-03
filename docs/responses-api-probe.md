@@ -5,8 +5,6 @@
 > 测试模型: gpt-5.5 (中转用 `<vendor>/<model>` 前缀命名, 实际请求时被 strip)
 > 用途: cc-router 新增「OpenAI Responses API provider」(自定义 + 官方内置) 前置实测
 
-> **魔改声明**：本文档所记述的 cc-router 为 **cc** 的二次开发分支（魔改 / fork），原作者 **cc**（[@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者。
-
 ---
 
 ## 1. 中转层 vs 官方 OpenAI 行为差异（重要）

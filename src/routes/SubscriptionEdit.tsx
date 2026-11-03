@@ -26,7 +26,9 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProviderIcon } from "@/components/ProviderIcon";
-import { ModelSlotPicker } from "@/components/ModelSlotPicker";
+import { ModelSlotPicker, ModelListModeBar, useModelListMode } from "@/components/ModelSlotPicker";
+import { SlotScheduleEditor } from "@/components/schedule/SlotScheduleEditor";
+import { EnableWindowsEditor } from "@/components/schedule/EnableWindowsEditor";
 import { ModelPoolPicker, poolTestKey } from "@/components/ModelPoolPicker";
 import { SubscriptionBalancePanel } from "@/components/SubscriptionBalanceCard";
 import { SubscriptionQuotaCard } from "@/components/SubscriptionQuotaCard";
@@ -44,6 +46,8 @@ import {
 import { useT } from "@/i18n";
 import type {
   AuthHeaderFormat,
+  EnableWindow,
+  FourSlot,
   ModelInfo,
   ModelPoolEntry,
   PoolTestItem,
@@ -51,6 +55,7 @@ import type {
   QuotaPeriod,
   RefreshModelListResult,
   SlotEfforts,
+  SlotSchedules,
   SubscriptionPatch,
   TestConnectionResult,
   TokenQuotas,
@@ -127,6 +132,8 @@ export function SubscriptionEditPage() {
   const [displayName, setDisplayName] = useState<string>("");
   const [slots, setSlots] = useState<ModelSlots>(uniformSlots(""));
   const [slotEfforts, setSlotEfforts] = useState<SlotEfforts>({});
+  const [schedules, setSchedules] = useState<SlotSchedules>({});
+  const [enableWindows, setEnableWindows] = useState<EnableWindow[]>([]);
   const [quotaInputs, setQuotaInputs] = useState<Record<QuotaPeriod, string>>({
     daily: "",
     weekly: "",
@@ -149,6 +156,14 @@ export function SubscriptionEditPage() {
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  // 分时段编辑用的自动/手动模式 (与 ModelListModeBar 联动); 模型 id 列表传给 SlotScheduleEditor
+  const [modelListMode, setModelListMode] = useModelListMode(models, modelError);
+  const modelIds = useMemo(() => (models ?? []).map((m) => m.id), [models]);
+  // 虚拟模型页「编辑槽位」链接带 ?slot= 定位到对应槽位标签
+  const initialSlot: FourSlot | undefined = (() => {
+    const s = searchParams.get("slot");
+    return s === "fable" || s === "opus" || s === "sonnet" || s === "haiku" ? s : undefined;
+  })();
 
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
   const [keyDialog, setKeyDialog] = useState(false);
@@ -180,6 +195,8 @@ export function SubscriptionEditPage() {
       setDisplayName(subQuery.data.display_name);
       setSlots(subQuery.data.model_slots);
       setSlotEfforts(subQuery.data.slot_efforts ?? {});
+      setSchedules(subQuery.data.slot_schedules ?? {});
+      setEnableWindows(subQuery.data.enable_windows ?? []);
       const q = subQuery.data.token_quotas ?? {};
       setQuotaInputs({
         daily: formatTokenShorthand(q.daily),
@@ -308,6 +325,10 @@ export function SubscriptionEditPage() {
     }
     try {
       await updateMut.mutateAsync({ id, patch });
+      // 分时段规则走独立命令 (后端 update_slot_schedules), 与四槽字段分开落库; systemone 无时段概念
+      if (!poolMode && !isSystemOne) {
+        await api.updateSlotSchedules(id, schedules);
+      }
       // 池模式: 同一次保存顺带落能力链, 避免用户再跳去总览配一遍
       if (poolMode) {
         setPoolSaving(true);
@@ -316,6 +337,8 @@ export function SubscriptionEditPage() {
             id,
             poolEntries.map(({ subscription_id: _sub, ...rest }) => rest),
           );
+          // 定时开关走独立命令 (后端 update_enable_windows), 仅能力池订阅有
+          await api.updateEnableWindows(id, enableWindows);
           await queryClient.invalidateQueries({ queryKey: ["model-pools"] });
         } finally {
           setPoolSaving(false);
@@ -707,28 +730,69 @@ export function SubscriptionEditPage() {
             {!poolMode && (
             <Card>
               <CardHeader>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%" }}>
+                <div className="slot-card-head" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, width: "100%" }}>
                   <CardTitle>{t("subscriptionEdit.modelSlotsTitle")}</CardTitle>
+                  {!isSystemOne && (
+                    <ModelListModeBar
+                      label={t("modelSlot.label")}
+                      mode={modelListMode}
+                      onChoose={setModelListMode}
+                      onRefresh={refreshModels}
+                      loading={fetchingModels}
+                      systemone={false}
+                    />
+                  )}
                 </div>
               </CardHeader>
               <CardContent>
-                <ModelSlotPicker
-                  value={slots}
-                  onChange={setSlots}
-                  efforts={slotEfforts}
-                  onEffortsChange={setSlotEfforts}
-                  effortDisabled={sub.auth_type === "kiro_oauth"}
-                  effortDisabledReason={t("slotEffort.unsupportedKiro")}
-                  models={models}
-                  loading={fetchingModels}
-                  error={modelError}
-                  onRefresh={refreshModels}
-                  exampleModels={
-                    provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
-                  }
-                  systemone={isSystemOne}
-                  jevRequired={isSystemOne && sub.is_user_defined}
-                />
+                {isSystemOne ? (
+                  <ModelSlotPicker
+                    value={slots}
+                    onChange={setSlots}
+                    efforts={slotEfforts}
+                    onEffortsChange={setSlotEfforts}
+                    effortDisabled={sub.auth_type === "kiro_oauth"}
+                    effortDisabledReason={t("slotEffort.unsupportedKiro")}
+                    models={models}
+                    loading={fetchingModels}
+                    error={modelError}
+                    onRefresh={refreshModels}
+                    exampleModels={
+                      provider?.endpoints.find((e) => e.id === endpointId)?.example_models ?? sub.model_discovery.example_models
+                    }
+                    systemone={isSystemOne}
+                    jevRequired={isSystemOne && sub.is_user_defined}
+                  />
+                ) : (
+                  <>
+                    <SlotScheduleEditor
+                      slots={slots}
+                      onSlotsChange={setSlots}
+                      efforts={slotEfforts}
+                      onEffortsChange={setSlotEfforts}
+                      effortDisabled={sub.auth_type === "kiro_oauth"}
+                      effortDisabledReason={t("slotEffort.unsupportedKiro")}
+                      schedules={schedules}
+                      onSchedulesChange={setSchedules}
+                      models={modelIds}
+                      manual={modelListMode === "manual"}
+                      initialSlot={initialSlot}
+                    />
+                    <div style={{ marginTop: 24 }}>
+                      <ModelSlotPicker
+                        value={slots}
+                        onChange={setSlots}
+                        efforts={slotEfforts}
+                        onEffortsChange={setSlotEfforts}
+                        effortDisabled={sub.auth_type === "kiro_oauth"}
+                        effortDisabledReason={t("slotEffort.unsupportedKiro")}
+                        models={models}
+                        hideMainSlots
+                        mode={modelListMode}
+                      />
+                    </div>
+                  </>
+                )}
                 {sub.model_cache && !isSystemOne && (
                   <div className="mt-3 text-xs text-muted-foreground">
                     {t("subscriptionEdit.modelCacheUpdated")}{new Date(sub.model_cache.fetched_at).toLocaleString()}
@@ -764,6 +828,20 @@ export function SubscriptionEditPage() {
                       run: (cap) => void runPoolTests([cap]),
                     }}
                   />
+                </CardContent>
+              </Card>
+            )}
+
+            {poolMode && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>{t("enableWindows.title")}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-sm text-muted-foreground" style={{ marginBottom: 12 }}>
+                    {t("enableWindows.desc")}
+                  </p>
+                  <EnableWindowsEditor windows={enableWindows} onChange={setEnableWindows} />
                 </CardContent>
               </Card>
             )}

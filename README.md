@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
-  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+">
+  <img src="https://img.shields.io/badge/Rust-1.94+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.94+">
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5">
   <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS">
@@ -26,7 +26,13 @@
   <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 官方网站ccrouter.app</a>
 </p>
 
-> **关于本分支（魔改声明）**：本项目是 **cc-router** 的二次开发分支（魔改 / fork）。**原作者为 cc**（项目托管于 [@//cc/](https://github.com/finch-xu/cc-router)）。本人仅为二次开发者，并非原作者，也不代表原作者立场；本分支的全部改动由维护者负责，原项目的版权与许可仍归属原作者 cc。下面文档也是原作者的
+> 🔧 **魔改分支**：本仓库是 [cc-router](https://github.com/finch-xu/cc-router) 的二次开发（魔改）版，在原版全部功能之上新增：
+>
+> - **能力分类模型池** —— 经典四槽之外新增 5 个能力虚拟模型（vision / llm / multimodal / speech / embedding），订阅支持**顺序/轮询/会话亲和**三按钮调度（轮询模式每个订阅只试 chain 首模型即换订阅，丝滑均匀），**置顶/置底/打乱/反转**六按钮重排，失败自动降序到队尾
+> - **失败即切换订阅** —— 所有错误都切换（401/403/429/5xx/超时），失败模型沉尾落库，Retry-After 冷却 + 全局重试上限防止无限重试
+> - **池订阅定时开关** —— 按星期 + 时段配置开启窗口，窗口外订阅自动停用
+>
+> 详见 [魔改功能](#魔改功能)。
 
 本地运行的大模型聚合网关，GUI桌面端app，零代码部署，把零散的 `Token Plan`、`Coding Plan`、大模型 API 额度聚合成一个虚拟 Plan，一键接入 Claude Code、Claude Desktop App、OpenClaw、OpenCode、Codex 等工具 —— 省钱！省 Token！完全本地运行！
 
@@ -342,6 +348,22 @@ curl http://127.0.0.1:23456/v1/systemone \
   </tr>
 </table>
 
+### 分时段虚拟模型
+
+客户端继续使用同一个虚拟模型，cc-router 按星期和时段自动切换各订阅槽位对应的真实模型。在桌面 app 的订阅编辑页中，可以为 `fable`、`opus`、`sonnet`、`haiku` 分别配置时段规则。
+
+- **按时间安排模型** —— 为规则选择星期、起止时间和真实模型，右侧日历直观展示一周的安排；规则也可以复制到其他槽位。
+- **默认模型兜底** —— 未命中时段规则时使用槽位的默认模型；如果未配置默认模型，该订阅在未覆盖的时间不参与这个槽位的调度。
+- **预览调度关系** —— 在虚拟模型页选择星期并拖动时间轴，查看对应时刻的模型映射和调度关系；点击「现在」回到当前时刻。时间以运行 cc-router 的电脑为准。
+
+**模型槽位：设置时段规则与日历预览**
+
+![cc-router 模型槽位的分时段规则设置与每周日历预览](assets/screenshots/zh/slot-schedules.png)
+
+**虚拟模型：查看各订阅的模型与生效时段**
+
+![cc-router 虚拟模型的分时段路由、订阅与生效时段预览](assets/screenshots/zh/virtual-model-schedules.png)
+
 ## 常见问题&使用场景
 
 <details>
@@ -400,7 +422,7 @@ CC 请求来了就按映射转发，不用再频繁改 `~/.claude/settings.json`
 - Tailwind 4
 - React 19
 
-依赖：Node.js ≥ 20（推荐 pnpm），Rust ≥ 1.90（建议直接用 rustup 最新 stable），Xcode CLT（macOS）。
+依赖：Node.js ≥ 22.22（推荐 pnpm），Rust ≥ 1.94（建议直接用 rustup 最新 stable），Xcode CLT（macOS）。
 
 ```bash
 pnpm install
@@ -432,7 +454,7 @@ Tauri 在 Windows 上打包依赖 MSVC，CI 用的也是 `x86_64-pc-windows-msvc
 
 ```powershell
 rustup show          # active toolchain 应带 -msvc 后缀
-rustc --version      # 应 ≥ 1.90
+rustc --version      # 应 ≥ 1.94
 ```
 
 **2. 需要 Visual Studio Build Tools**
@@ -464,6 +486,19 @@ Get-NetTCPConnection -LocalPort 1420 -State Listen |
 ## 添加新provider
 
 如果你使用`Claude Code`，我提供了一个`SKILL`，可以执行`new-provider`并附加provider的官方文档或接口地址等信息，能够自动创建provider的配置。
+
+## 魔改功能
+
+- **能力分类模型池** —— 经典四槽（fable/opus/sonnet/haiku + fallback + jev）之外，新增五个能力分类虚拟模型：`model-vision`（图像/视频生成）、`model-llm`（大语言模型/纯文本）、`model-multimodal`（全模态翻译）、`model-speech`（语音）、`model-embedding`（向量嵌入），走独立的模型池路由。可用普通 API Key 创建「池订阅」，按能力分类维护模型链：同类下多个模型按优先级排序，失败自动降序到队尾并落库，与经典四槽订阅互不连通。订阅顺序管理支持上移/下移/置顶/置底/随机打乱/反转六按钮；调度策略（顺序 / 轮询 / 会话亲和）与经典四槽卡片同款显式三按钮，每个能力虚拟模型独立设置。各模式在池链下的行为差异：
+  - **顺序**：同订阅 chain 逐个尝试，全部耗尽才换下一个订阅（适合信任度高的单一订阅场景）
+  - **轮询**：每个订阅只尝试 chain 首模型，失败立刻换订阅（保证请求均匀打到所有订阅，失败模型沉尾下次再试）
+  - **会话亲和**：钉住的订阅 chain 内逐个尝试，耗尽后按轮询序兜底（同会话尽量走同订阅的备用模型）
+- **失败即切换订阅** —— **所有错误都切换**（包括 401/403 Auth 错误），失败模型自动沉尾落库；Retry-After 冷却（30 秒 ~ 30 分钟）与全局重试上限（15 次）防止无限重试；池链耗尽后自动继续试下一个订阅，不会卡死在第一条。
+- **订阅级定时开关**（能力池订阅）—— 按星期 + 时段配置「开启窗口」，窗口之外订阅自动停用，用于错峰使用或只在指定时段启用某家订阅。
+
+## 关于原版
+
+本仓库是 [cc-router](https://github.com/finch-xu/cc-router)（作者 [finch-xu](https://github.com/finch-xu/cc-router)）的二次开发（魔改）分支。除上述魔改外，其余功能均来自原版，MIT 协议与原版保持一致。
 
 ## 证书
 

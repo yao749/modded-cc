@@ -110,7 +110,7 @@ use crate::commands::virtual_models::UpdateVirtualModelInput;
 use crate::settings::model::SettingsPatch;
 use crate::subscription::model::KiroDisguise;
 use crate::subscription::quota::TokenQuotas;
-use crate::subscription::schedule::SlotSchedules;
+use crate::subscription::schedule::{EnableWindow, SlotSchedules};
 
 /// 网页 / TUI 通道上被拒绝的 command 的统一回复。
 const DESKTOP_ONLY: &str = "此操作只能在桌面 app 里执行";
@@ -133,6 +133,7 @@ web_commands! {
     refresh_subscription_balance(id: String) => commands::subscriptions::refresh_subscription_balance(st, args.id).await,
     update_token_quotas(id: String, quotas: TokenQuotas) => commands::subscriptions::update_token_quotas(st, args.id, args.quotas).await,
     update_slot_schedules(id: String, schedules: SlotSchedules) => commands::subscriptions::update_slot_schedules(st, args.id, args.schedules).await,
+    update_enable_windows(id: String, windows: Vec<EnableWindow>) => commands::subscriptions::update_enable_windows(st, args.id, args.windows).await,
     get_host_clock() => commands::subscriptions::get_host_clock().await,
     reset_total_quota_usage(id: String) => commands::subscriptions::reset_total_quota_usage(st, args.id).await,
     test_pool_connection(id: String, capability: String) => commands::subscriptions::test_pool_connection(st, args.id, args.capability).await,

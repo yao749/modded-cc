@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Tauri-2-FFC131?style=flat-square&logo=tauri&logoColor=white" alt="Tauri 2">
-  <img src="https://img.shields.io/badge/Rust-1.90+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.90+">
+  <img src="https://img.shields.io/badge/Rust-1.94+-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.94+">
   <img src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript 5">
   <img src="https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind CSS">
@@ -26,7 +26,13 @@
   <a href="https://ccrouter.app" target="_blank" rel="noopener">🌐 Official Site ccrouter.app</a>
 </p>
 
-> **About this fork**: This project is a fork / modified version of **cc-router**, originally created by **cc** (hosted at [@//cc/](https://github.com/finch-xu/cc-router)). I am only a secondary developer, not the original author, and do not speak for them. All changes in this branch are maintained by me; the original project's copyright and license remain with the original author cc.
+> 🔧 **Modded fork**: this repo is a modified (2nd-gen) fork of [cc-router](https://github.com/finch-xu/cc-router). On top of all upstream features it adds:
+>
+> - **Capability-class model pools** — 5 virtual models (vision / llm / multimodal / speech / embedding) outside the classic four-slot system; each pool VM has a dedicated three-button scheduler (Sequential / Round-robin / Session affinity — Round-robin tries only chain-head model per subscription for silky even distribution) and six-button reorder (up / down / top / bottom / shuffle / reverse); failures auto-demote to chain tail
+> - **Fail-and-switch subscriptions** — **all errors trigger failover** (including 401/403 Auth errors); failed models sink to chain tail and persist to DB; Retry-After cooldown + global retry cap prevent infinite retry loops; exhausted chain automatically moves to next subscription
+> - **Scheduled enable windows** — pool subscriptions can be configured with weekday + time-slot enable windows; subscriptions auto-deactivate outside their windows
+>
+> See [Modded Features](#modded-features).
 
 A locally-running LLM aggregation gateway with a desktop GUI, zero-code setup: bundle your scattered `Token Plan`, `Coding Plan`, and LLM API quotas into a single virtual Plan, and plug it into Claude Code, Claude Desktop App, OpenClaw, OpenCode, Codex and more —— save money! save tokens! 100% local!
 
@@ -342,6 +348,22 @@ Settings → Web UI → once enabled, open `http://127.0.0.1:23456/ui/` in a bro
   </tr>
 </table>
 
+### Time-based virtual models
+
+Keep the same virtual model in your client while cc-router switches each subscription slot's real model by day of the week and time of day. In the desktop app's subscription editor, you can configure schedules independently for `fable`, `opus`, `sonnet`, and `haiku`.
+
+- **Schedule your models** — Choose the days, start and end times, and real model for each rule. The calendar previews the weekly schedule, and rules can be copied to other slots.
+- **Use a default model** — When no time rule matches, the slot uses its default model. If no default is configured, that subscription is excluded from the slot's routing during uncovered times.
+- **Preview routing** — On the virtual models page, choose a day and drag the timeline to inspect model mappings and routing at that time. Click “Now” to return to the current time. Schedules use the clock of the computer running cc-router.
+
+**Model slots: time rules and weekly calendar preview**
+
+![cc-router model slot time rules and weekly calendar preview](assets/screenshots/en/slot-schedules.png)
+
+**Virtual models: subscriptions, model mappings, and active hours**
+
+![cc-router time-based virtual model routing and active hours preview](assets/screenshots/en/virtual-model-schedules.png)
+
 ## FAQ & Use Cases
 
 <details>
@@ -400,7 +422,7 @@ Example: subscription A = GLM-5 / MiniMax-2.7 / DeepSeek-Flash; subscription B =
 - Tailwind 4
 - React 19
 
-Prerequisites: Node.js ≥ 20 (pnpm recommended), Rust ≥ 1.90 (the latest stable via rustup is recommended), Xcode Command Line Tools (macOS).
+Prerequisites: Node.js ≥ 22.22 (pnpm recommended), Rust ≥ 1.94 (the latest stable via rustup is recommended), Xcode Command Line Tools (macOS).
 
 ```bash
 pnpm install
@@ -432,7 +454,7 @@ Tauri's Windows bundling depends on MSVC, and CI builds with `x86_64-pc-windows-
 
 ```powershell
 rustup show          # the active toolchain should end with -msvc
-rustc --version      # should be >= 1.90
+rustc --version      # should be >= 1.94
 ```
 
 **2. Visual Studio Build Tools are required**
@@ -464,6 +486,19 @@ Get-NetTCPConnection -LocalPort 1420 -State Listen |
 ## Adding a new provider
 
 If you use **Claude Code**, this repo ships a `SKILL` named `new-provider`. Run it with the official docs URL or endpoint info of the target provider, and it will scaffold the YAML and wire up the related changes for you.
+
+## Modded Features
+
+- **Capability-class model pools** — besides the classic four slots (fable/opus/sonnet/haiku + fallback + jev), five new capability virtual models are added: `model-vision` (image/video generation), `model-llm` (LLM / text-only), `model-multimodal` (all-modality translation), `model-speech` (speech), `model-embedding` (embeddings), routed through an independent model-pool path. You can create a "pool subscription" with a plain API key and maintain a model chain per capability: multiple models per category are ordered by priority, and a failure automatically demotes the failed model to the tail (persisted), fully isolated from the classic four-slot subscriptions. Subscription ordering is managed with six buttons per row (up / down / move to top / move to bottom / shuffle / reverse). Each capability virtual model has its own explicit three-button scheduler selector (Sequential / Round-robin / Session affinity), matching the UX of the classic slot cards. Behavior per mode under pool chains:
+  - **Sequential**: same subscription's chain is tried one by one; only moves to the next subscription after the entire chain is exhausted (best for a single trusted provider)
+  - **Round-robin**: each subscription only tries the first model of its chain — failure immediately switches to the next subscription, ensuring requests spread evenly across all providers; failed model sinks to tail for next time
+  - **Session affinity**: pinned subscription's chain is tried one by one; falls back to round-robin order after exhaustion (keeps the session on the pinned subscription's backups first)
+- **Fail and switch subscriptions** — **all errors trigger failover** (including 401/403 Auth errors); failed models auto-sink to chain tail and persist to DB; upstream Retry-After cooldown (30s ~ 30min) plus a global retry cap (15) prevent infinite retries; exhausted pool chain automatically continues to next subscription.
+- **Scheduled enable windows** (pool subscriptions) — configure "enable windows" by weekday + time range; outside them the subscription is automatically disabled, useful for off-peak usage or enabling a given provider only during specific hours.
+
+## About the upstream
+
+This repo is a modified (2nd-gen) fork of [cc-router](https://github.com/finch-xu/cc-router) (author [finch-xu](https://github.com/finch-xu/cc-router)). Everything else comes from the upstream, under the same MIT license.
 
 ## License
 
