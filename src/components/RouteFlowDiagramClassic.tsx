@@ -1,6 +1,8 @@
 import { useMemo, type CSSProperties } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/api/tauri";
 import { stateLabel } from "@/components/StatusBadge";
-import { useProxyStatus } from "@/hooks/useSettings";
+import { useProxyStatus, useSettings } from "@/hooks/useSettings";
 import { useVirtualModels } from "@/hooks/useVirtualModels";
 import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useProviders } from "@/hooks/useProviders";
@@ -143,11 +145,20 @@ interface UpstreamNode {
 export function RouteFlowDiagramClassic() {
   const { t } = useT();
   const proxy = useProxyStatus();
+  const settings = useSettings();
   const vms = useVirtualModels();
   const subs = useSubscriptions();
   const providers = useProviders();
   const activity = useClientActivity();
   const summary = summarizeActivity(activity.data);
+
+  // 魔改: 能力池订阅的来源在 model_pool 表, pool 模式下四槽 vm 为空, 收集池订阅来补足路由图.
+  const poolMode = (settings.data?.routing_mode ?? "slots") === "pool";
+  const pools = useQuery({
+    queryKey: ["model-pools"] as const,
+    queryFn: () => api.listModelPools(),
+    enabled: poolMode,
+  });
 
   const subsMap = useMemo(() => {
     const m = new Map<string, SubscriptionDto>();
@@ -163,15 +174,28 @@ export function RouteFlowDiagramClassic() {
     [vms.data],
   );
 
+  const poolSubIds = useMemo(
+    () => new Set((pools.data ?? []).map((e) => e.subscription_id)),
+    [pools.data],
+  );
+  const poolCapCount = useMemo(
+    () => new Set((pools.data ?? []).map((e) => e.capability)).size,
+    [pools.data],
+  );
+
   const upstreams = useMemo<UpstreamNode[]>(
-    () => collectUpstreams(orderedVms, subsMap, providers.data, t),
-    [orderedVms, subsMap, providers.data, t],
+    () => collectUpstreams(orderedVms, subsMap, providers.data, t, poolSubIds),
+    [orderedVms, subsMap, providers.data, t, poolSubIds],
   );
 
   const running = proxy.data?.running ?? false;
   const { slots: upSlots, height: canvasH } = layoutUpstreams(upstreams.length);
   const hubCy = canvasH / 2;
   const slotCount = orderedVms.filter((v) => v.name !== "model-fallback" && v.name !== "model-jev").length;
+  const summaryKey = poolMode ? "liveRouting.summaryPool" : "liveRouting.summary";
+  const summaryParams: Record<string, string | number> = poolMode
+    ? { pools: poolCapCount, vendors: upstreams.length }
+    : { slots: slotCount, vendors: upstreams.length };
 
   return (
     <div className="lrc-rf-wrap" style={{ "--rf-h": `${canvasH}px` } as CSSProperties}>
@@ -180,7 +204,7 @@ export function RouteFlowDiagramClassic() {
         <div className="lrc-rf-labels">
           <span className="lrc-rf-label">{t("liveRouting.clients")}</span>
           <span className="lrc-rf-count">
-            {t("liveRouting.summary", { slots: slotCount, vendors: upstreams.length })}
+            {t(summaryKey, summaryParams)}
           </span>
           <span className="lrc-rf-label">{t("liveRouting.upstreams")}</span>
         </div>
@@ -321,23 +345,29 @@ function collectUpstreams(
   subsMap: Map<string, SubscriptionDto>,
   providers: { id: string; display_name: string; icon?: string }[] | undefined,
   t: TFunction,
+  poolSubIds: ReadonlySet<string> = new Set(),
 ): UpstreamNode[] {
   const byProvider = new Map<string, SubscriptionDto[]>();
-  for (const vm of vms) {
-    for (const sid of vm.subscription_ids) {
-      const sub = subsMap.get(sid);
-      if (!sub) continue;
-      const groupKey = isCustomProviderId(sub.provider_id)
-        ? `${sub.provider_id}:${sub.id}`
-        : sub.provider_id;
-      const list = byProvider.get(groupKey);
-      if (list) {
-        if (!list.some((s) => s.id === sub.id)) list.push(sub);
-      } else {
-        byProvider.set(groupKey, [sub]);
-      }
+  const seen = new Set<string>();
+  const addSub = (sid: string) => {
+    if (seen.has(sid)) return;
+    const sub = subsMap.get(sid);
+    if (!sub) return;
+    seen.add(sid);
+    const groupKey = isCustomProviderId(sub.provider_id)
+      ? `${sub.provider_id}:${sub.id}`
+      : sub.provider_id;
+    const list = byProvider.get(groupKey);
+    if (list) {
+      if (!list.some((s) => s.id === sub.id)) list.push(sub);
+    } else {
+      byProvider.set(groupKey, [sub]);
     }
+  };
+  for (const vm of vms) {
+    for (const sid of vm.subscription_ids) addSub(sid);
   }
+  for (const sid of poolSubIds) addSub(sid);
 
   return Array.from(byProvider.entries()).map(([groupKey, list]) => {
     const info = providers?.find((p) => p.id === list[0].provider_id);

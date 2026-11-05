@@ -1,7 +1,9 @@
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/api/tauri";
 import { stateLabel } from "@/components/StatusBadge";
 import { ProviderLogo } from "@/components/ProviderLogo";
-import { useProxyStatus } from "@/hooks/useSettings";
+import { useProxyStatus, useSettings } from "@/hooks/useSettings";
 import { useVirtualModels } from "@/hooks/useVirtualModels";
 import { useSubscriptions } from "@/hooks/useSubscriptions";
 import { useProviders } from "@/hooks/useProviders";
@@ -152,12 +154,22 @@ function useFitScale(width: number) {
 export function RouteFlowDiagram() {
   const { t } = useT();
   const proxy = useProxyStatus();
+  const settings = useSettings();
   const vms = useVirtualModels();
   const subs = useSubscriptions();
   const providers = useProviders();
   const { ref: fitRef, scale, offset } = useFitScale(CANVAS_W);
   const activity = useClientActivity();
   const summary = summarizeActivity(activity.data);
+
+  // 魔改: 能力池订阅的来源不在四槽 vm.subscription_ids, 而在 model_pool 表.
+  // pool 模式下四槽 vm 为空, 路由图收集池订阅才不至于整张空白.
+  const poolMode = (settings.data?.routing_mode ?? "slots") === "pool";
+  const pools = useQuery({
+    queryKey: ["model-pools"] as const,
+    queryFn: () => api.listModelPools(),
+    enabled: poolMode,
+  });
 
   const subsMap = useMemo(() => {
     const m = new Map<string, SubscriptionDto>();
@@ -173,15 +185,29 @@ export function RouteFlowDiagram() {
     [vms.data],
   );
 
+  // 池模式下收集池订阅 id + 有配置的能力数 (用于汇总文案)
+  const poolSubIds = useMemo(
+    () => new Set((pools.data ?? []).map((e) => e.subscription_id)),
+    [pools.data],
+  );
+  const poolCapCount = useMemo(
+    () => new Set((pools.data ?? []).map((e) => e.capability)).size,
+    [pools.data],
+  );
+
   const upstreams = useMemo<UpstreamNode[]>(
-    () => collectUpstreams(orderedVms, subsMap, providers.data, t),
-    [orderedVms, subsMap, providers.data, t],
+    () => collectUpstreams(orderedVms, subsMap, providers.data, t, poolSubIds),
+    [orderedVms, subsMap, providers.data, t, poolSubIds],
   );
 
   const running = proxy.data?.running ?? false;
   const { cys: upCys, height: canvasH } = layoutUpstreams(upstreams.length);
   const hubCy = midY(canvasH);
   const slotCount = orderedVms.filter((v) => v.name !== "model-fallback" && v.name !== "model-jev").length;
+  const summaryKey = poolMode ? "liveRouting.summaryPool" : "liveRouting.summary";
+  const summaryParams: Record<string, string | number> = poolMode
+    ? { pools: poolCapCount, vendors: upstreams.length }
+    : { slots: slotCount, vendors: upstreams.length };
   const address = (proxy.data?.base_url ?? "").replace(/^https?:\/\//, "");
 
   return (
@@ -190,7 +216,7 @@ export function RouteFlowDiagram() {
         <div className="rf-head-lead">
           <span className="card-title">{t("liveRouting.diagram.title")}</span>
           <span className="card-sub">
-            <HandDigits text={t("liveRouting.summary", { slots: slotCount, vendors: upstreams.length })} />
+            <HandDigits text={t(summaryKey, summaryParams)} />
           </span>
         </div>
         {running ? (
@@ -444,23 +470,29 @@ function collectUpstreams(
   subsMap: Map<string, SubscriptionDto>,
   providers: { id: string; display_name: string; icon?: string }[] | undefined,
   t: TFunction,
+  poolSubIds: ReadonlySet<string> = new Set(),
 ): UpstreamNode[] {
   const byProvider = new Map<string, SubscriptionDto[]>();
-  for (const vm of vms) {
-    for (const sid of vm.subscription_ids) {
-      const sub = subsMap.get(sid);
-      if (!sub) continue;
-      const groupKey = isCustomProviderId(sub.provider_id)
-        ? `${sub.provider_id}:${sub.id}`
-        : sub.provider_id;
-      const list = byProvider.get(groupKey);
-      if (list) {
-        if (!list.some((s) => s.id === sub.id)) list.push(sub);
-      } else {
-        byProvider.set(groupKey, [sub]);
-      }
+  const seen = new Set<string>();
+  const addSub = (sid: string) => {
+    if (seen.has(sid)) return;
+    const sub = subsMap.get(sid);
+    if (!sub) return;
+    seen.add(sid);
+    const groupKey = isCustomProviderId(sub.provider_id)
+      ? `${sub.provider_id}:${sub.id}`
+      : sub.provider_id;
+    const list = byProvider.get(groupKey);
+    if (list) {
+      if (!list.some((s) => s.id === sub.id)) list.push(sub);
+    } else {
+      byProvider.set(groupKey, [sub]);
     }
+  };
+  for (const vm of vms) {
+    for (const sid of vm.subscription_ids) addSub(sid);
   }
+  for (const sid of poolSubIds) addSub(sid);
 
   return Array.from(byProvider.entries()).map(([groupKey, list]) => {
     const info = providers?.find((p) => p.id === list[0].provider_id);
@@ -475,7 +507,14 @@ function collectUpstreams(
       statusLabel: bad ? stateLabel(bad.state, t) : null,
       cooldown,
       subIds: list.map((s) => s.id),
-      tooltip: [name, ...list.map((s) => `· ${s.display_name} — ${stateLabel(s.state, t)}`)].join("\n"),
+      // 池订阅在 tooltip 里标记 (池), 方便区分同一 provider 的四槽订阅 vs 池订阅
+      tooltip: [
+        name,
+        ...list.map((s) => {
+          const tag = poolSubIds.has(s.id) ? " (池)" : "";
+          return `· ${s.display_name}${tag} — ${stateLabel(s.state, t)}`;
+        }),
+      ].join("\n"),
     };
   });
 }

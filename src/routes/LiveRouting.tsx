@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { ArrowRight, Check, Copy, Lock } from "lucide-react";
 import { runtime } from "@/runtime";
+import { api } from "@/api/tauri";
 import { RouteFlowDiagram } from "@/components/RouteFlowDiagram";
 import { ClientAccessSection } from "@/components/ClientAccessSection";
 import { ProviderLogo } from "@/components/ProviderLogo";
@@ -11,13 +13,14 @@ import { useVirtualModels } from "@/hooks/useVirtualModels";
 import { isAnthropicPassthrough } from "@/lib/authTypes";
 import { slotNow, slotNowText } from "@/lib/slotNow";
 import { useHostClock } from "@/hooks/useHostClock";
-import { MODE_LABEL_KEY, VM_ORDER, jevModelOf, vmNameToSlot } from "@/lib/virtualModels";
+import { MODE_LABEL_KEY, ALL_VM_ORDER, jevModelOf, vmNameToSlot } from "@/lib/virtualModels";
 import { useT } from "@/i18n";
-import { API_ROUTES, CLIENT_ALIASES } from "@/lib/liveRouting";
+import { API_ROUTES, CLIENT_ALIASES, groupPoolSubs } from "@/lib/liveRouting";
 import { useTheme } from "@/hooks/useTheme";
 import { isPlainBased } from "@/themes";
 import { ClassicLiveRoutingPage } from "./LiveRoutingClassic";
-import type { SubscriptionDto, VirtualModelDto } from "@/types";
+import { CAPABILITY_VIRTUAL_MODEL } from "@/types";
+import type { CapabilityCategory, ModelPoolEntry, SubscriptionDto, VirtualModelDto } from "@/types";
 
 /** 实时路由页按画风整页切换: 经典 / Win2000 = 通栏布局 (LiveRoutingClassic), 手绘 = 卡片 + 速写路由图 */
 export function LiveRoutingPage() {
@@ -208,19 +211,37 @@ function MappingSection() {
   const vms = useVirtualModels();
   const subs = useSubscriptions();
 
+  const pools = useQuery({
+    queryKey: ["model-pools"] as const,
+    queryFn: () => api.listModelPools(),
+  });
+
   const subsMap = useMemo(() => {
     const m = new Map<string, SubscriptionDto>();
     subs.data?.forEach((s) => m.set(s.id, s));
     return m;
   }, [subs.data]);
 
+  const orderedNames = ALL_VM_ORDER;
   const rows = useMemo<VirtualModelDto[]>(
     () =>
-      VM_ORDER.map((name) => vms.data?.find((v) => v.name === name)).filter(
+      orderedNames.map((name) => vms.data?.find((v) => v.name === name)).filter(
         (v): v is VirtualModelDto => v !== undefined,
       ),
-    [vms.data],
+    [vms.data, orderedNames],
   );
+
+  // 池条目按 capability 分桶 (真实模型列用), 桶内按 priority 升序
+  const poolByCap = useMemo(() => {
+    const m = new Map<CapabilityCategory, ModelPoolEntry[]>();
+    for (const e of pools.data ?? []) {
+      const arr = m.get(e.capability) ?? [];
+      arr.push(e);
+      m.set(e.capability, arr);
+    }
+    for (const arr of m.values()) arr.sort((a, b) => a.priority - b.priority);
+    return m;
+  }, [pools.data]);
 
   return (
     <section className="card alt">
@@ -247,11 +268,16 @@ function MappingSection() {
               {vm.name === "model-fallback" ? (
                 <span className="vm-map-note">{t("liveRouting.map.fallbackLeft")}</span>
               ) : (
-                CLIENT_ALIASES[vm.name].map((alias, i) => (
-                  <span className={i === 0 ? "vm-chip primary" : "vm-chip"} key={alias}>
-                    {alias}
-                  </span>
-                ))
+                <>
+                  {capabilityOf(vm.name) && (
+                    <span className="vm-chip pool">{t("liveRouting.map.poolTag")}</span>
+                  )}
+                  {CLIENT_ALIASES[vm.name].map((alias, i) => (
+                    <span className={i === 0 ? "vm-chip primary" : "vm-chip"} key={alias}>
+                      {alias}
+                    </span>
+                  ))}
+                </>
               )}
             </div>
           ))}
@@ -285,12 +311,35 @@ function MappingSection() {
           </div>
           {rows.map((vm) => {
             const slot = vmNameToSlot(vm.name);
+            const cap = capabilityOf(vm.name);
+            const poolEntries = cap ? (poolByCap.get(cap) ?? []) : [];
             return (
               <div
                 className={vm.name === "model-fallback" ? "vm-map-row fallback" : "vm-map-row"}
                 key={vm.name}
               >
-                {vm.subscription_ids.length === 0 ? (
+                {cap ? (
+                  // 池能力行: 真实模型 = model_pool 里该能力的模型链 (priority 升序)
+                  poolEntries.length === 0 ? (
+                    <span className="vm-map-note" style={{ color: "var(--ink-4)" }}>
+                      {t("routeFlow.notBound")}
+                    </span>
+                  ) : (
+                    <>
+                      {groupPoolSubs(poolEntries, subsMap).map((g) => (
+                        <span
+                          className={`vm-real pool-icon${g.healthy ? "" : " err"}${g.enabled ? "" : " off"}`}
+                          key={g.sid}
+                          data-models={g.models.join(" · ")}
+                          title={g.sub?.display_name ?? g.sid}
+                        >
+                          <ProviderLogo iconId={g.sub?.provider_icon} size={15} iconSize={10} />
+                        </span>
+                      ))}
+                      <span className="vm-mode">{t(MODE_LABEL_KEY[vm.mode])}</span>
+                    </>
+                  )
+                ) : vm.subscription_ids.length === 0 ? (
                   <span className="vm-map-note" style={{ color: "var(--ink-4)" }}>
                     {t("routeFlow.notBound")}
                   </span>
@@ -358,5 +407,14 @@ function ArrowColumn({ rows }: { rows: VirtualModelDto[] }) {
         </svg>
       ))}
     </div>
+  );
+}
+
+/** 池能力 VM 名 → capability; 四槽 / fallback / jev 返回 null。 */
+function capabilityOf(name: string): CapabilityCategory | null {
+  return (
+    (Object.keys(CAPABILITY_VIRTUAL_MODEL) as CapabilityCategory[]).find(
+      (c) => CAPABILITY_VIRTUAL_MODEL[c] === name,
+    ) ?? null
   );
 }

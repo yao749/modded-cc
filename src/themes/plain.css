@@ -1101,6 +1101,8 @@
   white-space: nowrap;
 }
 .lrc-vm-chip.primary { color: var(--ink); font-weight: 600; }
+/* 池订阅标签: 蓝色系, 区别于四槽默认灰色 + primary */
+.lrc-vm-chip.pool { color: var(--rf-up-flow); border-color: var(--rf-up-flow); background: var(--rf-up-bg); font-weight: 600; }
 .lrc-vm-pill {
   background: var(--surface);
   border: 1px solid var(--line-2);
@@ -1128,6 +1130,35 @@
   overflow: hidden;
 }
 .lrc-vm-real.err { border-color: var(--rf-err-line); }
+/* 池能力行: 同一订阅只显示 provider 图标, hover 弹全部模型名 */
+.lrc-vm-real.pool-icon {
+  padding: 2px;
+  cursor: help;
+  position: relative;
+  flex-shrink: 0;
+  overflow: visible;
+}
+.lrc-vm-real.pool-icon::after {
+  content: attr(data-models);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .12s ease;
+  z-index: 50;
+}
+.lrc-vm-real.pool-icon:hover::after { opacity: 1; }
 .lrc-vm-mode {
   font-size: 9.5px;
   text-transform: uppercase;
